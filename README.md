@@ -10,9 +10,9 @@
   2. [GeoTIFF library](https://github.com/OSGeo/libgeotiff)
   3. [libtiff](https://libtiff.gitlab.io/libtiff/)
   4. Lempel–Ziv–Welch lossless compression
-## References
 <a id="1">[1]</a>
 Welch, T. "A technique for high-performance data compression." Computer 17.6 (1984): 8-19.
+  5. 
 
 # Multilayer FVM solver for flood simulation
 

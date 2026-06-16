@@ -1,53 +1,98 @@
 /*
-.. Display Metadata of the GEOTIFF file (topography_ESA_Copernicus_30m_resolution.tif)
-.. gcc -O2 -o run read_tif.c && ./run topography_ESA_Copernicus_30m_resolution.tif
+.. Convert geotiff file to 2d array of points (mmap() is used to avoid RAM overload)
+.. gcc -O2 -o run geotiff.c && ./run topography_ESA_Copernicus_30m_resolution.tif
 */
 
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <assert.h>
 
 /*
-.. short and long 
-*/ 
+.. One of the limitation of this script is the reliance on POSIX
+*/
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/*
+.. mmap () virtual memory to file
+*/
+struct file {
+  int fd;
+  size_t size;
+  char * data;
+  char * end;
+};
+
+struct file fp = (struct file) {-1, 0, NULL, NULL};
+
+void unmap () {
+  if (fp.fd == -1)
+    return;
+  close (fd);
+  if (fp.data != NULL)
+    munmap (fp.data, fp.size);
+}
+  
+#define error(e) do {                \
+    if (errno)                       \
+      perror (e);                    \
+    else                             \
+      fprintf (stderr, "%s", e);     \
+    unmap ();                        \
+    exit (-1);                       \
+  } while (0)
+
+/*
+.. Map a file to a contiguous virtual memory
+*/
+int map (const char * f) {
+
+  int fd = open (f, O_RDONLY);
+  if (fd == -1)
+    error ("open ()");
+  fp.fd = fd;
+
+  struct stat s;
+  if (fstat (fd, &s) == -1)
+    error ("fstat ()");
+  fp.size = s.st_size;
+
+  char * data = mmap (NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (data == NULL)
+    error ("mmap ()");
+  fp.data = data;
+  fp.end = data + fp.size;
+
+  return 0;
+}
 
 #define nan    UINT32_MAX
 int little_endian = 1;
 
-static uint16_t read_u16 (FILE *fp)
+static uint16_t u16 (char ** m)
 {
-  uint8_t b[2];
-  if (fread (b, 1, 2, fp) < 2)
+  if (fp.end - *m < 2)
     return UINT16_MAX;
-
-  if (little_endian)
-    return b[0] | (b[1] << 8);
-  else
-    return (b[0] << 8) | b[1];
+  uint8_t * b = (uint8_t *) *m;
+  *m += 2;
+  return little_endian ?
+    ((b[1] << 8) | b[0]) :
+    ((b[0] << 8) | b[1]);
 }
 
-static uint32_t read_u32 (FILE *fp)
+static uint32_t u32 (char ** m)
 {
-  uint8_t b[4];
-  if (fread (b, 1, 4, fp) < 4)
+  if (fp.end - *m < 4)
     return nan;
-
-  if (little_endian)
-    return b[0]
-       | (b[1] << 8)
-       | (b[2] << 16)
-       | (b[3] << 24);
-  else
-    return (b[0] << 24)
-       | (b[1] << 16)
-       | (b[2] << 8)
-       | b[3];
+  uint8_t * b = (uint8_t *) *m;
+  *m += 4;
+  return little_endian ?
+    ((b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]) :
+    ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
 }
 
-/*
-.. tiff data types
-*/
 typedef enum {
   BYTE = 1,
   ASCII,
@@ -61,11 +106,8 @@ typedef enum {
   SRATIONAL,
   FLOAT,
   DOUBLE
-} TIFFType;
+} TIFFType;             /* tiff datatype {1, 2, .., 12}*/
 
-/*
-.. tiff tag types
-*/
 typedef enum {
   TIFF_TAG_IMAGE_WIDTH        = 256,   /* SHORT or LONG */
   TIFF_TAG_IMAGE_LENGTH       = 257,   /* SHORT or LONG */
@@ -91,13 +133,13 @@ typedef enum {
   /*
   .. geotiff specific
   */
-  TIFF_TAG_GEO_PIXEL_SCALE    = 33550, /* double [3] */
-  TIFF_TAG_GEO_TIE_POINT      = 33922, /* double [6] */
-  TIFF_TAG_GEO_KEY_DIR        = 34735, /* short [32] */ 
-  TIFF_TAG_GEO_DOUBLE_PARAMS  = 34736, /* double [2] */
-  TIFF_TAG_GEO_ASCII_PARAMS   = 34737, /* ascii [*] */
+  TIFF_TAG_GEO_PIXEL_SCALE    = 33550,         /* DOUBLE */
+  TIFF_TAG_GEO_TIE_POINT      = 33922,         /* DOUBLE */
+  TIFF_TAG_GEO_KEY_DIR        = 34735,         /* DOUBLE */ 
+  TIFF_TAG_GEO_DOUBLE_PARAMS  = 34736,         /* DOUBLE */
+  TIFF_TAG_GEO_ASCII_PARAMS   = 34737,          /* ASCII */
     
-} TIFFTag;
+} TIFFTag;                             /* tiff tag types */
 
 typedef enum {
   TIFF_COMP_NONE      = 1,
@@ -105,11 +147,6 @@ typedef enum {
   TIFF_COMP_PACKBITS  = 32773,
   TIFF_COMP_DEFLATE   = 8
 } TIFFCompression;
-
-struct img {
-  uint16_t tag, type;
-  uint32_t count, value;
-};
 
 struct meta {
   uint32_t h, w,           /* height x width             */
@@ -119,6 +156,16 @@ struct meta {
     bytes_loc;             /* offset of byte counts of tiles */
   uint32_t compression;    /* compression type           */
   /* etc.. */
+};
+
+struct entry {             /* IFD entry */
+  uint16_t tag, type; 
+  uint32_t count, value;
+};
+
+struct ifd {               /* IFD : image file directory */
+  struct entry * entries;
+  int n;
 };
 
 struct meta data;
@@ -213,9 +260,6 @@ int img_details (struct img * imgs, uint16_t n) {
   return 0;
 }
 
-
-
-
 int main (int argc, char **argv)
 {
   if (argc != 2)
@@ -224,64 +268,42 @@ int main (int argc, char **argv)
     return 1;
   }
 
-  FILE *fp = fopen (argv[1], "rb");
+  map (argv [1]);
+  char * m = fp.data;
 
-  if (!fp)
-  {
-    perror ("fopen");
-    return 1;
-  }
+  if (fp.end - m < 2)
+    error ("not a tiff file");
+  assert (fp.end - m >= 2);
 
-  /*
-  ..  Read endianness
-  */
-  char endian[2];
-  if (fread (endian, 1, 2, fp) < 2)
-    perror ("reading endian");
-
-  if (endian[0] == 'I' && endian[1] == 'I')
-  {
+  if (m [0] == 'I' && m [1] == 'I') 
     printf ("Endian: Little (II)\n");
-  }
-  else if (endian[0] == 'M' && endian[1] == 'M')
+  else if (m[0] == 'M' && m[1] == 'M')
   {
     little_endian = 0;
     printf ("Endian: Big (MM)\n");
   }
   else
-  {
-    printf ("Not a TIFF file\n");
-    fclose (fp);
-    return 1;
-  }
+    error ("not a tiff file");
+  m += 2;
+  
+  if (u16 (&m) != 42)
+    error ("unexpected tiff magic number\n");
 
-  /*
-  .. verify "tiff" magic number
-  */
-  uint16_t magic = read_u16 (fp);
-  if (magic != 42)
-  {
-    printf ("Unexpected TIFF magic number\n");
-  }
-
-  uint32_t ifd_offset = read_u32 (fp);
+  uint32_t ifd_offset = u32 (&m);     /* offset of first ifd */
   printf ("First IFD Offset: %u\n", ifd_offset);
-  fseek (fp, ifd_offset, SEEK_SET);
+  m = fp.data + ifd_offset;
 
-  /*
-  .. see number of image file directories (IFD)
-  */
-  uint16_t num_entries = read_u16 (fp);
-  printf ("IFD Entries: %u\n\n", num_entries);
-  struct img * imgs = malloc (num_entries * sizeof (struct img));
+  uint16_t nentries = u16 (&m);  /* number of entries in this ifd */ 
+  printf ("IFD Entries: %u\n\n", nentries);
+  struct img * imgs = malloc (nentries * sizeof (struct img));
 
   struct img * i = imgs;
-  for (uint16_t j = 0; j < num_entries; j++)
+  for (uint16_t j = 0; j < nentries; j++)
   {
-    uint16_t tag   = read_u16 (fp);
-    uint16_t type  = read_u16 (fp);
-    uint32_t count = read_u32 (fp);
-    uint32_t value = read_u32 (fp);
+    uint16_t tag   = u16 (&m);
+    uint16_t type  = u16 (&m);
+    uint32_t count = u32 (&m);
+    uint32_t value = u32 (&m);
 
     printf (
       "Entry %3u: "
@@ -296,18 +318,16 @@ int main (int argc, char **argv)
       value
     );
 
-    *i = (struct img) {
-      tag, type, count, value
-    };
-    i++;
+    *i++ = (struct entry) { tag, type, count, value };
   }
 
-  img_details (imgs, num_entries);
+  img_details (imgs, nentries);
 
   /*
   .. Next IFD entry's offset
   */
-  assert (read_u32 (fp) == 0u);
+  ifd_offset = u32 (fp);
+  printf ("next IFD's offset %u", ifd_offset);
 
   free (imgs);
   fclose (fp);
