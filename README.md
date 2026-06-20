@@ -12,7 +12,7 @@
   4. Lempel–Ziv–Welch lossless compression
 <a id="1">[1]</a>
 Welch, T. "A technique for high-performance data compression." Computer 17.6 (1984): 8-19.
-  5. 
+  5. [An LZW code is here](https://github.com/MichaelDipperstein/lzw/)
 
 # Multilayer FVM solver for flood simulation
 

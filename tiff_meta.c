@@ -1,6 +1,6 @@
 /*
 .. Display Metadata of the GEOTIFF file (topography_ESA_Copernicus_30m_resolution.tif)
-.. gcc -O2 -o run read_tif.c && ./run topography_ESA_Copernicus_30m_resolution.tif
+.. gcc -O2 -o run tiff_meta.c && ./run topography_ESA_Copernicus_30m_resolution.tif
 */
 
 #include <stdio.h>
