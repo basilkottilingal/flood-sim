@@ -407,11 +407,21 @@ int main (int argc, char **argv)
   
   Image img = img_details (i);
 
-  //lzw decode of a sample tile
-  Tile t = img.t [9][31];
-  int err =
-    lzw_decode (t.start,t .end - t .start, img.tdim [0]*img.tdim[1] );
-  lzw_error (err);
+  /*
+  works fine
+  for (unsigned int i=0; i<img.n[0]; i++) 
+    for (unsigned int j=0; j<img.n[1]; j++)
+    {
+      Tile t = img.t [i][j];
+      int err =
+        lzw_decode (t.start,t .end - t .start, img.tdim [0]*img.tdim[1] );
+      //lzw_error (err);
+    }
+  */
+
+  //sample image
+  //Tile t = img.t [10][30];
+  
 
   img_free (img);
   ifd_free (i);

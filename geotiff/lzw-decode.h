@@ -1,3 +1,9 @@
+/*
+.. LZW enoding is a lossless encoding.
+.. Here only lzw decoding routine is defined that too with the tiff specs.
+.. You may refer to the libtiff repo for industry grade encoding/decoding here.
+.. https://gitlab.com/libtiff/libtiff/-/blob/master/libtiff/tif_lzw.c
+*/
 
 #include <stdio.h>
 #include <limits.h>
@@ -25,6 +31,7 @@ static void bitfile_set (Bitfile * b, char * start, size_t len) {
 .. NOTE : TIFF use MSB ordering. That is Most significant bit is
 .. read first
 */
+
 static inline
 unsigned int get_code (Bitfile * b, size_t len) {
   /* assert (len >= 9 && len <= 12); */
@@ -35,11 +42,8 @@ unsigned int get_code (Bitfile * b, size_t len) {
   unsigned int code = 0;
   for (size_t i = b->seek; i < b->seek + len; ++i) {
     code <<= 1;
-    if (stream [i >> 3] & (1u << (7 - (i & 7)))) {
+    if (stream [i >> 3] & (1u << (7 - (i & 7))))
       code |= 1;
-    }
-    else {
-    }
   }
   b->seek += len;
   return code; 
@@ -72,18 +76,16 @@ int lzw_decode (char * start, size_t len, size_t outlen)
 
   unsigned int code, last, next = FIRST_CODE; 
   int code_len = 9;
-  int opl = 1;
 
   Bitfile bitfile;
   bitfile_set (& bitfile, start, len);
-
 
   while ( (last = get_code (& bitfile, code_len)) == CLEAR_CODE ) {}
   if (last >= 256)
     return LZW_DECODE_ERR_WRONG_ENCODING;
 
   unsigned char firstchar = (unsigned char) last;
-  //fputc(last, fpOut);
+  //fputc (last, fpOut);
   while (1)
   {
     code = get_code (&bitfile, code_len);
@@ -111,6 +113,7 @@ int lzw_decode (char * start, size_t len, size_t outlen)
       if (last >= 256)
         return LZW_DECODE_ERR_WRONG_ENCODING;
       firstchar = (unsigned char) last;
+      //fputc (last, fpOut);
       continue;
     }
 
@@ -126,8 +129,7 @@ int lzw_decode (char * start, size_t len, size_t outlen)
     firstchar = stack [depth ++] = (unsigned char) icode;
     
     while (depth--) {
-      ++opl;
-      //fputc ( stack [depth], fpOut );
+      //fputc (stack [depth], fpOut);
     }
 
     if (next <= MAX_CODE)
@@ -136,15 +138,12 @@ int lzw_decode (char * start, size_t len, size_t outlen)
       dictionary.suffix_char[next - FIRST_CODE] = firstchar;
       next++;
 
-      if ( (1u<<code_len) - 1 == next && code_len < 12) {
+      if ( (1u<<code_len) - 1 == next && code_len < 12)
         code_len++;
-      }
     }
 
     last = code;
   }
-
-  printf ("%d %d", (int) outlen, opl);
 
   return 0;
 }
