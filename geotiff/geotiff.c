@@ -1,7 +1,7 @@
 /*
 .. Convert geotiff file to 2d array of points (mmap() is used to avoid RAM overload)
 .. # 
-.. gcc -D_GNU_SOURCE -O2 -o run geotiff.c && ./run topography_ESA_Copernicus_30m_resolution.tif
+.. gcc -D_GNU_SOURCE -O2 -o run geotiff.c && ./run ./../topography_ESA_Copernicus_30m_resolution.tif
 .. # strict POSIX compliance
 .. gcc -D_XOPEN_SOURCE=700 -O2 -o run geotiff.c && ./run ./../topography_ESA_Copernicus_30m_resolution.tif
 */
@@ -31,6 +31,7 @@
 */
 
 #include "file.h"
+#include "lzw-decode.h"
 
 static inline
 char * jump (size_t loc)
@@ -361,16 +362,13 @@ Image img_details (Ifd i)
   printf ("location of {offsets %u, byte_lengths %u}\n", offsets_at, bytes_at);
 
   /* reading tile info */
-  Tile ** t = grid (img.n, offsets_at, bytes_at, type);
-  grid_free (t);
-
+  img.t = grid (img.n, offsets_at, bytes_at, type);
   return img;
 }
 
 void img_free (Image img)
 {
-  if (img.t)
-    free (img.t);
+  grid_free (img.t);
   img.t = NULL;  
 }
 
@@ -408,6 +406,12 @@ int main (int argc, char **argv)
     error ("expect only 1 ifd");
   
   Image img = img_details (i);
+
+  //lzw decode of a sample tile
+  Tile t = img.t [9][31];
+  int err =
+    lzw_decode (t.start,t .end - t .start, img.tdim [0]*img.tdim[1] );
+  lzw_error (err);
 
   img_free (img);
   ifd_free (i);

@@ -1,12 +1,9 @@
-
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-/*
-.. One of the limitation of this script is the reliance on POSIX
-*/
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
