@@ -260,6 +260,12 @@ typedef struct Image
   uint32_t n [2];    /* number of tiles in each dimension */
   Tile ** t;         /* tile grid */
 
+  struct {
+    uint32_t samples; /* samples per pixel */
+    uint32_t bits;    /* bits per sample    */
+    uint32_t format;  /* data type : unsigned, float, double, etc */
+  } pixel;
+
   uint32_t compression;
   uint32_t predictor;
 } Image;
@@ -319,9 +325,18 @@ Image img_details (Ifd i)
         img.predictor = e->value;
         break;
 
-      /* fixme */
+      /* information on pixel data*/
       case TIFF_TAG_SAMPLE_FORMAT :
+        img.pixel.format =  e->value;
+        break;
       case TIFF_TAG_SAMPLES_PER_PIXEL :
+        img.pixel.samples =  e->value;
+        break;
+      case TIFF_TAG_BITS_PER_SAMPLE :
+        img.pixel.bits =  e->value;
+        break;
+
+      /* fixme */
       case TIFF_TAG_PLANAR_CONFIG :
         break;
 
@@ -350,6 +365,8 @@ Image img_details (Ifd i)
     error ("tile details not defined");
   if (type == -1)
     error ("expect only SHORT/LONG for byte length data type");
+  if (img.pixel.bits == 0 || img.pixel.samples == 0 || img.pixel.format == 0)
+    error ("pixel data information missing");
 
   img.n [hh] = (img.dim [hh] + img.tdim[hh] - 1) / img.tdim [hh];
   img.n [ww] = (img.dim [ww] + img.tdim[ww] - 1) / img.tdim [ww];
@@ -357,6 +374,7 @@ Image img_details (Ifd i)
   printf ("image [h%6u x w%6u] pixels\n", img.dim [hh], img.dim [ww] );
   printf ("tile  [h%6u x w%6u] pixels\n", img.tdim [hh], img.tdim [ww] );
   printf ("grid  [ %6u x  %6u] tiles\n", img.n [hh], img.n [ww] );
+  printf ("pixel [ %6u x  %6u] samples x bytes/sample \n", img.pixel.samples, img.pixel.bits >> 3);
   printf ("tile count %u (does it match %u ?)\n", ntiles, img.n[hh] * img.n [ww]);
   printf ("compression type %u\n", img.compression);
   printf ("location of {offsets %u, byte_lengths %u}\n", offsets_at, bytes_at);
@@ -407,24 +425,32 @@ int main (int argc, char **argv)
   
   Image img = img_details (i);
 
+  size_t outlenmax = img.tdim [0] * img.tdim [1] 
+    * img.pixel.samples * (img.pixel.bits >> 3);
+  unsigned char * buffer = malloc (outlenmax);
+
   /*
-  works fine
+  .. NOTES :
+  .. 1. The edge tiles that may have smaller height and/or width than of the normal
+  .. tiles, produce same lzw_decode () bytes compared to normal tiles. You have to
+  .. disregard pixels outside  [ 0 : dim[hh]) x [0, dim [ww]).
+  .. 2. Bytes (correspoonding to Pixels) are in row-major
+  */
   for (unsigned int i=0; i<img.n[0]; i++) 
     for (unsigned int j=0; j<img.n[1]; j++)
     {
       Tile t = img.t [i][j];
       int err =
-        lzw_decode (t.start,t .end - t .start, img.tdim [0]*img.tdim[1] );
-      //lzw_error (err);
+        lzw_decode (t.start,t .end - t .start, buffer, outlenmax);
+      if (err) {
+        printf ("lzw_error @ tile [%u, %u] : err type %s", i, j, LZWD_ERROR(err));
+      }
     }
-  */
 
-  //sample image
-  //Tile t = img.t [10][30];
-  
 
+  free (buffer);
   img_free (img);
   ifd_free (i);
-  error ("success");
+  error ("");
   return 0;
 }
