@@ -30,43 +30,10 @@
 .. virtual reading
 */
 
-#include "file.h"
+#include "filemap.h"
 #include "lzw-decode.h"
+#include "tile.h"
 
-static inline
-char * jump (size_t loc)
-{
-  if (fp.size < loc)
-    error ("offset out of file size");
-  return fp.data + loc;
-}
-
-#define nan    UINT32_MAX
-int little_endian = 1;
-
-static inline
-uint16_t u16 (char ** m)
-{
-  if (fp.end - *m < 2)
-    return UINT16_MAX;
-  uint8_t * b = (uint8_t *) *m;
-  *m += 2;
-  return little_endian ?
-    ((b[1] << 8) | b[0]) :
-    ((b[0] << 8) | b[1]);
-}
-
-static inline
-uint32_t u32 (char ** m)
-{
-  if (fp.end - *m < 4)
-    return nan;
-  uint8_t * b = (uint8_t *) *m;
-  *m += 4;
-  return little_endian ?
-    ((b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]) :
-    ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
-}
 
 /*
 .. realated to TIFF
@@ -126,6 +93,13 @@ typedef enum           /* image tile compression details */
   TIFF_COMP_PACKBITS  = 32773,
   TIFF_COMP_DEFLATE   = 8
 } TIFFCompression;
+
+typedef enum                /* Predictor for compression */
+{
+  TIFF_PREDICTOR_DEFAULT = 1,
+  TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING
+} TIFFCompressionPredictor;
+
 
 /*
 .. Related to image file directory (IFD) and it's entries
@@ -198,67 +172,13 @@ enum {
   ww = 1,
 } TIFFDim;
 
-typedef struct Tile {
-  char * start, * end;
-} Tile;
-
-Tile ** grid (uint32_t * n, uint32_t offsets_at, uint32_t bytes_at, int type)
-{
-  uint32_t h = n [hh], w = n [ww];
-  Tile ** g = malloc ( (h + 2) * sizeof (Tile *) ),
-    * mem = malloc ( ((h + 2)) * (w + 2) * sizeof (Tile) );
-  memset (mem, 0, ((h + 2)) * (w + 2) * sizeof (Tile));
-
-  for (uint32_t i=0; i < h+2; ++i)
-    g [i] = & mem [i * ( w + 2 ) + 1];
-
-  g++;
-
-  char * m = fp.data + offsets_at;
-  if ( m + (h * w * sizeof (uint32_t)) > fp.end )
-    error ("corrupted file");
-
-  /*
-  .. informations regarding tiles of images are stored as row major in tiff
-  */
-  uint32_t val, min = UINT32_MAX;
-
-  for (uint32_t i=0; i < h; ++i)
-    for (uint32_t j=0; j < w; ++j) {
-      val = u32 (&m);
-      min = val < min ? val : min;
-      g [i][j].start = fp.data + val;
-    }
-
-  /*
-  .. these pages are no more required. Kernel may free them.
-  */
-  madvise (fp.data, ((size_t) min) & (~(size_t) 4095), MADV_DONTNEED);
-
-  m = fp.data + bytes_at;
-  if ( m + (h * w * sizeof (uint32_t)) > fp.end )
-    error ("corrupted file");
-
-  for (uint32_t i=0; i < h; ++i)
-    for (uint32_t j=0; j < w; ++j) {
-      uint32_t bytel = type ? u32 (&m) : (uint32_t) u16 (&m);
-      g [i][j].end = g [i][j].start + bytel;
-    }
-  
-  return g;
-}
-
-void grid_free (Tile ** g) {
-  free ( &g [-1][-1] );
-  free ( &g [-1] ); 
-}
 
 typedef struct Image
 {
   uint32_t dim [2];  /* dimension of img in pixels*/
   uint32_t tdim [2]; /* dimension of tile in pixels */
   uint32_t n [2];    /* number of tiles in each dimension */
-  Tile ** t;         /* tile grid */
+  Tile * tiles;      /* tile grid */
 
   struct {
     uint32_t samples; /* samples per pixel */
@@ -336,8 +256,13 @@ Image img_details (Ifd i)
         img.pixel.bits =  e->value;
         break;
 
-      /* fixme */
       case TIFF_TAG_PLANAR_CONFIG :
+        /*
+        .. It matters if theres are more than one samples/pixel.
+        .. Eg : if samples = {R, G, B} you can interleave them as
+        .. RGBRGBRGB... or as RRRR..GGG...BBB....
+        .. For Geotiff it is 1 sample (i.e {elevation}) per pixel.
+        */
         break;
 
       /* geotiff specific */
@@ -380,14 +305,17 @@ Image img_details (Ifd i)
   printf ("location of {offsets %u, byte_lengths %u}\n", offsets_at, bytes_at);
 
   /* reading tile info */
-  img.t = grid (img.n, offsets_at, bytes_at, type);
+  img.tiles = img_tiles (img.n [hh] * img.n [ww], offsets_at, bytes_at, type);
+  if (img.tiles == NULL)
+    error ("cannot create tile grid");
+
   return img;
 }
 
 void img_free (Image img)
 {
-  grid_free (img.t);
-  img.t = NULL;  
+  free (img.tiles);
+  img.tiles = NULL;  
 }
 
 
@@ -425,9 +353,9 @@ int main (int argc, char **argv)
   
   Image img = img_details (i);
 
-  size_t outlenmax = img.tdim [0] * img.tdim [1] 
+  size_t gridsize = img.tdim [0] * img.tdim [1] 
     * img.pixel.samples * (img.pixel.bits >> 3);
-  unsigned char * buffer = malloc (outlenmax);
+  unsigned char * buffer = malloc (gridsize);
 
   /*
   .. NOTES :
@@ -436,16 +364,41 @@ int main (int argc, char **argv)
   .. disregard pixels outside  [ 0 : dim[hh]) x [0, dim [ww]).
   .. 2. Bytes (correspoonding to Pixels) are in row-major
   */
+  Tile * tile = img.tiles;
   for (unsigned int i=0; i<img.n[0]; i++) 
     for (unsigned int j=0; j<img.n[1]; j++)
     {
-      Tile t = img.t [i][j];
       int err =
-        lzw_decode (t.start,t .end - t .start, buffer, outlenmax);
-      if (err) {
+        lzw_decode (tile->start, tile->end - tile->start, buffer, gridsize);
+      if (err)
         printf ("lzw_error @ tile [%u, %u] : err type %s", i, j, LZWD_ERROR(err));
+    }
+
+  /*
+  .. A sample tile for visualization
+  */
+  do {
+    /*
+    FILE * fp = fopen ("sample.dat", "w");
+    Tile t = img.t [10][30];
+    int err = lzw_decode (t.start,t .end - t .start, buffer, gridsize);
+    .. You still have to figure out
+    .. 1. the byte order / unsigned (little/big endian)
+    .. 2. data type is unsigned int [4] or float [4] or any other datatype
+    .. 3. Whether any byte traversal order is used in compression (it's part of lzw routine)
+    if (img.pixel.bits != 32) {
+      error ("expected elevation data to be unsigned int [4 bytes]");
+      break;
+    }
+    unsigned * 
+    assert (err == 0);
+    for (unsigned i=0; i<img.tdim [0]; ++i) {
+      for (unsigned j=0; j<img.tdim [1]; ++j) {
+        printf (
       }
     }
+    */
+  } while (0);
 
 
   free (buffer);
@@ -454,3 +407,10 @@ int main (int argc, char **argv)
   error ("");
   return 0;
 }
+  
+/*
+.. 
+~~~gnuplot
+.. plot this
+~~~
+*/
