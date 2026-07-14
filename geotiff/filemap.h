@@ -61,33 +61,6 @@
     db = (File) {-1, 0, NULL, NULL};
 
   }
-  
-  /* map file "f" to virtual memory using mmap */
-  int map (const char * f)
-  {
-  
-    int fd = open (f, O_RDONLY);
-    if (fd == -1)
-      error ("open () tiff file");
-    fp.fd = fd;
-  
-    struct stat s;
-    if (fstat (fd, &s) == -1)
-      error ("fstat () tiff file");
-    fp.size = s.st_size;
-    if (fp.size < 8)
-      error ("not a tiff file");
-  
-    char * data =
-      mmap (NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (data == NULL)
-      error ("mmap () tiff file");
-  
-    fp.data = data;
-    fp.end = data + fp.size;
-  
-    return 0;
-  }
 
   char * jump (size_t loc)
   {
@@ -117,21 +90,48 @@
       ((b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]) :
       ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
   }
+  
+  /* map file "f" to virtual memory using mmap */
+  int tiff_map (const char * f)
+  {
+  
+    int fd = open (f, O_RDONLY);
+    if (fd == -1)
+      error ("open () tiff file");
+    fp.fd = fd;
+  
+    struct stat s;
+    if (fstat (fd, &s) == -1)
+      error ("fstat () tiff file");
+    fp.size = s.st_size;
+    if (fp.size < 8)
+      error ("not a tiff file");
+  
+    char * data =
+      mmap (NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == NULL)
+      error ("mmap () tiff file");
+  
+    fp.data = data;
+    fp.end = data + fp.size;
+
+    return 0;
+  }
 
   /* create a 2D persistent paageable array */
-  int database (unsigned int * dim, size_t size)
+  int database (size_t size)
   {
     int fd = open (DATABASE, O_RDWR | O_CREAT, 0666);
     if (fd == -1)
       error ("open () database");
 
     db.fd = fd;
-    db.size =  dim [0] * dim [1] * size; 
-    if (ftruncate (fd, (off_t) db.size))
+    db.size = size; 
+    if (ftruncate (fd, (off_t) size) == -1)
       error ("ftruncate () database");
   
     char * data =
-      mmap (NULL, db.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == NULL)
       error ("mmap () database");
     db.data = data;
