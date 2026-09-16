@@ -1,3 +1,6 @@
+# run this command as
+# gnuplot contour.plt
+
 set contour base
 unset surface
 set view map
