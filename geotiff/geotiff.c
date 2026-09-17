@@ -502,6 +502,40 @@ Image img_details (Entry * entries)
     img.offsets_at, img.byte_counts_at);
   printf ("data format %u\n", img.pixel.format);
 
+  printf ("coord bound\n");
+  double
+    * tiepixel = img.coordMap.tiepoint,
+    * tiecoord = &img.coordMap.tiepoint [3],
+    * scale    = img.coordMap.scale;
+  printf ("(%#3.4gE %#3.4gN)     (%#3.4gE %#3.4gN)\n",
+    - tiepixel[0] * scale[0] + tiecoord [0],
+      tiepixel[1] * scale[1] + tiecoord [1],
+     ((double) img.dim.x - tiepixel[0]) * scale[0] + tiecoord [0],
+      tiepixel[1] * scale[1] + tiecoord [1]);
+
+  int tieApprox [2] =
+    {
+      (int) (10 * tiepixel [0] / (double) img.dim.x),
+      (int) ( 5 * tiepixel [1] / (double) img.dim.y),
+    };
+  for (int iy = 0; iy <=5; ++iy)
+  {
+    printf ("               ");
+    for (int ix = 0; ix <=10; ++ix)
+      printf ("%c",
+        ix == tieApprox [0] && iy == tieApprox [1] ? '+' :
+        ix == 0 || ix == 10 || iy == 0 || iy == 5 ? '.' : ' ');
+    if (iy == 3)
+      printf ("       +  tiepoint");
+    printf ("\n");
+  }
+    
+  printf ("(%#3.4gE %#3.4gN)     (%#3.4gE %#3.4gN)\n",
+    -tiepixel[0] * scale[0] + tiecoord [0],
+    (tiepixel[1] - (double) img.dim.y) * scale[1] + tiecoord [1],
+    ((double) img.dim.x - tiepixel[0]) * scale[0] + tiecoord [0],
+    (tiepixel[1] - (double) img.dim.y) * scale[1] + tiecoord [1]);
+
   return img;
 }
 
@@ -689,14 +723,17 @@ double geotiff_elevation (coord c)
   if (geotiff.pixel.bits == 32)
   {
     if (geotiff.pixel.format == T_UINT)
-      return ((uint32_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+      return (double)
+        ((uint32_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
     if (geotiff.pixel.format == T_FLOAT)
-      return ((float *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+      return (double)
+        ((float *)    filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
   }
   if (geotiff.pixel.bits == 16)
   {
     if (geotiff.pixel.format == T_UINT)
-      return ((uint16_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+      return (double)
+        ((uint16_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
   }
   /* we have skipped T_INT as elevation are usually stored as float/uint */
   error ("pixel format not implemented");
@@ -711,14 +748,13 @@ double geotiff_elevation_at (double geo_coord [])
     * tie   = geotiff.coordMap.tiepoint,
     * scale = geotiff.coordMap.scale,
     x       =   (geo_coord [0] - tie [3]) / scale [0]  + tie [0],
-    y       = - (geo_coord [1] - tie [4]) / scale [1]  - tie [1];
+    y       = - (geo_coord [1] - tie [4]) / scale [1]  + tie [1];
   int i = floor (x), j = floor (y);
-printf ("{%d %d}", i, j);
   if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
     return NAN;
 
   /* fixme : interpolate */
-  geotiff_elevation ( (coord) {j, i} );
+  return geotiff_elevation ( (coord) {j, i} );
 
   return NAN;
 }
