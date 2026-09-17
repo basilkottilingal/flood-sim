@@ -8,7 +8,7 @@ SRC      = filemap.c lzw.c geotiff.c
 OBJ      = $(SRC:.c=.o)
 
 %.o: %.c %.h Makefile
-	$(CC) $< $(CCFLAGS) -c -o $@
+	$(CC) $< $(CCFLAGS) -c -o $@ -lm
 
 libgeotiff.a : $(OBJ)
 	$(AR) $(ARFLAGS) $@ $^

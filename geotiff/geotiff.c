@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <assert.h>
+#include <math.h>
 
 /*
 .. One of the limitation of this script is the reliance on POSIX
@@ -37,8 +38,8 @@ uint16_t u16 (const char ** m)
   uint8_t * b = (uint8_t *) *m;
   *m += 2;
   return little_endian ?
-    ((b[1] << 8) | b[0]) :
-    ((b[0] << 8) | b[1]);
+    (((uint16_t) b[1] << 8) | (uint16_t) b[0]) :
+    (((uint16_t) b[0] << 8) | (uint16_t) b[1]);
 }
 
 static inline
@@ -47,8 +48,47 @@ uint32_t u32 (const char ** m)
   uint8_t * b = (uint8_t *) *m;
   *m += 4;
   return little_endian ?
-    ((b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]) :
-    ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+    ( ((uint32_t) b[3] << 24) |
+      ((uint32_t) b[2] << 16) |
+      ((uint32_t) b[1] << 8 ) |
+       (uint32_t) b[0]      )
+    :
+    ( ((uint32_t) b[0] << 24) |
+      ((uint32_t) b[1] << 16) |
+      ((uint32_t) b[2] << 8 ) |
+       (uint32_t) b[3]      );
+}
+
+static inline
+double d64(const char **m)
+{
+  const uint8_t *b = (const uint8_t *)*m;
+  uint64_t r;
+
+  *m += 8;
+
+  if (little_endian)
+    r = ((uint64_t)b[7] << 56) |
+      ((uint64_t)b[6] << 48) |
+      ((uint64_t)b[5] << 40) |
+      ((uint64_t)b[4] << 32) |
+      ((uint64_t)b[3] << 24) |
+      ((uint64_t)b[2] << 16) |
+      ((uint64_t)b[1] <<  8) |
+      ((uint64_t)b[0]);
+  else
+    r = ((uint64_t)b[0] << 56) |
+      ((uint64_t)b[1] << 48) |
+      ((uint64_t)b[2] << 40) |
+      ((uint64_t)b[3] << 32) |
+      ((uint64_t)b[4] << 24) |
+      ((uint64_t)b[5] << 16) |
+      ((uint64_t)b[6] <<  8) |
+      ((uint64_t)b[7]);
+
+  double val;
+  memcpy(&val, &r, sizeof val);
+  return val;
 }
 
 typedef enum              /* tiff datatype {1, 2, .., 12}*/
@@ -152,6 +192,12 @@ typedef struct Image
 
   struct
   {
+    double tiepoint [6]; /* tie point. pixel +  refcoord         */
+    double scale    [3]; /* scale (degrees per pixel)            */
+  } coordMap;
+
+  struct
+  {
     uint16_t pred;
     uint16_t type;
   } comp;             /* compression details & decompression tools */
@@ -164,6 +210,90 @@ typedef struct Image
 
 } Image;
 
+static void read_geo_key_dir (Image * img, Entry * entry)
+{
+  const char * const start = filemap_address (FILEMAP_TIFF);
+  assert (start != NULL);
+  const char * const end   = start + filemap_size (FILEMAP_TIFF);
+
+  assert (entry->tag == TIFF_TAG_GEO_KEY_DIR);
+  assert (entry->count % 4 == 0);
+  assert (entry->type == SHORT);
+
+  is_available (start, end, entry->value + entry->count * 2);
+
+  const char * array = start + entry->value;
+  uint16_t
+    KeyDirectoryVersion = u16 (&array),
+    KeyRevision         = u16 (&array),
+    MinorRevision       = u16 (&array),
+    NumberOfKeys        = u16 (&array);
+  printf ("KeyDirectoryVersion %u, KeyRevision %u, MinorRevision %u, NumberOfKeys %u\n",
+    KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys);
+  for (int i=0; i<NumberOfKeys; ++i)
+  {
+    uint16_t
+      KeyID           = u16 (&array),
+      TIFFTagLocation = u16 (&array),
+      Count           = u16 (&array),
+      Value_Offset    = u16 (&array);
+    printf ("\tKeyID %6u, TIFFTagLocation %6u, Count %6u, Value_Offset %6u\n",
+      KeyID, TIFFTagLocation, Count, Value_Offset);
+  }
+}
+        
+static void read_geo_pixel_scale (Image * img, Entry * entry)
+{
+  const char * const start = filemap_address (FILEMAP_TIFF);
+  assert (start != NULL);
+  const char * const end   = start + filemap_size (FILEMAP_TIFF);
+
+  assert (entry->tag == TIFF_TAG_GEO_PIXEL_SCALE);
+  assert (entry->count == 3);
+  assert (entry->type == DOUBLE);
+   
+  is_available (start, end, entry->value + entry->count * 8);
+
+  const char * array = start + entry->value;
+  printf ("pixel scale\n");
+  double scale [3] = {d64 (&array), d64 (&array), d64 (&array)};
+  printf ("\t(%g, %g, %g) degrees per pixel\n", scale [0], scale [1], scale [2]);
+  memcpy (img->coordMap.scale, scale, sizeof (scale));
+
+}
+
+static void read_geo_tie_point (Image * img, Entry * entry)
+{
+  const char * const start = filemap_address (FILEMAP_TIFF);
+  assert (start != NULL);
+  const char * const end   = start + filemap_size (FILEMAP_TIFF);
+
+  assert (entry->tag == TIFF_TAG_GEO_TIE_POINT);
+  assert (entry->count % 6 == 0);
+  assert (entry->type == DOUBLE);
+   
+  is_available (start, end, entry->value + entry->count * 8);
+
+  const char * array = start + entry->value;
+  printf ("tie point\n");
+
+  double tiepoint [6] = 
+    { 
+      d64 (&array), d64 (&array), d64 (&array),
+      d64 (&array), d64 (&array), d64 (&array)
+    };
+
+  printf ("\ttiepoint pixel [%g, %g, %g]\n", tiepoint [0], tiepoint [1], tiepoint [2]);
+  printf ("\ttiepoint coord (%g, %g, %g)\n", tiepoint [3], tiepoint [4], tiepoint [5]);
+  printf ("\tInference (longitude %g latitude %g)\n", tiepoint [3], tiepoint [4]);
+
+  if (entry->count > 6)
+    error ("warning : library not designed for multiple tie points");
+
+  memcpy (img->coordMap.tiepoint, tiepoint, sizeof (tiepoint));
+}
+
+static
 void write_decoded_pixels (void * decoded, coord tile, Image img)
 {
   char * const db  = filemap_address (FILEMAP_PIXELS);
@@ -234,10 +364,12 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
   error ("pixel nbits not supported");
 }
 
+static
 Image img_details (Entry * entries)
 {
 
   int is_tiles = 0, is_strips = 0, ntiles = 0;
+  int found_geo_tags = 0;
   Image img = {0};
 
   while (1)
@@ -314,14 +446,22 @@ Image img_details (Entry * entries)
 
       /* geotiff specific */
       case TIFF_TAG_GEO_PIXEL_SCALE :
+        read_geo_pixel_scale (&img, &entry);
+        found_geo_tags |= 1;
         break;
       case TIFF_TAG_GEO_TIE_POINT :
+        read_geo_tie_point (&img, &entry);
+        found_geo_tags |= 2;
         break;
       case TIFF_TAG_GEO_KEY_DIR :
+        read_geo_key_dir (&img, &entry);
+        found_geo_tags |= 4;
         break;
       case TIFF_TAG_GEO_DOUBLE_PARAMS :
+        found_geo_tags |= 8;
         break;
       case TIFF_TAG_GEO_ASCII_PARAMS :
+        found_geo_tags |= 16;
         break;
 
       /* unexpected */
@@ -335,8 +475,8 @@ Image img_details (Entry * entries)
     error ("image tile/strips redefined");
   if (is_strips)
     img.tdim.x = img.dim.x;
-  if (img.tdim.x == 0 || img.tdim.y == 0 || 
-      img.offsets_at == 0 || img.byte_counts_at == 0)
+  if (img.tdim.x     == 0 || img.tdim.y         == 0 || 
+      img.offsets_at == 0 || img.byte_counts_at == 0 )
     error ("tile details not defined");
   if (! (img.byte_counts_type == SHORT || img.byte_counts_type == LONG) )
     error ("expect only SHORT/LONG for BYTE_COUNT data type");
@@ -344,20 +484,23 @@ Image img_details (Entry * entries)
     error ("pixel data information missing");
   if ( ! (img.comp.type == TIFF_COMP_LZW) )
     error ("implementation error : only lzw compression expected");
+  if (found_geo_tags != 31)
+    error ("some geo tags missing");
 
   img.n.x = (img.dim.x + img.tdim.x - 1) / img.tdim.x;
   img.n.y = (img.dim.y + img.tdim.y - 1) / img.tdim.y;
 
-  printf ("image [h%6u x w%6u] pixels\n", img.dim.y, img.dim.x );
+  printf ("image [h%6u x w%6u] pixels\n", img.dim.y , img.dim.x  );
   printf ("tile  [h%6u x w%6u] pixels\n", img.tdim.y, img.tdim.x );
-  printf ("grid  [ %6u x  %6u] tiles\n", img.n.y, img.n.x );
+  printf ("grid  [ %6u x  %6u] tiles \n", img.n.y   , img.n.x    );
   printf ("pixel [ %6u x  %6u] samples x bytes/sample \n",
     img.pixel.samples, img.pixel.bits >> 3);
   printf ("tile count %u (does it match %u ?)\n", ntiles, img.n.x * img.n.y);
-  //printf ("compression type %u\n", img.comp.type);
+  printf ("compression type : %s\n", img.comp.type == TIFF_COMP_LZW ? 
+    "lzw" : "unknown" );
   printf ("location of {offsets %u, byte_counts %u}\n",
     img.offsets_at, img.byte_counts_at);
-  printf ("data format %u", img.pixel.format);
+  printf ("data format %u\n", img.pixel.format);
 
   return img;
 }
@@ -516,6 +659,70 @@ void img_unwrap (Image img)
   free (buffer);
 }
 
+static int is_running = 0;
+Image geotiff = (Image) {0};
+
+#if 0
+static
+int geotiff_getval (double val [2][2], int i, int j)
+{
+  char * address = filemap_address (FILEMAP_PIXELS);
+  assert (address != NULL);
+  if (geotiff.pixel.format == SHORT)
+  {
+    uint16_t * elevation = (uint16_t *) address, cpy;
+    for (int ii=0; ii<2; ++ii)
+      for (int jj=0; jj<2; ++jj)
+      {
+        memcpy (& cpy, & elevation [geotiff.dim.x * (i + ii) + ( j + jj)], 2);
+        val [ii][jj] = (double) cpy;
+      }
+
+    return 0;
+  }
+  return  1;
+}
+#endif
+
+double geotiff_elevation (coord c)
+{
+  if (geotiff.pixel.bits == 32)
+  {
+    if (geotiff.pixel.format == T_UINT)
+      return ((uint32_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+    if (geotiff.pixel.format == T_FLOAT)
+      return ((float *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+  }
+  if (geotiff.pixel.bits == 16)
+  {
+    if (geotiff.pixel.format == T_UINT)
+      return ((uint16_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
+  }
+  /* we have skipped T_INT as elevation are usually stored as float/uint */
+  error ("pixel format not implemented");
+  return NAN;
+}
+
+double geotiff_elevation_at (double geo_coord [])
+{
+  if (!is_running)
+    return NAN;
+  double
+    * tie   = geotiff.coordMap.tiepoint,
+    * scale = geotiff.coordMap.scale,
+    x       =   (geo_coord [0] - tie [3]) / scale [0]  + tie [0],
+    y       = - (geo_coord [1] - tie [4]) / scale [1]  - tie [1];
+  int i = floor (x), j = floor (y);
+printf ("{%d %d}", i, j);
+  if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
+    return NAN;
+
+  /* fixme : interpolate */
+  geotiff_elevation ( (coord) {j, i} );
+
+  return NAN;
+}
+
 void geotiff_map (const char * tiff)
 {
   filemap_tiff (tiff);
@@ -536,11 +743,16 @@ void geotiff_map (const char * tiff)
   }
   fclose (sample);
   #endif
+
+  is_running = 1;
+  geotiff = img;
 }
 
 void geotiff_map_destroy ()
 {
   filemap_close_all (NULL);
+  is_running = 0;
+  geotiff = (Image) {0};
 }
 
 #undef error
