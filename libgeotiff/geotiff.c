@@ -16,7 +16,9 @@
 
 #include "filemap.h"
 #include "lzw.h"
+#include "coordinates.h"
 #include "geotiff.h"
+#include "parse.h"
 
 #define error(e)                          filemap_close_all(e)
 #define is_available(cur_,end_,reqd_)                        \
@@ -28,67 +30,6 @@ const char * jump (const char * start, const char * end, size_t dest)
 {
   is_available (start, end, dest);
   return start + dest;
-}
-
-static int little_endian = 1;
-
-static inline
-uint16_t u16 (const char ** m)
-{
-  uint8_t * b = (uint8_t *) *m;
-  *m += 2;
-  return little_endian ?
-    (((uint16_t) b[1] << 8) | (uint16_t) b[0]) :
-    (((uint16_t) b[0] << 8) | (uint16_t) b[1]);
-}
-
-static inline
-uint32_t u32 (const char ** m)
-{
-  uint8_t * b = (uint8_t *) *m;
-  *m += 4;
-  return little_endian ?
-    ( ((uint32_t) b[3] << 24) |
-      ((uint32_t) b[2] << 16) |
-      ((uint32_t) b[1] << 8 ) |
-       (uint32_t) b[0]      )
-    :
-    ( ((uint32_t) b[0] << 24) |
-      ((uint32_t) b[1] << 16) |
-      ((uint32_t) b[2] << 8 ) |
-       (uint32_t) b[3]      );
-}
-
-static inline
-double d64(const char **m)
-{
-  const uint8_t *b = (const uint8_t *)*m;
-  uint64_t r;
-
-  *m += 8;
-
-  if (little_endian)
-    r = ((uint64_t)b[7] << 56) |
-      ((uint64_t)b[6] << 48) |
-      ((uint64_t)b[5] << 40) |
-      ((uint64_t)b[4] << 32) |
-      ((uint64_t)b[3] << 24) |
-      ((uint64_t)b[2] << 16) |
-      ((uint64_t)b[1] <<  8) |
-      ((uint64_t)b[0]);
-  else
-    r = ((uint64_t)b[0] << 56) |
-      ((uint64_t)b[1] << 48) |
-      ((uint64_t)b[2] << 40) |
-      ((uint64_t)b[3] << 32) |
-      ((uint64_t)b[4] << 24) |
-      ((uint64_t)b[5] << 16) |
-      ((uint64_t)b[6] <<  8) |
-      ((uint64_t)b[7]);
-
-  double val;
-  memcpy(&val, &r, sizeof val);
-  return val;
 }
 
 typedef enum              /* tiff datatype {1, 2, .., 12}*/
@@ -106,6 +47,40 @@ typedef enum              /* tiff datatype {1, 2, .., 12}*/
   FLOAT,
   DOUBLE
 } TIFFType;
+
+int tiff_datasize (TIFFType type)
+{
+  switch ( type )
+  {
+    case BYTE     :
+    case SBYTE    :
+    case ASCII    :
+      return 1;
+
+    case SHORT    :
+    case SSHORT   :
+      return 2;
+
+    case FLOAT    :
+    case LONG     :
+    case SLONG    :
+      return 4;
+
+    case DOUBLE   :
+    case SRATIONAL:
+    case RATIONAL :
+      return 8;
+
+    case UNDEFINED:
+      return 0;
+
+    default       :
+  }
+  assert (0);
+  return 0;
+}
+
+#define entry_size(entry) (entry->count * tiff_datasize (entry->type))
 
 typedef enum  /* data format for sample (for each pixel */
 {
@@ -140,11 +115,12 @@ typedef enum                          /* tiff tag types */
   TIFF_TAG_SAMPLE_FORMAT      = 339,   /* SHORT         */
 
   /* geotiff specific */
-  TIFF_TAG_GEO_PIXEL_SCALE    = 33550, /* DOUBLE        */
-  TIFF_TAG_GEO_TIE_POINT      = 33922, /* DOUBLE        */
   TIFF_TAG_GEO_KEY_DIR        = 34735, /* DOUBLE        */ 
   TIFF_TAG_GEO_DOUBLE_PARAMS  = 34736, /* DOUBLE        */
   TIFF_TAG_GEO_ASCII_PARAMS   = 34737, /* ASCII         */
+  TIFF_TAG_GEO_PIXEL_SCALE    = 33550, /* DOUBLE        */
+  TIFF_TAG_GEO_TIE_POINT      = 33922, /* DOUBLE        */
+  TIFF_TAG_GEO_TRANSFORMATION = 34264, /* DOUBLE        */
 
   /* Not a (geo)tiff tag. Used as the end of tag array   */
   TIFF_TAG_NOT_A_TAG          = 0,
@@ -202,7 +178,8 @@ typedef struct Image
     uint16_t type;
   } comp;             /* compression details & decompression tools */
 
-  struct {
+  struct
+  {
     uint16_t samples; /* samples per pixel                         */
     uint16_t bits;    /* bits per sample                           */
     uint16_t format;  /* data type : unsigned, float, double, etc  */
@@ -230,20 +207,28 @@ static void read_geo_key_dir (Image * img, Entry * entry)
     NumberOfKeys        = u16 (&array);
   printf ("KeyDirectoryVersion %u, KeyRevision %u, MinorRevision %u, NumberOfKeys %u\n",
     KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys);
+
   for (int i=0; i<NumberOfKeys; ++i)
   {
-    uint16_t
-      KeyID           = u16 (&array),
-      TIFFTagLocation = u16 (&array),
-      Count           = u16 (&array),
-      Value_Offset    = u16 (&array);
-    printf ("\tKeyID %6u, TIFFTagLocation %6u, Count %6u, Value_Offset %6u\n",
-      KeyID, TIFFTagLocation, Count, Value_Offset);
+    geotiff_key ( (GeoKey)
+      {
+        u16 (&array),
+        u16 (&array),
+        u16 (&array),
+        u16 (&array)
+      }
+    );
+
   }
 }
         
-static void read_geo_pixel_scale (Image * img, Entry * entry)
+static
+void read_geo_pixel_scale (Image * img, Entry * entry)
 {
+  /*
+  .. scaling of longitude and latitude per pixel.
+  */
+
   const char * const start = filemap_address (FILEMAP_TIFF);
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
@@ -262,8 +247,21 @@ static void read_geo_pixel_scale (Image * img, Entry * entry)
 
 }
 
-static void read_geo_tie_point (Image * img, Entry * entry)
+static
+void read_geo_tie_point (Image * img, Entry * entry)
 {
+
+  /*
+  .. Tie point(s) is a tuple of 6 double numbers.
+  .. (I, J, K) represent which pixel corresponds to reference coordinate's origin
+  .. (X, Y, Z) represent longitude (-180 deg W, 180 deg E],
+  .. latitude [-90 deg N, 90 deg N], and elevation of the reference pixel.
+  .. NOTE :
+  .. (a) the reference pixel (I, J, K) can be fractional. 
+  .. (b) There can be multiple tie points. 
+
+  */
+
   const char * const start = filemap_address (FILEMAP_TIFF);
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
@@ -294,6 +292,24 @@ static void read_geo_tie_point (Image * img, Entry * entry)
 }
 
 static
+void read_geo_ascii_params (Image * img, Entry * entry)
+{
+
+  const char * const start = filemap_address (FILEMAP_TIFF);
+  assert (start != NULL);
+  const char * const end   = start + filemap_size (FILEMAP_TIFF);
+
+  assert (entry->tag  == TIFF_TAG_GEO_ASCII_PARAMS);
+  assert (entry->type == ASCII);
+   
+  is_available (start, end, entry->value + entry->count);
+
+  const char * params = start + entry->value;
+  printf ("geo ascii params\n\t%s\n", params);
+
+}
+
+static
 void write_decoded_pixels (void * decoded, coord tile, Image img)
 {
   char * const db  = filemap_address (FILEMAP_PIXELS);
@@ -309,7 +325,7 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
   if (samples != 1)
     error ("expects only one sample per pixel in geotiff");
 
-  uint8_t * b = (uint8_t *) decoded;
+  const char * b = (const char *) decoded;
 
   coord
     start = (coord) { tile.y * img.tdim.y    , tile.x * img.tdim.x     },
@@ -324,14 +340,11 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
       char * data = & db [ (h * img.dim.x + start.x) * 4];
       uint32_t prev = 0;
       for (unsigned int w=start.x; w<lim.x; w++) {
-        prev += little_endian ? 
-          ((b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]) :
-          ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+        prev += u32 (&b);
         memcpy (data, &prev, 4);
         if (!hdiff)
           prev = 0;
         data += 4;
-        b += 4;
       }
       for (unsigned int w=lim.x; w<end.x; w++)
         b += 4;
@@ -346,14 +359,11 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
       char * data = & db [ (h * img.dim.x + start.x) * 2];
       uint16_t prev = 0;
       for (unsigned int w=start.x; w<lim.x; w++) {
-        prev += little_endian ? 
-          ((b[1] << 8) | b[0]) :
-          ((b[0] << 8) | b[1]);
+        prev += u16 (&b);
         memcpy (data, &prev, 2);
         if (!hdiff)
           prev = 0;
         data += 2;
-        b += 2;
       }
       for (unsigned int w=lim.x; w<end.x; w++)
         b += 2;
@@ -445,23 +455,33 @@ Image img_details (Entry * entries)
         break;
 
       /* geotiff specific */
+      case TIFF_TAG_GEO_KEY_DIR :
+        read_geo_key_dir (&img, &entry);
+        found_geo_tags |= 1;
+        break;
+      case TIFF_TAG_GEO_DOUBLE_PARAMS :
+        found_geo_tags |= 2;
+        break;
+      case TIFF_TAG_GEO_ASCII_PARAMS :
+        read_geo_ascii_params (&img, &entry);
+        found_geo_tags |= 4;
+        break;
+      /*
+      .. there are two models for raster->coord mapping
+      .. (a) pixel scale + tie point
+      .. (b) matrix transformation model
+      */
       case TIFF_TAG_GEO_PIXEL_SCALE :
         read_geo_pixel_scale (&img, &entry);
-        found_geo_tags |= 1;
+        found_geo_tags |= 8;
         break;
       case TIFF_TAG_GEO_TIE_POINT :
         read_geo_tie_point (&img, &entry);
-        found_geo_tags |= 2;
-        break;
-      case TIFF_TAG_GEO_KEY_DIR :
-        read_geo_key_dir (&img, &entry);
-        found_geo_tags |= 4;
-        break;
-      case TIFF_TAG_GEO_DOUBLE_PARAMS :
-        found_geo_tags |= 8;
-        break;
-      case TIFF_TAG_GEO_ASCII_PARAMS :
         found_geo_tags |= 16;
+        break;
+      case TIFF_TAG_GEO_TRANSFORMATION :
+        error ("implemetation error : model transformation");
+        found_geo_tags |= 32;
         break;
 
       /* unexpected */
@@ -484,7 +504,7 @@ Image img_details (Entry * entries)
     error ("pixel data information missing");
   if ( ! (img.comp.type == TIFF_COMP_LZW) )
     error ("implementation error : only lzw compression expected");
-  if (found_geo_tags != 31)
+  if ( ! (found_geo_tags == (1|2|4|8|16) || found_geo_tags == (1|2|4|32) ) )
     error ("some geo tags missing");
 
   img.n.x = (img.dim.x + img.tdim.x - 1) / img.tdim.x;
@@ -524,7 +544,7 @@ Image img_details (Entry * entries)
     for (int ix = 0; ix <=10; ++ix)
       printf ("%c",
         ix == tieApprox [0] && iy == tieApprox [1] ? '+' :
-        ix == 0 || ix == 10 || iy == 0 || iy == 5 ? '.' : ' ');
+        ix == 0 || ix == 10 || iy == 0 || iy == 5  ? '.' : ' ');
     if (iy == 3)
       printf ("       +  tiepoint");
     printf ("\n");
@@ -552,10 +572,11 @@ Image ifd_read ()
   .. 4 : first ifd loc
   */
   is_available (m, end, 8);
-  little_endian = 1;
-  if (m[0] == 'M' && m[1] == 'M')
-    little_endian = 0;
-  else if ( !(m [0] == 'I' && m [1] == 'I') )
+  if (m [0] == 'I' && m [1] == 'I')
+    parser_endianness (LITTLE_ENDIAN);
+  else if (m[0] == 'M' && m[1] == 'M')
+    parser_endianness (BIG_ENDIAN);
+  else
     error ("not a tiff file");
   m += 2;
   

@@ -1,2 +1,2 @@
-%.lib:
-	cd $* && make lib$*.a 
+%.a:
+	cd $* && make $@ 
