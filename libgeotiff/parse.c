@@ -39,12 +39,12 @@ uint32_t u32 (const char ** m)
 
 double d64 (const char ** m)
 {
-  const uint8_t *b = (const uint8_t *)*m;
+  const uint8_t *b = (const uint8_t *) *m;
   uint64_t r;
 
   *m += 8;
 
-  if (endianness)
+  if (endianness == LITTLE_ENDIAN)
     r =
       ((uint64_t)b[7] << 56) |
       ((uint64_t)b[6] << 48) |
@@ -55,7 +55,8 @@ double d64 (const char ** m)
       ((uint64_t)b[1] <<  8) |
       ((uint64_t)b[0]);
   else
-    r = ((uint64_t)b[0] << 56) |
+    r =
+      ((uint64_t)b[0] << 56) |
       ((uint64_t)b[1] << 48) |
       ((uint64_t)b[2] << 40) |
       ((uint64_t)b[3] << 32) |

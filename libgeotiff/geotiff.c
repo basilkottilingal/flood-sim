@@ -17,6 +17,7 @@
 #include "filemap.h"
 #include "lzw.h"
 #include "coordinates.h"
+#include "tiff.h"
 #include "geotiff.h"
 #include "parse.h"
 
@@ -25,6 +26,13 @@
   if ( (size_t) ((end_) - (cur_)) < (size_t) (reqd_) )       \
     error ("tiff file : insufficient size")
 
+struct
+{
+  const char * address;
+  const char * end;
+  size_t size;
+} map;
+
 static inline
 const char * jump (const char * start, const char * end, size_t dest)
 {
@@ -32,124 +40,7 @@ const char * jump (const char * start, const char * end, size_t dest)
   return start + dest;
 }
 
-typedef enum              /* tiff datatype {1, 2, .., 12}*/
-{
-  BYTE = 1,
-  ASCII,
-  SHORT,
-  LONG,
-  RATIONAL,
-  SBYTE,
-  UNDEFINED,
-  SSHORT,
-  SLONG,
-  SRATIONAL,
-  FLOAT,
-  DOUBLE
-} TIFFType;
-
-int tiff_datasize (TIFFType type)
-{
-  switch ( type )
-  {
-    case BYTE     :
-    case SBYTE    :
-    case ASCII    :
-      return 1;
-
-    case SHORT    :
-    case SSHORT   :
-      return 2;
-
-    case FLOAT    :
-    case LONG     :
-    case SLONG    :
-      return 4;
-
-    case DOUBLE   :
-    case SRATIONAL:
-    case RATIONAL :
-      return 8;
-
-    case UNDEFINED:
-      return 0;
-
-    default       :
-  }
-  assert (0);
-  return 0;
-}
-
 #define entry_size(entry) (entry->count * tiff_datasize (entry->type))
-
-typedef enum  /* data format for sample (for each pixel */
-{
-  T_UINT = 1, /* unsigned integer data                  */
-  T_INT,      /* two’s complement signed integer data   */
-  T_FLOAT,    /* IEEE floating point data [IEEE]        */
-  T_UNDEF     /* undefined data format                  */
-} TIFFFormat;
-
-typedef enum                          /* tiff tag types */
-{
-  /* tiff tags */
-  TIFF_TAG_IMAGE_WIDTH        = 256,   /* SHORT or LONG */
-  TIFF_TAG_IMAGE_LENGTH       = 257,   /* SHORT or LONG */
-  TIFF_TAG_BITS_PER_SAMPLE    = 258,   /* SHORT         */
-  TIFF_TAG_COMPRESSION        = 259,   /* SHORT         */
-  TIFF_TAG_PHOTOMETRIC_INTERP = 262,   /* SHORT         */
-
-  TIFF_TAG_STRIP_OFFSETS      = 273,   /* SHORT or LONG */
-  TIFF_TAG_SAMPLES_PER_PIXEL  = 277,   /* SHORT         */
-  TIFF_TAG_ROWS_PER_STRIP     = 278,   /* SHORT or LONG */
-  TIFF_TAG_STRIP_BYTE_COUNTS  = 279,   /* SHORT or LONG */
-
-  TIFF_TAG_PLANAR_CONFIG      = 284,   /* SHORT         */
-  TIFF_TAG_PREDICTOR          = 317,   /* SHORT         */
-
-  TIFF_TAG_TILE_WIDTH         = 322,   /* SHORT or LONG */
-  TIFF_TAG_TILE_LENGTH        = 323,   /* SHORT or LONG */
-  TIFF_TAG_TILE_OFFSETS       = 324,   /* LONG          */
-  TIFF_TAG_TILE_BYTE_COUNTS   = 325,   /* SHORT or LONG */
-
-  TIFF_TAG_SAMPLE_FORMAT      = 339,   /* SHORT         */
-
-  /* geotiff specific */
-  TIFF_TAG_GEO_KEY_DIR        = 34735, /* DOUBLE        */ 
-  TIFF_TAG_GEO_DOUBLE_PARAMS  = 34736, /* DOUBLE        */
-  TIFF_TAG_GEO_ASCII_PARAMS   = 34737, /* ASCII         */
-  TIFF_TAG_GEO_PIXEL_SCALE    = 33550, /* DOUBLE        */
-  TIFF_TAG_GEO_TIE_POINT      = 33922, /* DOUBLE        */
-  TIFF_TAG_GEO_TRANSFORMATION = 34264, /* DOUBLE        */
-
-  /* Not a (geo)tiff tag. Used as the end of tag array   */
-  TIFF_TAG_NOT_A_TAG          = 0,
-    
-} TIFFTag;
-
-typedef enum           /* image tile compression details */
-{
-
-  TIFF_COMP_NONE              = 1,
-  TIFF_COMP_LZW               = 5,
-  TIFF_COMP_PACKBITS          = 32773,
-  TIFF_COMP_DEFLATE           = 8
-} TIFFCompression;
-
-typedef enum                /* Predictor for compression */
-{
-  TIFF_PREDICTOR_DEFAULT      = 1,
-  TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING
-} TIFFCompressionPredictor;
-
-/*
-.. Related to image file directory (IFD) and it's entries
-*/
-typedef struct Entry                        /* IFD entry */
-{
-  uint16_t tag, type; 
-  uint32_t count, value;
-} Entry;
 
 typedef struct
 {
@@ -187,13 +78,23 @@ typedef struct Image
 
 } Image;
 
-static void read_geo_key_dir (Image * img, Entry * entry)
+/*
+static void geo_tag_entries (TIFFEntry * entries)
+{
+  TIFFEntry
+    KeyDirectry  = {.tag = TIFF_TAG_NOT_A_TAG},
+    DoubleParams = {.tag = TIFF_TAG_NOT_A_TAG},
+    AsciiParams  = {.tag = TIFF_TAG_NOT_A_TAG};
+}
+*/
+
+static void read_geo_key_dir (Image * img, TIFFEntry * entry)
 {
   const char * const start = filemap_address (FILEMAP_TIFF);
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
 
-  assert (entry->tag == TIFF_TAG_GEO_KEY_DIR);
+  assert (entry->tag == GeoKeyDirectoryTag);
   assert (entry->count % 4 == 0);
   assert (entry->type == SHORT);
 
@@ -223,7 +124,7 @@ static void read_geo_key_dir (Image * img, Entry * entry)
 }
         
 static
-void read_geo_pixel_scale (Image * img, Entry * entry)
+void read_geo_pixel_scale (Image * img, TIFFEntry * entry)
 {
   /*
   .. scaling of longitude and latitude per pixel.
@@ -233,7 +134,7 @@ void read_geo_pixel_scale (Image * img, Entry * entry)
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
 
-  assert (entry->tag == TIFF_TAG_GEO_PIXEL_SCALE);
+  assert (entry->tag == ModelPixelScaleTag);
   assert (entry->count == 3);
   assert (entry->type == DOUBLE);
    
@@ -248,7 +149,7 @@ void read_geo_pixel_scale (Image * img, Entry * entry)
 }
 
 static
-void read_geo_tie_point (Image * img, Entry * entry)
+void read_geo_tie_point (Image * img, TIFFEntry * entry)
 {
 
   /*
@@ -266,7 +167,7 @@ void read_geo_tie_point (Image * img, Entry * entry)
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
 
-  assert (entry->tag == TIFF_TAG_GEO_TIE_POINT);
+  assert (entry->tag == ModelTiepointTag);
   assert (entry->count % 6 == 0);
   assert (entry->type == DOUBLE);
    
@@ -292,14 +193,14 @@ void read_geo_tie_point (Image * img, Entry * entry)
 }
 
 static
-void read_geo_ascii_params (Image * img, Entry * entry)
+void read_geo_ascii_params (Image * img, TIFFEntry * entry)
 {
 
   const char * const start = filemap_address (FILEMAP_TIFF);
   assert (start != NULL);
   const char * const end   = start + filemap_size (FILEMAP_TIFF);
 
-  assert (entry->tag  == TIFF_TAG_GEO_ASCII_PARAMS);
+  assert (entry->tag  == GeoAsciiParamsTag);
   assert (entry->type == ASCII);
    
   is_available (start, end, entry->value + entry->count);
@@ -375,7 +276,7 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
 }
 
 static
-Image img_details (Entry * entries)
+Image img_details (TIFFEntry * entries)
 {
 
   int is_tiles = 0, is_strips = 0, ntiles = 0;
@@ -385,7 +286,7 @@ Image img_details (Entry * entries)
   while (1)
   {
 
-    Entry entry = *entries++;
+    TIFFEntry entry = *entries++;
     if (entry.tag == TIFF_TAG_NOT_A_TAG)
       break;
 
@@ -455,14 +356,14 @@ Image img_details (Entry * entries)
         break;
 
       /* geotiff specific */
-      case TIFF_TAG_GEO_KEY_DIR :
+      case GeoKeyDirectoryTag:
         read_geo_key_dir (&img, &entry);
         found_geo_tags |= 1;
         break;
-      case TIFF_TAG_GEO_DOUBLE_PARAMS :
+      case GeoDoubleParamsTag:
         found_geo_tags |= 2;
         break;
-      case TIFF_TAG_GEO_ASCII_PARAMS :
+      case GeoAsciiParamsTag:
         read_geo_ascii_params (&img, &entry);
         found_geo_tags |= 4;
         break;
@@ -471,15 +372,15 @@ Image img_details (Entry * entries)
       .. (a) pixel scale + tie point
       .. (b) matrix transformation model
       */
-      case TIFF_TAG_GEO_PIXEL_SCALE :
+      case ModelPixelScaleTag :
         read_geo_pixel_scale (&img, &entry);
         found_geo_tags |= 8;
         break;
-      case TIFF_TAG_GEO_TIE_POINT :
+      case ModelTiepointTag :
         read_geo_tie_point (&img, &entry);
         found_geo_tags |= 16;
         break;
-      case TIFF_TAG_GEO_TRANSFORMATION :
+      case ModelTransformationTag :
         error ("implemetation error : model transformation");
         found_geo_tags |= 32;
         break;
@@ -602,8 +503,9 @@ Image ifd_read ()
     "Tag", "Type", "Count", "Value/Offset"
   );
    
-  Entry * entries = malloc ((1 + nentries) * sizeof (Entry));
+  TIFFEntry * entries = malloc ((1 + nentries) * sizeof (TIFFEntry));
   is_available (m, end, nentries * 12);
+
   for (uint16_t n = 0; n < nentries; ++n)
   {
     uint16_t tag   = u16 (&m);
@@ -614,9 +516,9 @@ Image ifd_read ()
     printf ( "%6u %4u %8u %16u\n",
       tag, type, count, value );
 
-    entries [n] = (Entry) { tag, type, count, value };
+    entries [n] = (TIFFEntry) { tag, type, count, value };
   }
-  entries [nentries] = (Entry) {.tag = TIFF_TAG_NOT_A_TAG};
+  entries [nentries] = (TIFFEntry) {.tag = TIFF_TAG_NOT_A_TAG};
 
   Image img = img_details (entries);
 

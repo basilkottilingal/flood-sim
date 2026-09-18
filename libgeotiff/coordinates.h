@@ -1,6 +1,17 @@
 #ifndef _GEOTIFF_COORDINATES_H_
 #define _GEOTIFF_COORDINATES_H_
 
+
+  typedef enum
+  {
+    GeoKeyDirectoryTag            = 34735,
+    GeoDoubleParamsTag            = 34736,
+    GeoAsciiParamsTag             = 34737,
+    ModelPixelScaleTag            = 33550,
+    ModelTiepointTag              = 33922,
+    ModelTransformationTag        = 34264,
+  } GeotiffTags;
+
   typedef enum
   {
     GTModelTypeGeoKey             = 1024,
@@ -79,8 +90,6 @@
     .. note : every other Geographic CRS not implemented.
     */
   } GTGeographicCRS;
-
-
   
   typedef enum 
   {

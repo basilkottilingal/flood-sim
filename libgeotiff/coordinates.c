@@ -13,14 +13,16 @@
 References :
 http://geotiff.maptools.org/spec/contents.html
 https://docs.ogc.org/is/19-008r4/19-008r4.pdf
-
+http://www.opengis.net/doc/IS/GeoTIFF/1.1
+https://www.iogp.org/wp-content/uploads/2019/09/373-07-02.pdf
+https://gis.stackexchange.com/questions/120636/math-formula-for-transforming-from-epsg4326-to-epsg3857
 
 Model Type
   |_______Projected
   |
   |_______Geographic
           |___ WGS 84
-              |_ EPSG:4326 – 2D coordinate reference system (CRS)
+  ??            |_ EPSG:4326 – 2D coordinate reference system (CRS)
               |_ EPSG:4979 – 3D CRS
               |_ EPSG:4978 – geocentric 3D CRS
               |_ EPSG:7030 – reference ellipsoid
@@ -71,9 +73,6 @@ static GeoCoordSys map = (GeoCoordSys) {0};
 void geotiff_key (GeoKey key)
 {
 
-  printf ("\tGT key : KeyID %6u, TIFFTagLocation %6u, Count %6u, Value_Offset %6u\n",
-     key.KeyID, key.TIFFTagLocation, key.Count, key.Value_Offset);
-      
   switch (key.KeyID)
   {
     case GTModelTypeGeoKey :
@@ -101,27 +100,58 @@ void geotiff_key (GeoKey key)
         error ("unknown EPSG CRS reference");
       break;
 
+    case GeogCitationGeoKey :
+      printf ("\tGeogCitationGeoKey\n");
+      break;
+
     case GeogGeodeticDatumGeoKey :
-      printf("\tGeogGeodeticDatumGeoKey  %6u\n", key.Value_Offset);
+      printf ("\tGeogGeodeticDatumGeoKey\n");
       break;
 
     case GeogPrimeMeridianGeoKey :
-      printf("\tGeogPrimeMeridianGeoKey  %6u\n", key.Value_Offset);
+      printf ("\tGeogPrimeMeridianGeoKey\n");
       break;
 
-    case GeogLinearUnitsGeoKey   :
-      printf("\tGeogLinearUnitsGeoKey    %6u\n", key.Value_Offset);
+    case GeogLinearUnitsGeoKey :
+      printf ("\tGeogLinearUnitsGeoKey\n");
       break;
 
-    case GeogAngularUnitsGeoKey  :
-      printf("\tGeogAngularUnitsGeoKey   %6u\n", key.Value_Offset);
+    case GeogLinearUnitSizeGeoKey :
+      printf ("\tGeogLinearUnitSizeGeoKey\n");
       break;
 
-    case GeogCitationGeoKey :
-      printf ("\tGeoCitationGeoKey\n");
+    case GeogAngularUnitsGeoKey :
+      printf ("\tGeogAngularUnitsGeoKey\n");
+      break;
+
+    case GeogAngularUnitSizeGeoKey :
+      printf ("\tGeogAngularUnitSizeGeoKey\n");
+      break;
+
+    case GeogEllipsoidGeoKey :
+      printf ("\tGeogEllipsoidGeoKey\n");
+      break;
+
+    case GeogSemiMajorAxisGeoKey :
+      printf ("\tGeogSemiMajorAxisGeoKey\n");
+      break;
+
+    case GeogSemiMinorAxisGeoKey :
+      printf ("\tGeogSemiMinorAxisGeoKey\n");
+      break;
+
+    case GeogInvFlatteningGeoKey :
+      printf ("\tGeogInvFlatteningGeoKey\n");
+      break;
+
+    case GeogPrimeMeridianLongGeoKey :
+      printf ("\tGeogPrimeMeridianLongGeoKey\n");
       break;
       
     default :
+      printf ("\tGT key : KeyID %6u, TIFFTagLocation %6u, Count %6u, Value_Offset %6u\n",
+        key.KeyID, key.TIFFTagLocation, key.Count, key.Value_Offset);
+      
   }
 }
 
