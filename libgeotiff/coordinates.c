@@ -331,4 +331,16 @@ void coordinate_map (CRS * crs, CoordG c, double * index)
   index [1] = - (c.lat - tie [4]) / scale [1] + tie [1];
 }
 
+void tiepoint_new (CRS * crs, CoordG c, double *newtp)
+{
+  double * tie = crs->tiepoint, * scale = crs->scale;
+  newtp [0] =   (c.lon - tie [3]) / scale [0] + tie [0],
+  newtp [1] = - (c.lat - tie [4]) / scale [1] + tie [1];
+  if (crs->gcrs.Dimension == 3)
+    newtp [2] = (c.alt - tie [5]) / scale [2] + tie [2];
+  newtp [3] = c.lon;
+  newtp [4] = c.lat;
+  newtp [5] = c.alt;
+}
+
 #undef error

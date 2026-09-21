@@ -144,6 +144,7 @@
     uint16_t AngularUnits;
     uint16_t LinearUnits;
     uint16_t EllipsoidReference;
+    uint16_t Dimension;
 
     double   PrimeMeridianLong; 
     double   AngularUnitSize;
@@ -151,6 +152,7 @@
     double   SemiMajorAxis;
     double   SemiMinorAxis;
     double   InvFlattening;
+    double   EccentricitySquared;
   } GeographicCRS;
 
   #if 0
@@ -165,21 +167,23 @@
   } VerticalCRS;
   #endif
 
-  #define EPSG4326_CRS                                   \
-    (GeographicCRS)                                      \
-     {                                                   \
-       .ModelType            = 4326,                     \
-       .PrimeMeridian        = 8901,                     \
-       .PrimeMeridianLong    = 0.0,                      \
-       .AngularUnits         = 9102,                     \
-       .AngularUnitSize      = M_PI/180.,                \
-       .LinearUnits          = 9001,                     \
-       .LinearUnitsSize      = 1.0,                      \
-       .EllipsoidReference   = 7030,                     \
-       .SemiMajorAxis        = 6378137.0,                \
-       .SemiMinorAxis        = 6356752.3142,             \
-       .InvFlattening        = 298.257223563,            \
-     }
+  #define EPSG4326_CRS                                     \
+    (GeographicCRS)                                        \
+      {                                                    \
+        .ModelType            = 4326,                      \
+        .Dimension            = 2,                         \
+        .PrimeMeridian        = 8901,                      \
+        .PrimeMeridianLong    = 0.0,                       \
+        .AngularUnits         = 9102,                      \
+        .AngularUnitSize      = M_PI/180.,                 \
+        .LinearUnits          = 9001,                      \
+        .LinearUnitsSize      = 1.0,                       \
+        .EllipsoidReference   = 7030,                      \
+        .SemiMajorAxis        = 6378137.0,                 \
+        .SemiMinorAxis        = 6356752.3142,              \
+        .InvFlattening        = 298.257223563,             \
+        .EccentricitySquared  = 6.69437999014E-3           \
+      }
 
   typedef struct
   {
@@ -203,5 +207,6 @@
   */
   CRS     geotiff_tags          (TIFFEntry  * entries);
   void    coordinate_map        (CRS * crs, CoordG c, double * index);
+  void    tiepoint_new          (CRS * crs, CoordG c, double * new_tiepoint);
 
 #endif

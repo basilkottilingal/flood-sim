@@ -3,8 +3,6 @@
 
   #include "coordinates.h"
 
-  struct Image;
-
   /* APIs */
   void   geotiff_map          ( const char * tiff );
   void   geotiff_map_destroy  ( );
