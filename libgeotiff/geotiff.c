@@ -448,23 +448,18 @@ double geotiff_elevation (coord c)
   return NAN;
 }
 
-double geotiff_elevation_at (double geo_coord [])
+double geotiff_elevation_at (CoordG c)
 {
   if (!is_running)
     return NAN;
-  double
-    * tie   = geotiff.crs.tiepoint,
-    * scale = geotiff.crs.scale,
-    x       =   (geo_coord [0] - tie [3]) / scale [0]  + tie [0],
-    y       = - (geo_coord [1] - tie [4]) / scale [1]  + tie [1];
-  int i = floor (x), j = floor (y);
+  double pixel [2];
+  coordinate_map (& geotiff.crs, c, pixel); 
+  int i = floor (pixel [0]), j = floor (pixel [1]);
   if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
     return NAN;
 
   /* fixme : interpolate */
   return geotiff_elevation ( (coord) {j, i} );
-
-  return NAN;
 }
 
 void geotiff_map (const char * tiff)

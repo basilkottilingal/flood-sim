@@ -3,6 +3,8 @@
 
   #include "coordinates.h"
 
+  
+
   /* WGS84 ellipsoid constants : semi-major axis, flattening, square of ecc  */
   #define WGS84_A   6378137.0
   #define WGS84_F  (1.0 / 298.257223563)

@@ -109,12 +109,12 @@ void geotiff_keys (struct GTTags gt, CRS * crs)
       case GTModelTypeGeoKey :
         gtmodel = Value_Offset;
         printf ("\tGTModel %s\n",
-          gtmodel == ModelTypeProjected  ? "projected  coordinate system" :
+          gtmodel == ModelTypeProjected  ?  "projected coordinate system" :
           gtmodel == ModelTypeGeographic ? "geographic coordinate system" : 
           gtmodel == ModelTypeGeocentric ? "geocentric coordinate system" : 
-                                             "unknown  coordinate system");
+                                              "unknown coordinate system");
         if (gtmodel != ModelTypeGeographic)
-          not_implemented ("Geotiff CRS mode");
+          not_implemented ("Only Geographic CRS available");
         break;
   
       case GTRasterTypeGeoKey :
@@ -203,14 +203,14 @@ void geotiff_keys (struct GTTags gt, CRS * crs)
 
   if (gcrs == EPSG4326)
   {
-    GeographicCRS g = EPSG4326_CRS;
-    printf ("\t==============default values of EPSG 4326=============\n");
+    GeographicCRS g = crs->gcrs = EPSG4326_CRS;
+    printf ("\t============= default values of EPSG 4326 ============\n");
     printf ("\tSemiMajorAxis %g\n", g.SemiMajorAxis);
     printf ("\tSemiMinorAxis %g\n", g.SemiMinorAxis);
     printf ("\tInvFlattening %g\n", g.InvFlattening);
     printf ("\tPrimeMeridian %g degrees\n", g.PrimeMeridianLong);
-    printf ("\tLinearUnits Meters\n");
-    printf ("\tAngularUnits Degree\n");
+    printf ("\tLinearUnits   Meters\n");
+    printf ("\tAngularUnits  Degree\n");
   }
 }
 
@@ -324,130 +324,11 @@ geotiff_tags (TIFFEntry * entries)
   return crs;
 }
 
-#if 0
-
-
-static void read_geo_key_dir (Image * img, TIFFEntry * entry)
+void coordinate_map (CRS * crs, CoordG c, double * index)
 {
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == GeoKeyDirectoryTag);
-  assert (entry->count % 4 == 0);
-  assert (entry->type == SHORT);
-
-  is_available (start, end, entry->value + entry->count * 2);
-
-  const char * array = start + entry->value;
-  uint16_t
-    KeyDirectoryVersion = u16 (&array),
-    KeyRevision         = u16 (&array),
-    MinorRevision       = u16 (&array),
-    NumberOfKeys        = u16 (&array);
-  printf ("KeyDirectoryVersion %u, KeyRevision %u, MinorRevision %u, NumberOfKeys %u\n",
-    KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys);
-
-  for (int i=0; i<NumberOfKeys; ++i)
-  {
-    geotiff_key ( (GeoKey)
-      {
-        u16 (&array),
-        u16 (&array),
-        u16 (&array),
-        u16 (&array)
-      }
-    );
-
-  }
+  double * tie = crs->tiepoint, * scale = crs->scale;
+  index [0] =   (c.lon - tie [3]) / scale [0] + tie [0],
+  index [1] = - (c.lat - tie [4]) / scale [1] + tie [1];
 }
-        
-static
-void read_geo_pixel_scale (Image * img, TIFFEntry * entry)
-{
-  /*
-  .. scaling of longitude and latitude per pixel.
-  */
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == ModelPixelScaleTag);
-  assert (entry->count == 3);
-  assert (entry->type == DOUBLE);
-   
-  is_available (start, end, entry->value + entry->count * 8);
-
-  const char * array = start + entry->value;
-  printf ("pixel scale\n");
-  double scale [3] = {d64 (&array), d64 (&array), d64 (&array)};
-  printf ("\t(%g, %g, %g) degrees per pixel\n", scale [0], scale [1], scale [2]);
-  memcpy (img->coordMap.scale, scale, sizeof (scale));
-
-}
-
-static
-void read_geo_tie_point (Image * img, TIFFEntry * entry)
-{
-
-  /*
-  .. Tie point(s) is a tuple of 6 double numbers.
-  .. (I, J, K) represent which pixel corresponds to reference coordinate's origin
-  .. (X, Y, Z) represent longitude (-180 deg W, 180 deg E],
-  .. latitude [-90 deg N, 90 deg N], and elevation of the reference pixel.
-  .. NOTE :
-  .. (a) the reference pixel (I, J, K) can be fractional. 
-  .. (b) There can be multiple tie points. 
-
-  */
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == ModelTiepointTag);
-  assert (entry->count % 6 == 0);
-  assert (entry->type == DOUBLE);
-   
-  is_available (start, end, entry->value + entry->count * 8);
-
-  const char * array = start + entry->value;
-  printf ("tie point\n");
-
-  double tiepoint [6] = 
-    { 
-      d64 (&array), d64 (&array), d64 (&array),
-      d64 (&array), d64 (&array), d64 (&array)
-    };
-
-  printf ("\ttiepoint pixel [%g, %g, %g]\n", tiepoint [0], tiepoint [1], tiepoint [2]);
-  printf ("\ttiepoint coord (%g, %g, %g)\n", tiepoint [3], tiepoint [4], tiepoint [5]);
-  printf ("\tInference (longitude %g latitude %g)\n", tiepoint [3], tiepoint [4]);
-
-  if (entry->count > 6)
-    error ("warning : library not designed for multiple tie points");
-
-  memcpy (img->coordMap.tiepoint, tiepoint, sizeof (tiepoint));
-}
-
-static
-void read_geo_ascii_params (Image * img, TIFFEntry * entry)
-{
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag  == GeoAsciiParamsTag);
-  assert (entry->type == ASCII);
-   
-  is_available (start, end, entry->value + entry->count);
-
-  const char * params = start + entry->value;
-  printf ("geo ascii params\n\t%s\n", params);
-
-}
-#endif
 
 #undef error

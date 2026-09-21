@@ -107,14 +107,19 @@
   } GTPixelType;
 
   /*
-  .. Coordinates used in Geographic Coordinate Reference System and
-  .. Geocentric/Cartesian/ECEF Coordinates System. Units expected are
-  .. respectively (degrees, degrees, meter) and (meter, meter, meter)
+  .. Coordinates used in
+  .. (a) Geographic Coordinate Reference System
+  .. (b) Geocentric/Cartesian/ECEF Coordinates System.
+  .. (c) Local East-North-Up Coordinates;
+  .. Units expected are respectively
+  .. (a) (degrees, degrees, meter),
+  .. (b) (meter, meter, meter)
+  .. (c) (meter, meter, meter)
   */
   typedef struct
   {
-    double lat, lon, alt;
-  } GeoCoord;
+    double lon, lat, alt;
+  } CoordG;
 
   typedef struct
   {
@@ -123,12 +128,17 @@
 
   typedef struct
   {
+    double e, n, u;
+  } CoordL;
+
+  typedef struct
+  {
     uint16_t ModelType;
     /*
     .. The following are redundant information if ModelType is some
     .. standard models like EPSG 4326 (i.e WSG 84 - 2D ), in which
-    .. case axii length, flattening, reference datum, ellipsoid model,
-    .. are already known
+    .. case radii, flattening, reference datum, ellipsoid model,
+    .. are already known.
     */
     uint16_t PrimeMeridian;
     uint16_t AngularUnits;
@@ -143,6 +153,7 @@
     double   InvFlattening;
   } GeographicCRS;
 
+  #if 0
   typedef struct
   {
     uint16_t ModelType;
@@ -152,6 +163,7 @@
   {
     uint16_t ModelType;
   } VerticalCRS;
+  #endif
 
   #define EPSG4326_CRS                                   \
     (GeographicCRS)                                      \
@@ -183,7 +195,13 @@
    
   } CRS;
 
-  /* api */
-  CRS geotiff_tags (TIFFEntry  * entries);
+  /*
+  .. APIs
+  .. 1. geotiff_tags ()    : reads all geotiff tags and create a Coordinate Ref.
+  .. 2. coordinate_map ()  : maps a geodetic coordinate (long, lat) to the
+  ..    index (i, j) of the raster.
+  */
+  CRS     geotiff_tags          (TIFFEntry  * entries);
+  void    coordinate_map        (CRS * crs, CoordG c, double * index);
 
 #endif

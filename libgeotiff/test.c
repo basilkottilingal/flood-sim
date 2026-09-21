@@ -43,11 +43,12 @@ int main (int argc, char **argv)
 
   geotiff_map (argv [1]);
 
-  /* coord of kozhikode 11.258753 N, 75.780411 E
+  /*
+  .. kozhikode 11.258753 N, 75.780411 E
   */
-  double y = 11.258753, x = 75.780411;
+  CoordG c = (CoordG) {.lat = 11.258753, .lon = 75.780411}; 
   printf ("elevation at (%g N %g E) = %g\n",
-    y, x, geotiff_elevation_at ( (double []) {x, y} ) );
+    c.lat, c.lon, geotiff_elevation_at (c) );
 
   geotiff_map_destroy ();
 
