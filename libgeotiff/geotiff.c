@@ -26,21 +26,12 @@
   if ( (size_t) ((end_) - (cur_)) < (size_t) (reqd_) )       \
     error ("tiff file : insufficient size")
 
-struct
-{
-  const char * address;
-  const char * end;
-  size_t size;
-} map;
-
 static inline
 const char * jump (const char * start, const char * end, size_t dest)
 {
   is_available (start, end, dest);
   return start + dest;
 }
-
-#define entry_size(entry) (entry->count * tiff_datasize (entry->type))
 
 typedef struct
 {
@@ -57,158 +48,12 @@ typedef struct Image
   uint32_t byte_counts_at;
   uint16_t byte_counts_type;
 
-  struct
-  {
-    double tiepoint [6]; /* tie point. pixel +  refcoord         */
-    double scale    [3]; /* scale (degrees per pixel)            */
-  } coordMap;
+  CRS crs;
 
-  struct
-  {
-    uint16_t pred;
-    uint16_t type;
-  } comp;             /* compression details & decompression tools */
+  TIFFRaster pixel;
 
-  struct
-  {
-    uint16_t samples; /* samples per pixel                         */
-    uint16_t bits;    /* bits per sample                           */
-    uint16_t format;  /* data type : unsigned, float, double, etc  */
-  } pixel;
-
+  TIFFCompression comp;
 } Image;
-
-/*
-static void geo_tag_entries (TIFFEntry * entries)
-{
-  TIFFEntry
-    KeyDirectry  = {.tag = TIFF_TAG_NOT_A_TAG},
-    DoubleParams = {.tag = TIFF_TAG_NOT_A_TAG},
-    AsciiParams  = {.tag = TIFF_TAG_NOT_A_TAG};
-}
-*/
-
-static void read_geo_key_dir (Image * img, TIFFEntry * entry)
-{
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == GeoKeyDirectoryTag);
-  assert (entry->count % 4 == 0);
-  assert (entry->type == SHORT);
-
-  is_available (start, end, entry->value + entry->count * 2);
-
-  const char * array = start + entry->value;
-  uint16_t
-    KeyDirectoryVersion = u16 (&array),
-    KeyRevision         = u16 (&array),
-    MinorRevision       = u16 (&array),
-    NumberOfKeys        = u16 (&array);
-  printf ("KeyDirectoryVersion %u, KeyRevision %u, MinorRevision %u, NumberOfKeys %u\n",
-    KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys);
-
-  for (int i=0; i<NumberOfKeys; ++i)
-  {
-    geotiff_key ( (GeoKey)
-      {
-        u16 (&array),
-        u16 (&array),
-        u16 (&array),
-        u16 (&array)
-      }
-    );
-
-  }
-}
-        
-static
-void read_geo_pixel_scale (Image * img, TIFFEntry * entry)
-{
-  /*
-  .. scaling of longitude and latitude per pixel.
-  */
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == ModelPixelScaleTag);
-  assert (entry->count == 3);
-  assert (entry->type == DOUBLE);
-   
-  is_available (start, end, entry->value + entry->count * 8);
-
-  const char * array = start + entry->value;
-  printf ("pixel scale\n");
-  double scale [3] = {d64 (&array), d64 (&array), d64 (&array)};
-  printf ("\t(%g, %g, %g) degrees per pixel\n", scale [0], scale [1], scale [2]);
-  memcpy (img->coordMap.scale, scale, sizeof (scale));
-
-}
-
-static
-void read_geo_tie_point (Image * img, TIFFEntry * entry)
-{
-
-  /*
-  .. Tie point(s) is a tuple of 6 double numbers.
-  .. (I, J, K) represent which pixel corresponds to reference coordinate's origin
-  .. (X, Y, Z) represent longitude (-180 deg W, 180 deg E],
-  .. latitude [-90 deg N, 90 deg N], and elevation of the reference pixel.
-  .. NOTE :
-  .. (a) the reference pixel (I, J, K) can be fractional. 
-  .. (b) There can be multiple tie points. 
-
-  */
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag == ModelTiepointTag);
-  assert (entry->count % 6 == 0);
-  assert (entry->type == DOUBLE);
-   
-  is_available (start, end, entry->value + entry->count * 8);
-
-  const char * array = start + entry->value;
-  printf ("tie point\n");
-
-  double tiepoint [6] = 
-    { 
-      d64 (&array), d64 (&array), d64 (&array),
-      d64 (&array), d64 (&array), d64 (&array)
-    };
-
-  printf ("\ttiepoint pixel [%g, %g, %g]\n", tiepoint [0], tiepoint [1], tiepoint [2]);
-  printf ("\ttiepoint coord (%g, %g, %g)\n", tiepoint [3], tiepoint [4], tiepoint [5]);
-  printf ("\tInference (longitude %g latitude %g)\n", tiepoint [3], tiepoint [4]);
-
-  if (entry->count > 6)
-    error ("warning : library not designed for multiple tie points");
-
-  memcpy (img->coordMap.tiepoint, tiepoint, sizeof (tiepoint));
-}
-
-static
-void read_geo_ascii_params (Image * img, TIFFEntry * entry)
-{
-
-  const char * const start = filemap_address (FILEMAP_TIFF);
-  assert (start != NULL);
-  const char * const end   = start + filemap_size (FILEMAP_TIFF);
-
-  assert (entry->tag  == GeoAsciiParamsTag);
-  assert (entry->type == ASCII);
-   
-  is_available (start, end, entry->value + entry->count);
-
-  const char * params = start + entry->value;
-  printf ("geo ascii params\n\t%s\n", params);
-
-}
 
 static
 void write_decoded_pixels (void * decoded, coord tile, Image img)
@@ -218,12 +63,12 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
   char * const dbend = db + filemap_size (FILEMAP_PIXELS);
 
   uint16_t
-    nbits   = img.pixel.bits,
-    samples = img.pixel.samples,
-    hdiff   = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING,
-    format  = img.pixel.format;
+    nbits    = img.pixel.bits,
+    nsamples = img.pixel.nsamples,
+    hdiff    = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING,
+    format   = img.pixel.format;
 
-  if (samples != 1)
+  if (nsamples != 1)
     error ("expects only one sample per pixel in geotiff");
 
   const char * b = (const char *) decoded;
@@ -283,12 +128,12 @@ Image img_details (TIFFEntry * entries)
   int found_geo_tags = 0;
   Image img = {0};
 
-  while (1)
+  TIFFEntry * ptr = entries;
+
+  while (ptr->tag != 0)
   {
 
-    TIFFEntry entry = *entries++;
-    if (entry.tag == TIFF_TAG_NOT_A_TAG)
-      break;
+    TIFFEntry entry = *ptr++;
 
     switch (entry.tag)
     {
@@ -340,49 +185,13 @@ Image img_details (TIFFEntry * entries)
         img.pixel.format = entry.value;
         break;
       case TIFF_TAG_SAMPLES_PER_PIXEL :
-        img.pixel.samples = entry.value;
+        img.pixel.nsamples = entry.value;
         break;
       case TIFF_TAG_BITS_PER_SAMPLE :
         img.pixel.bits = entry.value;
         break;
 
       case TIFF_TAG_PLANAR_CONFIG :
-        /*
-        .. It matters if theres are more than one samples/pixel.
-        .. Eg : if samples = {R, G, B} you can interleave them as
-        .. RGBRGBRGB... or as RRRR..GGG...BBB....
-        .. For Geotiff it is 1 sample (i.e {elevation}) per pixel.
-        */
-        break;
-
-      /* geotiff specific */
-      case GeoKeyDirectoryTag:
-        read_geo_key_dir (&img, &entry);
-        found_geo_tags |= 1;
-        break;
-      case GeoDoubleParamsTag:
-        found_geo_tags |= 2;
-        break;
-      case GeoAsciiParamsTag:
-        read_geo_ascii_params (&img, &entry);
-        found_geo_tags |= 4;
-        break;
-      /*
-      .. there are two models for raster->coord mapping
-      .. (a) pixel scale + tie point
-      .. (b) matrix transformation model
-      */
-      case ModelPixelScaleTag :
-        read_geo_pixel_scale (&img, &entry);
-        found_geo_tags |= 8;
-        break;
-      case ModelTiepointTag :
-        read_geo_tie_point (&img, &entry);
-        found_geo_tags |= 16;
-        break;
-      case ModelTransformationTag :
-        error ("implemetation error : model transformation");
-        found_geo_tags |= 32;
         break;
 
       /* unexpected */
@@ -390,6 +199,7 @@ Image img_details (TIFFEntry * entries)
     }
   }
 
+  CRS crs = img.crs = geotiff_tags (entries); 
 
   /* some error/warning checks */
   if (is_strips && is_tiles)
@@ -401,12 +211,10 @@ Image img_details (TIFFEntry * entries)
     error ("tile details not defined");
   if (! (img.byte_counts_type == SHORT || img.byte_counts_type == LONG) )
     error ("expect only SHORT/LONG for BYTE_COUNT data type");
-  if (img.pixel.bits == 0 || img.pixel.samples == 0 || img.pixel.format == 0)
+  if (img.pixel.bits == 0 || img.pixel.nsamples == 0 || img.pixel.format == 0)
     error ("pixel data information missing");
   if ( ! (img.comp.type == TIFF_COMP_LZW) )
     error ("implementation error : only lzw compression expected");
-  if ( ! (found_geo_tags == (1|2|4|8|16) || found_geo_tags == (1|2|4|32) ) )
-    error ("some geo tags missing");
 
   img.n.x = (img.dim.x + img.tdim.x - 1) / img.tdim.x;
   img.n.y = (img.dim.y + img.tdim.y - 1) / img.tdim.y;
@@ -415,7 +223,7 @@ Image img_details (TIFFEntry * entries)
   printf ("tile  [h%6u x w%6u] pixels\n", img.tdim.y, img.tdim.x );
   printf ("grid  [ %6u x  %6u] tiles \n", img.n.y   , img.n.x    );
   printf ("pixel [ %6u x  %6u] samples x bytes/sample \n",
-    img.pixel.samples, img.pixel.bits >> 3);
+    img.pixel.nsamples, img.pixel.bits >> 3);
   printf ("tile count %u (does it match %u ?)\n", ntiles, img.n.x * img.n.y);
   printf ("compression type : %s\n", img.comp.type == TIFF_COMP_LZW ? 
     "lzw" : "unknown" );
@@ -425,9 +233,9 @@ Image img_details (TIFFEntry * entries)
 
   printf ("coord bound\n");
   double
-    * tiepixel = img.coordMap.tiepoint,
-    * tiecoord = &img.coordMap.tiepoint [3],
-    * scale    = img.coordMap.scale;
+    * tiepixel = crs.tiepoint,
+    * tiecoord = & crs.tiepoint [3],
+    * scale    = crs.scale;
   printf ("(%#3.4gE %#3.4gN)     (%#3.4gE %#3.4gN)\n",
     - tiepixel[0] * scale[0] + tiecoord [0],
       tiepixel[1] * scale[1] + tiecoord [1],
@@ -543,29 +351,6 @@ void img_unwrap (Image img)
   .. (4) Sample datatype : 1 unsigned, 2 int, 3 float, 4 Custom
   .. (5) Sample data length in no: of bits.
   .. (6) Predictor (if used before encoding) : 1 not used, 2 for horizontal diff
-
-  size_t bytes = img.pixel.bits >> 3;
-  switch (bytes) {
-    case 8 :
-      break;
-    case 4 :
-      break;
-    case 2 :
-      break;
-    case 1 :
-      break;
-    default :
-      error ("sample size not a power of 2");
-  }
-
-  //fixme : for the moment we assume ...
-  
-    for (int i = tilex [0] * img.tdim [0]; i< (tilex [0] + 1) * img.tdim [0]; ++i) {
-      //char * m = & db.start [tilex.x * im
-      for (int j = tilex [1] * img.tdim [1]; i< (tilex [1] + 1) * img.tdim [1]; ++i) {
-        if (
-      }
-    }
   */
 
   const char * const start  = filemap_address (FILEMAP_TIFF);
@@ -574,9 +359,9 @@ void img_unwrap (Image img)
 
   size_t
     gridsize = img.tdim.y * img.tdim.x 
-               * img.pixel.samples * (img.pixel.bits >> 3),
+               * img.pixel.nsamples * (img.pixel.bits >> 3),
     imgsize  = img.dim.y * img.dim.x
-               * img.pixel.samples * (img.pixel.bits >> 3);
+               * img.pixel.nsamples * (img.pixel.bits >> 3);
 
   if (imgsize > (1<<30))
     error ("tiff image is too big. reprogramme to load image partially");
@@ -668,8 +453,8 @@ double geotiff_elevation_at (double geo_coord [])
   if (!is_running)
     return NAN;
   double
-    * tie   = geotiff.coordMap.tiepoint,
-    * scale = geotiff.coordMap.scale,
+    * tie   = geotiff.crs.tiepoint,
+    * scale = geotiff.crs.scale,
     x       =   (geo_coord [0] - tie [3]) / scale [0]  + tie [0],
     y       = - (geo_coord [1] - tie [4]) / scale [1]  + tie [1];
   int i = floor (x), j = floor (y);

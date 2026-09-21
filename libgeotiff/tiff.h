@@ -12,6 +12,21 @@
     uint32_t value;
   } TIFFEntry;
 
+  typedef struct
+  {
+    uint16_t nsamples;
+    uint16_t bits;
+    uint16_t format;
+    uint16_t planar;
+    void     ** data;
+  } TIFFRaster;
+
+  typedef struct
+  {
+    uint16_t pred;
+    uint16_t type;
+  } TIFFCompression;
+
   typedef enum
   {
     T_UINT = 1,
@@ -71,7 +86,7 @@
     TIFF_COMP_LZW               = 5,
     TIFF_COMP_PACKBITS          = 32773,
     TIFF_COMP_DEFLATE           = 8
-  } TIFFCompression;
+  } TIFFCompressionType;
 
   typedef enum
   {
@@ -80,6 +95,6 @@
   } TIFFCompressionPredictor;
 
   /* api */ 
-  size_t tiff_datasize (TIFFType type);
+  uint32_t tiff_datasize (TIFFType type);
   
 #endif 

@@ -1,6 +1,7 @@
 #ifndef _GEOTIFF_COORDINATES_H_
 #define _GEOTIFF_COORDINATES_H_
 
+  #include "tiff.h"
 
   typedef enum
   {
@@ -10,7 +11,7 @@
     ModelPixelScaleTag            = 33550,
     ModelTiepointTag              = 33922,
     ModelTransformationTag        = 34264,
-  } GeotiffTags;
+  } GTTagsType;
 
   typedef enum
   {
@@ -69,7 +70,7 @@
     VerticalCitationGeoKey        = 4097,
     VerticalDatumGeoKey           = 4098,
     VerticalUnitsGeoKey           = 4099
-  } GTKeys;
+  } GTKeysType;
 
   typedef enum
   {
@@ -83,9 +84,7 @@
     .. 32767          = user-defined GCS
     .. [32768, 65535] = Private User Implementations
     */
-
-    EPSG4326                = 4326,
-
+    EPSG4326                      = 4326,
     /*
     .. note : every other Geographic CRS not implemented.
     */
@@ -93,41 +92,98 @@
   
   typedef enum 
   {
-    ModelTypeUndefined      = 0,
-    ModelTypeProjected      = 1,
-    ModelTypeGeographic     = 2,
-    ModelTypeGeocentric     = 3,
-    ModelTypeUserDefined    = 32767
-  } GTModel;
+    ModelTypeUndefined            = 0,
+    ModelTypeProjected            = 1,
+    ModelTypeGeographic           = 2,
+    ModelTypeGeocentric           = 3,
+    ModelTypeUserDefined          = 32767
+  } GTModelType;
   
   typedef enum 
   {
-    PixelIsUndefined        = 0,
-    PixelIsArea             = 1,
-    PixelIsPoint            = 2,
-  } GTPixel;
+    PixelIsUndefined              = 0,
+    PixelIsArea                   = 1,
+    PixelIsPoint                  = 2,
+  } GTPixelType;
+
+  /*
+  .. Coordinates used in Geographic Coordinate Reference System and
+  .. Geocentric/Cartesian/ECEF Coordinates System. Units expected are
+  .. respectively (degrees, degrees, meter) and (meter, meter, meter)
+  */
+  typedef struct
+  {
+    double lat, lon, alt;
+  } GeoCoord;
 
   typedef struct
   {
-    GTModel         model;
-    GTPixel         pixel;
-    GTGeographicCRS gCRS; /* only applies to Geog CRS */
-  
+    double x, y, z;
+  } Coord3;
+
+  typedef struct
+  {
+    uint16_t ModelType;
+    /*
+    .. The following are redundant information if ModelType is some
+    .. standard models like EPSG 4326 (i.e WSG 84 - 2D ), in which
+    .. case axii length, flattening, reference datum, ellipsoid model,
+    .. are already known
+    */
+    uint16_t PrimeMeridian;
+    uint16_t AngularUnits;
+    uint16_t LinearUnits;
+    uint16_t EllipsoidReference;
+
+    double   PrimeMeridianLong; 
+    double   AngularUnitSize;
+    double   LinearUnitsSize;
+    double   SemiMajorAxis;
+    double   SemiMinorAxis;
+    double   InvFlattening;
+  } GeographicCRS;
+
+  typedef struct
+  {
+    uint16_t ModelType;
+  } ProjectedCRS;
+
+  typedef struct
+  {
+    uint16_t ModelType;
+  } VerticalCRS;
+
+  #define EPSG4326_CRS                                   \
+    (GeographicCRS)                                      \
+     {                                                   \
+       .ModelType            = 4326,                     \
+       .PrimeMeridian        = 8901,                     \
+       .PrimeMeridianLong    = 0.0,                      \
+       .AngularUnits         = 9102,                     \
+       .AngularUnitSize      = M_PI/180.,                \
+       .LinearUnits          = 9001,                     \
+       .LinearUnitsSize      = 1.0,                      \
+       .EllipsoidReference   = 7030,                     \
+       .SemiMajorAxis        = 6378137.0,                \
+       .SemiMinorAxis        = 6356752.3142,             \
+       .InvFlattening        = 298.257223563,            \
+     }
+
+  typedef struct
+  {
+    GTModelType     model;
+    GTPixelType     pixel;
+
+    /* other CRS models are not implemented */
+    GeographicCRS   gcrs;
+
     double matrix   [4][4];
     double scale    [3];
     double tiepoint [6];
    
-  } GeoCoordSys;
-
-  typedef struct
-  {
-    uint16_t KeyID;
-    uint16_t TIFFTagLocation;
-    uint16_t Count;
-    uint16_t Value_Offset;
-  } GeoKey;
+  } CRS;
 
   /* api */
-  void geotiff_key (GeoKey key);
+  CRS geotiff_tags (TIFFEntry  * entries);
 
 #endif

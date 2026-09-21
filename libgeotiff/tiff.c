@@ -2,34 +2,34 @@
 
 #include "tiff.h"
 
-size_t tiff_datasize (TIFFType type)
+uint32_t tiff_datasize (TIFFType type)
 {
   switch ( type )
   {
     case BYTE     :
     case SBYTE    :
     case ASCII    :
-      return 1;
+      return 1u;
 
     case SHORT    :
     case SSHORT   :
-      return 2;
+      return 2u;
 
     case FLOAT    :
     case LONG     :
     case SLONG    :
-      return 4;
+      return 4u;
 
     case DOUBLE   :
     case SRATIONAL:
     case RATIONAL :
-      return 8;
+      return 8u;
 
     case UNDEFINED:
-      return 0;
+      return 0u;
 
     default       :
   }
   assert (0);
-  return 0;
+  return 0u;
 }
