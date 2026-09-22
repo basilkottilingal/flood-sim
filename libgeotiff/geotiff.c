@@ -381,8 +381,8 @@ void img_unwrap (Image img)
     * offset_at      = start + img.offsets_at,
     * byte_counts_at = start + img.byte_counts_at;
 
-  for (unsigned int i=0; i<img.n.y; i++) 
-    for (unsigned int j=0; j<img.n.x; j++)
+  for (unsigned int j=0; j<img.n.y; j++) 
+    for (unsigned int i=0; i<img.n.x; i++)
     {
       uint32_t
         offset      = u32 (&offset_at),
@@ -396,7 +396,7 @@ void img_unwrap (Image img)
           error ("decoding failed");
         //lzw_error (err);
       }
-      write_decoded_pixels (buffer, (coord) {i, j}, img);
+      write_decoded_pixels (buffer, (coord) {j, i}, img);
     }
 
   free (buffer);
@@ -427,7 +427,7 @@ int geotiff_getval (double val [2][2], int i, int j)
 }
 #endif
 
-double geotiff_elevation (coord c)
+double geotiff_raster_val (coord c)
 {
   if (geotiff.pixel.bits == 32)
   {
@@ -447,20 +447,6 @@ double geotiff_elevation (coord c)
   /* we have skipped T_INT as elevation are usually stored as float/uint */
   error ("pixel format not implemented");
   return NAN;
-}
-
-double geotiff_elevation_at (CoordG c)
-{
-  if (!is_running)
-    return NAN;
-  double pixel [2];
-  coordinate_map (& geotiff.crs, c, pixel); 
-  int i = floor (pixel [0]), j = floor (pixel [1]);
-  if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
-    return NAN;
-
-  /* fixme : interpolate */
-  return geotiff_elevation ( (coord) {j, i} );
 }
 
 void geotiff_map (const char * tiff)
@@ -495,36 +481,23 @@ void geotiff_map_destroy ()
   geotiff = (Image) {0};
 }
 
-int geotiff_box (GTBox * box)
+int geotiff_elevation (CoordL * point_array, double * elevation, int n, CoordG c0)
 {
   if (!is_running)
     return 0;
 
   double pixel [2];
-  CoordG c0 = (CoordG) {box->lon0, box->lat0, 0}, c = c0;
 
-  int iter = 2;
-  while (iter--)
+  for (int ip=0; ip<n; ++ip)
   {
+    CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0);
     coordinate_map (& geotiff.crs, c, pixel);
     int i = floor (pixel [0]), j = floor (pixel [1]);
     if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
       return 0;
-
-    if (!iter)
-      break;
-
-    /* find the coordinate Delta meters east & Delta meters south of c0 */
-    CoordL l = (CoordL) {.e = box->Delta, .n = - box->Delta, .u = 0};
-    c = local_enu_to_geodetic (& geotiff.crs.gcrs, l, c0); 
+    /* fixme : bilinear interpolation */
+    elevation [ip] = geotiff_raster_val ( (coord) {j, i} );
   }
-
-  /* find the coordinate Delta/2 meters east & Delta/2 meters south of c0 */
-  CoordL l = (CoordL) {.e = box->Delta/2., .n = - box->Delta/2., .u = 0};
-  c = local_enu_to_geodetic (& geotiff.crs.gcrs, l, c0);
-
-  /* create a new tie point at the midpoint of the square */
-  tiepoint_new (& geotiff.crs, c, box->tiepoint);
 
   return 1;
 }
