@@ -1,6 +1,7 @@
 #ifndef _GEOTIFF_COORDINATES_H_
 #define _GEOTIFF_COORDINATES_H_
 
+  #include <math.h>
   #include "tiff.h"
 
   typedef enum

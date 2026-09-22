@@ -4,7 +4,7 @@ CCFLAGS += -D_XOPEN_SOURCE=700 -O2
 AR       = ar
 ARFLAGS  = cr
 
-SRC      = filemap.c parse.c tiff.c lzw.c coordinates.c geotiff.c
+SRC      = filemap.c parse.c tiff.c lzw.c coordinates.c geodetic.c geotiff.c
 OBJ      = $(SRC:.c=.o)
 
 %.o: %.c %.h Makefile
@@ -13,8 +13,12 @@ OBJ      = $(SRC:.c=.o)
 libgeotiff.a : $(OBJ)
 	$(AR) $(ARFLAGS) $@ $^
 
-test         : test.c libgeotiff.a
-	$(CC) $(CCFLAGS) -o $@ $< -L./ -I./ -lgeotiff
+%.tst       : %.c libgeotiff.a
+	$(CC) $(CCFLAGS) -o $* $< -L./ -I./ -lgeotiff -lm
+
+all:
+	make test.tst && ./test ../topography_ESA_Copernicus_30m_resolution.tif
+	make test-crs.tst && ./test-crs
 
 clean        :
 	rm *.o

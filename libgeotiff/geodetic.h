@@ -1,5 +1,5 @@
-#ifndef _GEOTIFF_H_
-#define _GEOTIFF_H_
+#ifndef _GEOTIFF_GEODETIC_H_
+#define _GEOTIFF_GEODETIC_H_
 
   #include "coordinates.h"
   #include "geodetic.h"
@@ -17,7 +17,7 @@
   ..    plane is (ofcourse) a tangent plane of the WSG ellipsoid.)
   */
 
-  Coord3   geodetic_to_ecf       (GeographicCRS * gcrs, CoordG c);
+  Coord3   geodetic_to_ecef      (GeographicCRS * gcrs, CoordG c);
   CoordL   ecef_to_local_enu     (GeographicCRS * gcrs, Coord3 x, CoordG c0);
   CoordL   geodetic_to_local_enu (GeographicCRS * gcrs, CoordG c, CoordG c0);
   Coord3   local_enu_to_ecef     (GeographicCRS * gcrs, CoordL l, CoordG c0);

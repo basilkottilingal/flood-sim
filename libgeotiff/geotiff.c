@@ -16,9 +16,10 @@
 
 #include "filemap.h"
 #include "lzw.h"
-#include "coordinates.h"
 #include "tiff.h"
+#include "coordinates.h"
 #include "geotiff.h"
+#include "geodetic.h"
 #include "parse.h"
 
 #define error(e)                          filemap_close_all(e)
@@ -492,6 +493,40 @@ void geotiff_map_destroy ()
   filemap_close_all (NULL);
   is_running = 0;
   geotiff = (Image) {0};
+}
+
+int geotiff_box (GTBox * box)
+{
+  if (!is_running)
+    return 0;
+
+  double pixel [2];
+  CoordG c0 = (CoordG) {box->lon0, box->lat0, 0}, c = c0;
+
+  int iter = 2;
+  while (iter--)
+  {
+    coordinate_map (& geotiff.crs, c, pixel);
+    int i = floor (pixel [0]), j = floor (pixel [1]);
+    if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
+      return 0;
+
+    if (!iter)
+      break;
+
+    /* find the coordinate Delta meters east & Delta meters south of c0 */
+    CoordL l = (CoordL) {.e = box->Delta, .n = - box->Delta, .u = 0};
+    c = local_enu_to_geodetic (& geotiff.crs.gcrs, l, c0); 
+  }
+
+  /* find the coordinate Delta/2 meters east & Delta/2 meters south of c0 */
+  CoordL l = (CoordL) {.e = box->Delta/2., .n = - box->Delta/2., .u = 0};
+  c = local_enu_to_geodetic (& geotiff.crs.gcrs, l, c0);
+
+  /* create a new tie point at the midpoint of the square */
+  tiepoint_new (& geotiff.crs, c, box->tiepoint);
+
+  return 1;
 }
 
 #undef error
