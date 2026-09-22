@@ -36,7 +36,7 @@ https://gis.stackexchange.com/questions/120636/math-formula-for-transforming-fro
   |   |   |_ Geotiff Tag : ModelPixelScaleTag 33350 ( DOUBLE X 3 )
   |   |_ Examples
   |       |_ WGS 84
-  |           |_EPSG:4326 – 2D coordinate reference system (CRS)
+  |           |_EPSG:4326 – 2D CRS
   |           |_EPSG:4979 – 3D CRS
   |           |_EPSG:4978 – geocentric 3D CRS
   |           |_EPSG:7030 – reference ellipsoid

@@ -427,28 +427,6 @@ int geotiff_getval (double val [2][2], int i, int j)
 }
 #endif
 
-double geotiff_raster_val (coord c)
-{
-  if (geotiff.pixel.bits == 32)
-  {
-    if (geotiff.pixel.format == T_UINT)
-      return (double)
-        ((uint32_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
-    if (geotiff.pixel.format == T_FLOAT)
-      return (double)
-        ((float *)    filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
-  }
-  if (geotiff.pixel.bits == 16)
-  {
-    if (geotiff.pixel.format == T_UINT)
-      return (double)
-        ((uint16_t *) filemap_address (FILEMAP_PIXELS)) [c.y * geotiff.dim.x + c.x]; 
-  }
-  /* we have skipped T_INT as elevation are usually stored as float/uint */
-  error ("pixel format not implemented");
-  return NAN;
-}
-
 void geotiff_map (const char * tiff)
 {
   filemap_tiff (tiff);
@@ -481,26 +459,45 @@ void geotiff_map_destroy ()
   geotiff = (Image) {0};
 }
 
+#define COORD_MAP(dtype)                                                           \
+  do {                                                                             \
+    dtype * raster = (dtype *) filemap_address (FILEMAP_PIXELS);                   \
+    double pixel [2];                                                              \
+    for (int ip=0; ip<n; ++ip)                                                     \
+    {                                                                              \
+      CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0); \
+      coordinate_map (& geotiff.crs, c, pixel);                                    \
+      int i = floor (pixel [0]), j = floor (pixel [1]);                            \
+      if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )            \
+        return 0;                                                                  \
+      /* fixme : bilinear interpolation */                                         \
+      elevation [ip] = (double) raster [j * geotiff.dim.x + i];                    \
+    }                                                                              \
+    return 1;                                                                      \
+  } while (0)
+
 int geotiff_elevation (CoordL * point_array, double * elevation, int n, CoordG c0)
 {
   if (!is_running)
     return 0;
 
-  double pixel [2];
-
-  for (int ip=0; ip<n; ++ip)
+  if (geotiff.pixel.bits == 32)
   {
-    CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0);
-    coordinate_map (& geotiff.crs, c, pixel);
-    int i = floor (pixel [0]), j = floor (pixel [1]);
-    if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )
-      return 0;
-    /* fixme : bilinear interpolation */
-    elevation [ip] = geotiff_raster_val ( (coord) {j, i} );
+    if (geotiff.pixel.format == T_UINT)
+      COORD_MAP (uint32_t);
+    if (geotiff.pixel.format == T_FLOAT)
+      COORD_MAP (float);
   }
-
-  return 1;
+  if (geotiff.pixel.bits == 16)
+  {
+    if (geotiff.pixel.format == T_UINT)
+      COORD_MAP (uint16_t);
+  }
+  /* we have skipped T_INT as elevation are usually stored as float/uint */
+  error ("pixel format not implemented");
+  return 0;
 }
 
+#undef COORD_MAP
 #undef error
 #undef is_available
