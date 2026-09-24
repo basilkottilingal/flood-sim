@@ -129,7 +129,7 @@ int lzw_decode (const void * encoding, size_t len, void * buff, size_t outlen)
 
     /* End of encoded stream */
     if (code == EOI_CODE)
-      return get_code (&bitfile, code_len) == EOF ?
+      return (int) get_code (&bitfile, code_len) == EOF ?
         (outlen == 0 ? 0 : LZWD_ERR_OUTPUT_MISMATCH) : 
         LZWD_ERR_INCOMPLETE_READ;
 
@@ -142,7 +142,7 @@ int lzw_decode (const void * encoding, size_t len, void * buff, size_t outlen)
       if (last > CLEAR_CODE)
         switch (last) {
           case EOI_CODE :
-            return get_code (&bitfile, code_len) == EOF ?
+            return (int) get_code (&bitfile, code_len) == EOF ?
               (outlen == 0 ? 0 : LZWD_ERR_OUTPUT_MISMATCH) : 
               LZWD_ERR_INCOMPLETE_READ;
           case EOF :

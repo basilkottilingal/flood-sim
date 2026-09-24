@@ -51,8 +51,6 @@ Pixel Type
   |_  PixelIsArea (the data corresponsd to the center of the [I,I+1]x[J,J+1] patch. More like "cell centered" data)
 */
 
-static CRS map = (CRS) {0};
-
 #define error(e)         filemap_close_all (e)
 #define not_implemented(e)                      \
   do {                                          \
@@ -94,8 +92,8 @@ void geotiff_keys (struct GTTags gt, CRS * crs)
   GTModelType gtmodel = ModelTypeUndefined;
   GTPixelType gtpixel = PixelIsUndefined;
   uint16_t    gcrs    = 0;
-  uint16_t    pcrs    = 0;
-  uint16_t    vcrs    = 0;
+  //uint16_t    pcrs    = 0;
+  //uint16_t    vcrs    = 0;
 
   for (int i=0; i<NumberOfKeys; ++i)
   {

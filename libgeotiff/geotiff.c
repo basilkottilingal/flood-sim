@@ -66,8 +66,8 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
   uint16_t
     nbits    = img.pixel.bits,
     nsamples = img.pixel.nsamples,
-    hdiff    = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING,
-    format   = img.pixel.format;
+    hdiff    = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING;
+    //format   = img.pixel.format;
 
   if (nsamples != 1)
     error ("expects only one sample per pixel in geotiff");
@@ -126,7 +126,6 @@ Image img_details (TIFFEntry * entries)
 {
 
   int is_tiles = 0, is_strips = 0, ntiles = 0;
-  int found_geo_tags = 0;
   Image img = {0};
 
   TIFFEntry * ptr = entries;
@@ -468,7 +467,7 @@ void geotiff_map_destroy ()
       CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0); \
       coordinate_map (& geotiff.crs, c, pixel);                                    \
       int i = floor (pixel [0]), j = floor (pixel [1]);                            \
-      if ( i < 0 || i >= geotiff.dim.x || j < 0 || j >= geotiff.dim.y )            \
+      if ( i < 0 || i >= (int) geotiff.dim.x || j < 0 || j >= (int) geotiff.dim.y )\
         return 0;                                                                  \
       /* fixme : bilinear interpolation */                                         \
       elevation [ip] = (double) raster [j * geotiff.dim.x + i];                    \
