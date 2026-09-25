@@ -66,8 +66,8 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
   uint16_t
     nbits    = img.pixel.bits,
     nsamples = img.pixel.nsamples,
-    hdiff    = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING;
-    //format   = img.pixel.format;
+    hdiff    = img.comp.pred == TIFF_PREDICTOR_HORIZONTAL_DIFFERENCING,
+    format   = img.pixel.format;
 
   if (nsamples != 1)
     error ("expects only one sample per pixel in geotiff");
@@ -80,45 +80,54 @@ void write_decoded_pixels (void * decoded, coord tile, Image img)
     lim   = (coord) { end.y > img.dim.y ? img.dim.y : end.y,
                                  end.x > img.dim.x ? img.dim.x : end.x };
 
-  if (nbits == 32)
+  assert ( nbits == 16 ? format == T_UINT :
+           nbits == 32 ? format == T_UINT ||
+             (format == T_FLOAT && sizeof (uint32_t) == sizeof (float)) :
+             0 /* only 16 & 32 bits supported */ );
+
+  for (unsigned int h=start.y; h<lim.y; h++)
   {
-    for (unsigned int h=start.y; h<lim.y; h++) {
-      is_available (db, dbend, (h * img.dim.x + lim.x) * 4);
-      char * data = & db [ (h * img.dim.x + start.x) * 4];
-      uint32_t prev = 0;
-      for (unsigned int w=start.x; w<lim.x; w++) {
-        prev += u32 (&b);
-        memcpy (data, &prev, 4);
-        if (!hdiff)
-          prev = 0;
-        data += 4;
-      }
-      for (unsigned int w=lim.x; w<end.x; w++)
-        b += 4;
+    is_available (db, dbend, (h * img.dim.x + lim.x) * sizeof (float));
+    char * data = & db [ (h * img.dim.x + start.x) * sizeof (float)];
+    float prev = 0.;
+    switch (nbits | format)
+    {
+      /* fixme : parse chunks of 4k bytes */
+      case 16 | T_UINT :
+        for (unsigned int w=start.x; w<lim.x; w++)
+        {   
+          prev += (float) u16 (&b);
+          memcpy (data, &prev, sizeof (float)), data += sizeof (float);
+          if (!hdiff)
+            prev = 0.;
+        }
+        break;
+      case 32 | T_UINT :
+        for (unsigned int w=start.x; w<lim.x; w++)
+        {   
+          prev += (float) u32 (&b);
+          memcpy (data, &prev, sizeof (float)), data += sizeof (float);
+          if (!hdiff)
+            prev = 0.;
+        }
+        break;
+      case 32 | T_FLOAT :
+        for (unsigned int w=start.x; w<lim.x; w++)
+        {   
+          prev += f32 (&b);
+          memcpy (data, &prev, sizeof (float)), data += sizeof (float);
+          if (!hdiff)
+            prev = 0.;
+        }
+        break;
+      default :
+        error ("geotiff : tiff : nbits + format not implemented");
     }
-    return;
+    if (end.x > lim.x)
+      b += (nbits >> 3) * (end.x - lim.x); 
   }
 
-  if (nbits == 16)
-  {
-    for (unsigned int h=start.y; h<lim.y; h++) {
-      is_available (db, dbend, (h * img.dim.x + lim.x) * 2);
-      char * data = & db [ (h * img.dim.x + start.x) * 2];
-      uint16_t prev = 0;
-      for (unsigned int w=start.x; w<lim.x; w++) {
-        prev += u16 (&b);
-        memcpy (data, &prev, 2);
-        if (!hdiff)
-          prev = 0;
-        data += 2;
-      }
-      for (unsigned int w=lim.x; w<end.x; w++)
-        b += 2;
-    }
-    return;
-  }
-
-  error ("pixel nbits not supported");
+  return;
 }
 
 static
@@ -229,7 +238,11 @@ Image img_details (TIFFEntry * entries)
     "lzw" : "unknown" );
   printf ("location of {offsets %u, byte_counts %u}\n",
     img.offsets_at, img.byte_counts_at);
-  printf ("data format %u\n", img.pixel.format);
+  printf ("data format %s\n",
+    img.pixel.format == T_UINT  ? "uint":
+    img.pixel.format == T_INT   ? "int":
+    img.pixel.format == T_FLOAT ? "float": "unknown"
+  );
 
   printf ("coord bound\n");
   double
@@ -341,6 +354,8 @@ Image ifd_read ()
   return img;
 }
 
+static float * raster = NULL;
+
 void img_unwrap (Image img)
 {
   /*
@@ -361,7 +376,7 @@ void img_unwrap (Image img)
     gridsize = img.tdim.y * img.tdim.x 
                * img.pixel.nsamples * (img.pixel.bits >> 3),
     imgsize  = img.dim.y * img.dim.x
-               * img.pixel.nsamples * (img.pixel.bits >> 3);
+               * img.pixel.nsamples * sizeof (float); //(img.pixel.bits >> 3);
 
   if (imgsize > (1<<30))
     error ("tiff image is too big. reprogramme to load image partially");
@@ -431,15 +446,17 @@ void geotiff_map (const char * tiff)
   filemap_tiff (tiff);
   Image img = ifd_read ();
   img_unwrap (img);
+  raster = (float *) filemap_address (FILEMAP_PIXELS);
+  is_running = 1;
+  geotiff = img;
 
   #if 1
-  float * val = (float *) filemap_address (FILEMAP_PIXELS);
-  assert (val);
+  assert (raster);
   uint32_t W = img.dim.x;
   //17414 x w  9756
   FILE * sample = fopen ("SampleGrid.dat", "w"); 
   for (uint32_t i=15; i<527; ++i) {
-    float * row = & val [i*W + 9000];
+    float * row = & raster [i*W + 9000];
     for (int j=0; j<512; ++j)
       fprintf (sample, "%f ", row [j]);
     fprintf (sample, "\n");
@@ -447,54 +464,33 @@ void geotiff_map (const char * tiff)
   fclose (sample);
   #endif
 
-  is_running = 1;
-  geotiff = img;
 }
 
 void geotiff_map_destroy ()
 {
   filemap_close_all (NULL);
   is_running = 0;
-  geotiff = (Image) {0};
+  raster     = NULL;
+  geotiff    = (Image) {0};
 }
 
-#define COORD_MAP(dtype)                                                           \
-  do {                                                                             \
-    dtype * raster = (dtype *) filemap_address (FILEMAP_PIXELS);                   \
-    double pixel [2];                                                              \
-    for (int ip=0; ip<n; ++ip)                                                     \
-    {                                                                              \
-      CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0); \
-      coordinate_map (& geotiff.crs, c, pixel);                                    \
-      int i = floor (pixel [0]), j = floor (pixel [1]);                            \
-      if ( i < 0 || i >= (int) geotiff.dim.x || j < 0 || j >= (int) geotiff.dim.y )\
-        return 0;                                                                  \
-      /* fixme : bilinear interpolation */                                         \
-      elevation [ip] = (double) raster [j * geotiff.dim.x + i];                    \
-    }                                                                              \
-    return 1;                                                                      \
-  } while (0)
-
-int geotiff_elevation (CoordL * point_array, double * elevation, int n, CoordG c0)
+int geotiff_elevation (CoordL * point_array, float * elevation, int n, CoordG c0)
 {
   if (!is_running)
     return 0;
 
-  if (geotiff.pixel.bits == 32)
+  double pixel [2];
+  for (int ip=0; ip<n; ++ip)
   {
-    if (geotiff.pixel.format == T_UINT)
-      COORD_MAP (uint32_t);
-    if (geotiff.pixel.format == T_FLOAT)
-      COORD_MAP (float);
+    CoordG c = local_enu_to_geodetic (& geotiff.crs.gcrs, point_array [ip], c0);
+    coordinate_map (& geotiff.crs, c, pixel);
+    int i = floor (pixel [0]), j = floor (pixel [1]);
+    if ( i < 0 || i >= (int) geotiff.dim.x || j < 0 || j >= (int) geotiff.dim.y )
+      return 0;
+    /* fixme : bilinear interpolation */
+    elevation [ip] = raster [j * geotiff.dim.x + i];
   }
-  if (geotiff.pixel.bits == 16)
-  {
-    if (geotiff.pixel.format == T_UINT)
-      COORD_MAP (uint16_t);
-  }
-  /* we have skipped T_INT as elevation are usually stored as float/uint */
-  error ("pixel format not implemented");
-  return 0;
+  return 1;
 }
 
 #undef COORD_MAP

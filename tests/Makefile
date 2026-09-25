@@ -22,6 +22,6 @@ all:
 	make geotiff-crs-paris.s && ./geotiff-crs-paris.s
 
 clean:
-	$(RM) $(TESTS)
+	$(RM) *.s
 
 .PHONY: all clean

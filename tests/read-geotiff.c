@@ -47,11 +47,11 @@ int main (int argc, char **argv)
   .. kozhikode 11.258753 N, 75.780411 E
   */
   CoordG c = (CoordG) {.lat = 11.258753, .lon = 75.780411};
-  double elevation;
+  float elevation;
   if ( !geotiff_elevation (& (CoordL) {0}, &elevation, 1, c) )
     fprintf(stderr, "Coordinate not found in DEM raster\n");
   else
-    printf ("elevation at (%g N %g E) = %g\n", c.lat, c.lon, elevation);
+    printf ("elevation at (%g N %g E) = %f\n", c.lat, c.lon, elevation);
 
   geotiff_map_destroy ();
 

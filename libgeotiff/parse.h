@@ -12,6 +12,7 @@
   void     parser_endianness (ENDIANNESS);
   uint16_t u16 (const char ** m);
   uint32_t u32 (const char ** m);
+  float    f32 (const char ** m);
   double   d64 (const char ** m);
 
 #endif

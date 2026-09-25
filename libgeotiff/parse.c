@@ -37,6 +37,27 @@ uint32_t u32 (const char ** m)
        (uint32_t) b[3]      );
 }
 
+float f32 (const char ** m)
+{
+  //some_static_assert (sizeof(float) == sizeof (uint32_t));
+
+  uint8_t * b = (uint8_t *) *m;
+  *m += 4;
+  uint32_t val = endianness ==  LITTLE_ENDIAN ?
+    ( ((uint32_t) b[3] << 24) |
+      ((uint32_t) b[2] << 16) |
+      ((uint32_t) b[1] << 8 ) |
+       (uint32_t) b[0]      )
+    :
+    ( ((uint32_t) b[0] << 24) |
+      ((uint32_t) b[1] << 16) |
+      ((uint32_t) b[2] << 8 ) |
+       (uint32_t) b[3]      );
+  float f;
+  memcpy (&f, &val, sizeof(float));
+  return f;
+}
+
 double d64 (const char ** m)
 {
   const uint8_t *b = (const uint8_t *) *m;
