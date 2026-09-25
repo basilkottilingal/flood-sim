@@ -1,5 +1,5 @@
 CC        = gcc
-LIBS     ?= geotiff      # names without the "lib" prefix; top level overrides this
+LIBS     ?= geotiff view
 CPPFLAGS += $(addprefix -I../lib,$(LIBS))
 LDFLAGS  += $(addprefix -L../lib,$(LIBS))
 LDLIBS   += $(addprefix -l,$(LIBS))
@@ -14,7 +14,7 @@ ARCHIVES := $(foreach l,$(LIBS),../lib$(l)/lib$(l).a)
 # Relink tests when a library changes
 $(SERIAL): $(ARCHIVES)
 
-%.s       : %.c Makefile
+%.s       : %.c Makefile $(ARCHIVES)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS) -lm
 
 all:

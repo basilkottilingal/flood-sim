@@ -1,3 +1,11 @@
 topography_ESA_Copernicus_30m_resolution.tif
 kerala_lsg_mapdata.geojson
 tiff6.pdf
+lib*/*.o
+lib*/*.a
+tests/*.a
+tests/*.s
+tests/*.o
+
+
+

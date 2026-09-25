@@ -8,8 +8,8 @@ all: $(ARCHIVES)
 $(ARCHIVES):
 	$(MAKE) -C $(@D) $(@F)
 
-# Inter-library dependencies, if any (libbar uses libfoo):
-# libbar/libbar.a: libfoo/libfoo.a
+# Inter-library dependencies, if any
+libview/libview.a: libgeotiff/libgeotiff.a
 
 test: all
 	$(MAKE) -C tests LIBS="$(NAMES)"

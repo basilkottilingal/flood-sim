@@ -354,7 +354,7 @@ Image ifd_read ()
   return img;
 }
 
-static float * raster = NULL;
+static float * dem_raster = NULL;
 
 void img_unwrap (Image img)
 {
@@ -419,44 +419,22 @@ void img_unwrap (Image img)
 static int is_running = 0;
 Image geotiff = (Image) {0};
 
-#if 0
-static
-int geotiff_getval (double val [2][2], int i, int j)
-{
-  char * address = filemap_address (FILEMAP_PIXELS);
-  assert (address != NULL);
-  if (geotiff.pixel.format == SHORT)
-  {
-    uint16_t * elevation = (uint16_t *) address, cpy;
-    for (int ii=0; ii<2; ++ii)
-      for (int jj=0; jj<2; ++jj)
-      {
-        memcpy (& cpy, & elevation [geotiff.dim.x * (i + ii) + ( j + jj)], 2);
-        val [ii][jj] = (double) cpy;
-      }
-
-    return 0;
-  }
-  return  1;
-}
-#endif
-
 void geotiff_map (const char * tiff)
 {
   filemap_tiff (tiff);
   Image img = ifd_read ();
   img_unwrap (img);
-  raster = (float *) filemap_address (FILEMAP_PIXELS);
+  dem_raster = (float *) filemap_address (FILEMAP_PIXELS);
   is_running = 1;
   geotiff = img;
 
   #if 1
-  assert (raster);
+  assert (dem_raster);
   uint32_t W = img.dim.x;
   //17414 x w  9756
   FILE * sample = fopen ("SampleGrid.dat", "w"); 
   for (uint32_t i=15; i<527; ++i) {
-    float * row = & raster [i*W + 9000];
+    float * row = & dem_raster [i*W + 9000];
     for (int j=0; j<512; ++j)
       fprintf (sample, "%f ", row [j]);
     fprintf (sample, "\n");
@@ -470,7 +448,7 @@ void geotiff_map_destroy ()
 {
   filemap_close_all (NULL);
   is_running = 0;
-  raster     = NULL;
+  dem_raster = NULL;
   geotiff    = (Image) {0};
 }
 
@@ -488,11 +466,78 @@ int geotiff_elevation (CoordL * point_array, float * elevation, int n, CoordG c0
     if ( i < 0 || i >= (int) geotiff.dim.x || j < 0 || j >= (int) geotiff.dim.y )
       return 0;
     /* fixme : bilinear interpolation */
-    elevation [ip] = raster [j * geotiff.dim.x + i];
+    elevation [ip] = dem_raster [j * geotiff.dim.x + i];
   }
   return 1;
 }
 
-#undef COORD_MAP
+int geotiff_dem_window ( double lon, double lat, double dlon, double dlat, DEM * dem )
+{
+
+  if (dlon < 0.)
+    dlon *= -1., lon -= dlon;
+  if (dlat < 0.)
+    dlat *= -1., lat -= dlat;
+
+  CoordG c [2] =
+    {
+      (CoordG) {.lon = lon,        .lat = lat + dlat},    /* North-West */
+      (CoordG) {.lon = lon + dlon, .lat = lat       }     /* South-East */
+    };
+
+  double pixel [2];
+
+  coordinate_map (& geotiff.crs, c[0], pixel);
+  int ia = floor (pixel [0]), ja = floor (pixel [1]);
+  if (ia < 2 || ja < 2)
+    return -1;
+
+  coordinate_map (& geotiff.crs, c[1], pixel);
+  int ib = floor (pixel [0]), jb = floor (pixel [1]);
+  if (ib + 2 >= (int) geotiff.dim.x || jb + 2 >= (int) geotiff.dim.y)
+    return -1;
+
+  assert (jb >= ja && ib >= ia);
+
+  size_t size = (5 + jb - ja) * sizeof (float *);
+  if (size > (1<<14))
+  {
+    fprintf (stderr, "warning : very large raster grid!\n");
+    if (size > (1<<18))
+      error ("large malloc ()");
+  }
+  float ** raster = malloc (size);
+  if (raster == NULL)
+    error ("malloc () failed");
+  dem->raster = raster + 2;
+
+  for (int j = ja - 2; j <= jb + 2; ++j, ++raster)
+    *raster = & dem_raster [j * geotiff.dim.x + ia];
+
+  double * tp = geotiff.crs.tiepoint, * scale = geotiff.crs.scale;
+  double tiepoint [6] = 
+    {
+      /* create a new tiepoint with (0,0) as the reference pixel */
+      0., 0., 0.,
+      /* and (lon, lat) at (0,0) as the reference coord for interpolation */
+      tp [3] + ((double) ia - tp [0]) * scale [0],
+      tp [4] - ((double) ja - tp [1]) * scale [1],
+      0.
+    };
+  memcpy (dem->tiepoint, tiepoint, 6 * sizeof (double));
+  memcpy (dem->scale, geotiff.crs.scale, 3 * sizeof (double));
+  dem->n = 1 + (ib-ia), dem->m = 1 + (jb-ja);
+  return 0;
+}
+
+void  geotiff_dem_free ( DEM dem )
+{
+  if (dem.raster)
+  {
+    float ** mem = dem.raster - 2;
+    free (mem);
+  }
+}
+
 #undef error
 #undef is_available
