@@ -504,11 +504,11 @@ int geotiff_dem_window ( double lon, double lat, double dlon, double dlat, DEM *
   {
     fprintf (stderr, "warning : very large raster grid!\n");
     if (size > (1<<18))
-      error ("large malloc ()");
+      error ("DEM : large malloc ()");
   }
   float ** raster = malloc (size);
   if (raster == NULL)
-    error ("malloc () failed");
+    error ("DEM : malloc () failed");
   dem->raster = raster + 2;
 
   for (int j = ja - 2; j <= jb + 2; ++j, ++raster)
@@ -526,7 +526,7 @@ int geotiff_dem_window ( double lon, double lat, double dlon, double dlat, DEM *
     };
   memcpy (dem->tiepoint, tiepoint, 6 * sizeof (double));
   memcpy (dem->scale, geotiff.crs.scale, 3 * sizeof (double));
-  dem->n = 1 + (ib-ia), dem->m = 1 + (jb-ja);
+  dem->w = 1 + (ib-ia), dem->h = 1 + (jb-ja);
   return 0;
 }
 

@@ -20,57 +20,60 @@ typedef enum
   ERR_NOT_IMPLEMENTED,
 } ERR;
 
+# if defined(__GNUC__) || defined(__clang__)
+#   if defined(__has_builtin)
+#     if __has_builtin(__builtin_ctz)
+#       define HAVE_CTZ
+#     endif
+#   endif
+# endif
+
 static inline int pop_bit (uint8_t * v)
 {
   if (*v == 0)
     return -1;
-#if defined(__GNUC__) || defined(__clang__)
-  int idx = __builtin_ctz((unsigned int)*v);
-#else
+
+  #ifdef HAVE_CTZ
+  int idx = __builtin_ctz ((unsigned int)*v);
+  #else
   static const int8_t debruijn_table[8] =
     {
       0, 1, 6, 2, 7, 5, 4, 3
     };
   uint8_t isolated = (uint8_t) (*v & (-(int8_t)*v));
   int idx = debruijn_table [(uint8_t)(isolated * 0x1DU) >> 5];
-#endif
+  #endif
 
   *v = (uint8_t)(*v & (*v - 1));
   return idx;
 }
 
-static void ** grid (size_t s, int n, int m, int ng)
+static void ** grid (size_t s, int w, int h, int ng)
 {
   /* warning : use this only for uint8_t and float */
-  assert (n > 0 && m > 0 && ng >= 0);
-  size_t size = (n + 2*ng) * (m + 2*ng) * s;
+  assert (w > 0 && h > 0 && ng >= 0);
+  size_t size = (w + 2*ng) * (h + 2*ng) * s;
 
-  if (s == sizeof (uint8_t))
-  {
-    uint8_t * mem = malloc (size);
-    if (mem == NULL)
-      error ("flow.h : grid () : malloc failed");
-    memset (mem, 0, size);
-    uint8_t ** memptr = malloc ((m + 2*ng) * sizeof (uint8_t *));
-    if (memptr == NULL)
-      error ("flow.h : grid () : malloc failed");
-    for (int j = -ng; j < m + ng; ++j)
-      memptr [j + ng] = & mem [(j + ng) * ( n + 2*ng ) + ng];
-    return (void **) (memptr + ng);
-  }
-  if (s == sizeof (float))
-  {
-    float * mem = malloc (size);
-    if (mem == NULL)
-      error ("flow.h : grid () : malloc failed");
-    memset (mem, 0, size);
-    float ** memptr = malloc ((m + 2*ng) * sizeof (float *));
-    if (memptr == NULL)
-      error ("flow.h : grid () : malloc failed");
-    for (int j = -ng; j < m + ng; ++j)
-      memptr [j + ng] = & mem [(j + ng) * ( n + 2*ng ) + ng];
-    return (void **) (memptr + ng);
-  }
+  #define _grid_(type)                                          \
+    if (s == sizeof (type))                                     \
+    {                                                           \
+      type * mem = malloc (size);                               \
+      if (mem == NULL)                                          \
+        error ("flow.h : grid () : malloc failed");             \
+      memset (mem, 0, size);                                    \
+      type ** memptr = malloc ((h + 2*ng) * sizeof (type *));   \
+      if (memptr == NULL)                                       \
+        error ("flow.h : grid () : malloc failed");             \
+      for (int y = -ng; y < h + ng; ++y)                        \
+        memptr [y + ng] = & mem [(y + ng) * (w + 2*ng) + ng];   \
+      return (void **) (memptr + ng);                           \
+    }
+
+  _grid_ (uint8_t)
+  _grid_ (float)
+
+  #undef _grid_
+  
   error ("flow.h : grid () : unknown type");
   return NULL;
 }
@@ -92,17 +95,17 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
   if (dem.raster == NULL)
     return -1;
 
-  int n = dem.n, m = dem.m;
-  assert (n > 0 && m > 0);
-  uint8_t ** dir = (uint8_t **) grid (sizeof (uint8_t), n, m, 1);
+  int w = dem.w, h = dem.h;
+  assert (w > 0 && h > 0);
+  uint8_t ** dir = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
   float ** raster = dem.raster;
 
   *network = (FlowNetwork)
     {
       .dir    = dir,
       .accumulation = NULL,
-      .n      = n,
-      .m      = m,
+      .w      = w,
+      .h      = h,
       .type   = type,
     };
 
@@ -112,23 +115,23 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
   switch (type)
   {
     case FLOW_D8  :
-      for (int j=0; j<m; ++j)
-        for (int i=0; i<n; ++i)
+      for (int y=0; y<h; ++y)
+        for (int x=0; x<w; ++x)
         {
-          float max = 0.f, val = raster [i][j];
+          float max = 0.f, val = raster [y][x];
           uint8_t code = 0;
           if ( isnan (val) )
             continue;
           for (int c=0; c<8; ++c)
           {
-            float nbrVal = raster [i + neighbor[c].x][j + neighbor[c].y];
+            float nbrVal = raster [y + neighbor[c].y][x + neighbor[c].x];
             if (isnan (nbrVal))
               continue;
             float downslope = (val - nbrVal) / delta [c];
             if (downslope > max)
               code = (uint8_t) 1 << c, max = downslope;
           }
-          dir [i][j] = code;
+          dir [y][x] = code;
         }
       return 0;
 
@@ -158,8 +161,8 @@ int flow_network_grayscale (FlowNetwork network, const char * out, int width, in
   if (network.dir == NULL || out == NULL || out [0] == '\0' || width < 0 || height < 0)
     return -1;
 
-  width  = width  > network.n ? network.n > 1024 ? 1024 : network.n : width;
-  height = height > network.m ? network.m > 1024 ? 1024 : network.m : height;
+  width  = width  > network.w ? network.w > 1024 ? 1024 : network.w : width;
+  height = height > network.h ? network.h > 1024 ? 1024 : network.h : height;
 
   FILE *fp = fopen (out, "wb");
   if (fp == NULL)
@@ -179,8 +182,8 @@ int flow_accumulation_grayscale (FlowNetwork network, const char * out, int widt
   if (network.accumulation == NULL || out == NULL || out [0] == '\0' || width < 0 || height < 0)
     return -1;
 
-  width  = width  > network.n ? network.n > 1024 ? 1024 : network.n : width;
-  height = height > network.m ? network.m > 1024 ? 1024 : network.m : height;
+  width  = width  > network.w ? network.w > 1024 ? 1024 : network.w : width;
+  height = height > network.h ? network.h > 1024 ? 1024 : network.h : height;
 
   FILE *fp = fopen (out, "wb");
   if (fp == NULL)
@@ -231,42 +234,42 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
   if (network->dir == NULL || network->accumulation != NULL)
     return -1;
 
-  int n = network->n, m = network->m, nm = n * m;
-  float ** acc = network->accumulation = (float **) grid (sizeof (float), n, m, 1);
+  int w = network->w, h = network->h, hw = w * h;
+  float ** acc = network->accumulation = (float **) grid (sizeof (float), w, h, 1);
   float ** raster = dem.raster;
-  uint8_t ** in_degree = (uint8_t **) grid (sizeof (uint8_t), n, m, 1);
+  uint8_t ** in_degree = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
   uint8_t ** dir = network->dir;
 
   /* find the number of neighbors who are source to (i,j) */
-  for (int j=0; j<m; ++j)
-    for (int i=0; i<n; ++i)
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
     {
-      acc [i][j] = 1.; /* you first add the "rainfall" at (i,j) to the flow[i][j]*/
-      uint8_t code = dir [i][j];
+      acc [y][x] = 1.; /* you first add the "rainfall" at (i,j) to the flow[i][j]*/
+      uint8_t code = dir [y][x];
       if ( code == 0 )
         continue;
       uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
-      int inbr = i + neighbor[nbr].x, jnbr = j + neighbor[nbr].y;
-      in_degree [inbr][jnbr] |= (uint8_t) 1 << nbr;
+      int xnbr = x + neighbor[nbr].x, ynbr = y + neighbor[nbr].y;
+      in_degree [ynbr][xnbr] |= (uint8_t) 1 << nbr;
     }
 
   /* first in first out queue */
-  struct index { int i, j; } * queue = malloc (nm * sizeof (struct index));
+  struct index { int x, y; } * queue = malloc (hw * sizeof (struct index));
   if (queue == NULL)
     error ("flow_accumulation () : malloc () failed");
   int push_at = 0, pop_at = 0;
   int processed = 0;
-  for (int j=0; j<m; ++j)
-    for (int i=0; i<n; ++i)
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
     {
-      if (isnan (raster [i][j]))
+      if (isnan (raster [y][x]))
       {
         processed ++;
         continue;
       }
-      if (in_degree [i][j] == 0)
-        queue [push_at++] = (struct index) {i,j};
-    } 
+      if (in_degree [y][x] == 0)
+        queue [push_at++] = (struct index) {x,y};
+    }
 
   /* Kahn's topological propogation */
   while (push_at != pop_at)
@@ -274,35 +277,56 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
     processed ++;
 
     /* pop */
-    struct index Idx = queue [pop_at]; pop_at = (pop_at+1) % nm;
-    int i = Idx.i, j = Idx.j;
-    uint8_t code = dir [i][j];
+    struct index Idx = queue [pop_at]; pop_at = (pop_at+1) % hw;
+    int x = Idx.x, y = Idx.y;
+    uint8_t code = dir [y][x];
     if (code == 0)
       continue;
     
     uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
-    int inbr = i + neighbor[nbr].x, jnbr = j + neighbor[nbr].y;
+    int xnbr = x + neighbor[nbr].x, ynbr = y + neighbor[nbr].y;
 
-    if (inbr<0 || inbr>=n || jnbr<0 || jnbr>=m)
+    if (xnbr<0 || xnbr>=w || ynbr<0 || ynbr>=h)
       continue;
 
-    /* downstream */
-    acc [inbr][jnbr] += acc [i][j];
+    /* update downstream accumulation*/
+    acc [ynbr][xnbr] += acc [y][x];
 
-    assert ( in_degree [inbr][jnbr] & ((uint8_t) 1 << nbr) );
+    assert ( in_degree [ynbr][xnbr] & ((uint8_t) 1 << nbr) );
     /* push */
-    if ( (in_degree [inbr][jnbr] &= ~((uint8_t) 1 << nbr)) == 0 )
-      queue [push_at] = (struct index) {inbr, jnbr}, push_at = (push_at + 1) % nm;
+    if ( (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << nbr)) == 0 )
+      queue [push_at] = (struct index) {xnbr, ynbr}, push_at = (push_at + 1) % hw;
 
   }
 
-  if (processed != nm)
+  if (processed != hw)
     fprintf (stderr, "Kahn's topological propagation inconsistency");
 
   free (queue);
   grid_free (in_degree, 1);
   return 0;
 }
+
+#if 0
+int flow_accumulation_pit_removed (FlowNetwork * network, DEM dem)
+{
+  int n = network->n, m = network->m, hw = n * m;
+  float ** h = grid (sizeof (float), n, m, 2);
+  for (int j=-2; j<m+2; ++j)
+    memcpy (& h[
+  uint8_t ** in_degree = (uint8_t **) grid (sizeof (uint8_t), n, m, 1);
+  uint8_t ** dir = network->dir;
+
+  #define VISITED 0
+
+  DEM pit_removed = {.raster = h};
+  return flow_accumulation (network, pit_removed)
+  grid_free (h, 2);
+
+  #undef VISITED
+}
+#endif
+
 
 void flow_network_error ( int type )
 {

@@ -15,7 +15,7 @@
     uint8_t ** dir;
     float   ** accumulation;
     FLOW_DRAIN type;
-    int n, m;
+    int w, h;
   } FlowNetwork;
 
   int  flow_network           ( DEM dem, FLOW_DRAIN type, FlowNetwork * network );

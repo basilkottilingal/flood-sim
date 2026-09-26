@@ -13,7 +13,7 @@
     float ** raster;
     double tiepoint [6];
     double scale    [3];
-    int n, m;
+    int w, h;
   } DEM;
 
   /* APIs */
