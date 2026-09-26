@@ -1,5 +1,5 @@
 CC        = gcc
-LIBS     ?= geotiff view
+LIBS     ?= geotiff view flow-network
 CPPFLAGS += $(addprefix -I../lib,$(LIBS))
 LDFLAGS  += $(addprefix -L../lib,$(LIBS))
 LDLIBS   += $(addprefix -l,$(LIBS))
@@ -10,6 +10,9 @@ SERIAL   := $(TESTS:.c=.s)
 ARCHIVES := $(foreach l,$(LIBS),../lib$(l)/lib$(l).a)
 
 #all: $(SERIAL)
+
+$(ARCHIVES):
+	$(MAKE) -C $(dir $@) $(notdir $@)
 
 # Relink tests when a library changes
 $(SERIAL): $(ARCHIVES)
@@ -24,4 +27,4 @@ all:
 clean:
 	$(RM) *.s
 
-.PHONY: all clean
+.PHONY: all clean $(ARCHIVES)

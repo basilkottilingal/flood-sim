@@ -11,7 +11,7 @@ int pgm_grayscale (DEM dem, const char * out, int width, int height)
   if (width < 0 || height < 0 || out == NULL || out [0] == '\0')
     return -1;
   width  = width  > dem.n ? dem.n > 1024 ? 1024 : dem.n : width;
-  height = height > dem.m ? dem.m > 1024 ? 1024 : dem.n : height;
+  height = height > dem.m ? dem.m > 1024 ? 1024 : dem.m : height;
 
   /* Find range */
   float min = FLT_MAX, max = FLT_MIN;
@@ -27,7 +27,7 @@ int pgm_grayscale (DEM dem, const char * out, int width, int height)
         max = raster [y][x];
     }
 
-  FILE *fp = fopen(out, "wb");
+  FILE *fp = fopen (out, "wb");
   if (fp == NULL)
     return -1;
 
@@ -39,7 +39,7 @@ int pgm_grayscale (DEM dem, const char * out, int width, int height)
   {
     float pixel = 0.0f;
     for (int i=0; i<width*height; ++i)
-      fwrite(&pixel, 1, 1, fp);
+      fwrite (&pixel, 1, 1, fp);
     fclose (fp);
     return 0;
   }
@@ -50,9 +50,9 @@ int pgm_grayscale (DEM dem, const char * out, int width, int height)
     {
       float v = (raster [y][x] - min) / den;
       unsigned char pixel = (unsigned char)(v * 255.0);
-      fwrite(&pixel, 1, 1, fp);
+      fwrite (&pixel, 1, 1, fp);
     }
 
-  fclose(fp);
+  fclose (fp);
   return 0;  
 }
