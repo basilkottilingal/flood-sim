@@ -8,7 +8,6 @@
 
 int pq_create (MinPQ * pq)
 {
-  assert (pq == NULL);
   size_t page = (size_t) 1 << 14;
   pq->data = malloc (page);
   if (pq->data == NULL)

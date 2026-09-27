@@ -55,12 +55,12 @@ int main (int argc, char **argv)
   printf ("DEM  tiepoint pixel (%g %g), coord (%g %g)\n",
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
-  printf ("elevation grid\n dem.raster[-2:%d][-2:%d]\n", dem.n+1, dem.m+1);
-  for (int j=-2; j<=dem.m+1; ++j)
+  printf ("elevation grid\n dem.raster[-2:%d][-2:%d]\n", dem.h+1, dem.w+1);
+  for (int y = -2; y < dem.h+2; ++y)
   {
     printf ("\t");
-    for (int i=-2; i<=dem.n+1; ++i)
-      printf ("%#4.5g ", (double) dem.raster [i][j]);
+    for (int x = -2; x < dem.w+2; ++x)
+      printf ("%#4.5g ", (double) dem.raster [y][x]);
     printf ("\n");
   }
 

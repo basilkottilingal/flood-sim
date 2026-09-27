@@ -1,6 +1,8 @@
 #include "geotiff.h"
 #include "filemap.h"
 #include "flow.h"
+#include "min-heap.h"
+#include "pgm.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -18,6 +20,7 @@ typedef enum
   SUCCESS = 0,
   ERR_FILE_ACCESS,
   ERR_NOT_IMPLEMENTED,
+  ERR_MALLOC,
 } ERR;
 
 # if defined(__GNUC__) || defined(__clang__)
@@ -179,54 +182,10 @@ int flow_network_grayscale (FlowNetwork network, const char * out, int width, in
 
 int flow_accumulation_grayscale (FlowNetwork network, const char * out, int width, int height)
 {
-  if (network.accumulation == NULL || out == NULL || out [0] == '\0' || width < 0 || height < 0)
-    return -1;
-
   width  = width  > network.w ? network.w > 1024 ? 1024 : network.w : width;
   height = height > network.h ? network.h > 1024 ? 1024 : network.h : height;
 
-  FILE *fp = fopen (out, "wb");
-  if (fp == NULL)
-    return -1;
-
-  /* Find range */
-  float min = FLT_MAX, max = FLT_MIN;
-  float ** raster = network.accumulation;
-  assert (raster != NULL);
-
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++)
-    {
-      if (raster [y][x] < min)
-        min = raster [y][x];
-      if (raster [y][x] > max)
-        max = raster [y][x];
-    }
-
-  /* PGM header */
-  fprintf(fp, "P5\n%d %d\n255\n", width, height);
-
-  /* Convert to grayscale */
-  if (max == min)
-  {
-    float pixel = 0.0f;
-    for (int i=0; i<width*height; ++i)
-      fwrite (&pixel, 1, 1, fp);
-    fclose (fp);
-    return 0;
-  }
-
-  float den = max - min;
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++)
-    {
-      float v = (raster [y][x] - min) / den;
-      unsigned char pixel = (unsigned char)(v * 255.0);
-      fwrite (&pixel, 1, 1, fp);
-    }
-
-  fclose (fp);
-  return 0;  
+  return pgm_grayscale (network.accumulation, out, width, height);
 }
 
 int flow_accumulation (FlowNetwork * network, DEM dem)
@@ -307,25 +266,66 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
   return 0;
 }
 
-#if 0
-int flow_accumulation_pit_removed (FlowNetwork * network, DEM dem)
+int flow_remove_pits (DEM * dem)
 {
-  int n = network->n, m = network->m, hw = n * m;
-  float ** h = grid (sizeof (float), n, m, 2);
-  for (int j=-2; j<m+2; ++j)
-    memcpy (& h[
-  uint8_t ** in_degree = (uint8_t **) grid (sizeof (uint8_t), n, m, 1);
-  uint8_t ** dir = network->dir;
+  int w = dem->w, h = dem->h;
+  float ** elevation = dem->raster;
+  uint8_t ** visited = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
+  
+  MinPQ pq;
+  if (pq_create (&pq))
+    return ERR_MALLOC;
 
-  #define VISITED 0
+  #define push(X,Y)                                                    \
+    visited [Y][X] = 1;                                                \
+    if (!isnan (elevation [Y][X]))                                     \
+      if (pq_push (&pq, elevation [Y][X], (uint16_t) X, (uint16_t) X)) \
+        return ERR_MALLOC;
 
-  DEM pit_removed = {.raster = h};
-  return flow_accumulation (network, pit_removed)
-  grid_free (h, 2);
+  //for (int y=0; y<h; ++y)
+  //  memcpy (elevation [y], raster [y], w * sizeof (float));
 
-  #undef VISITED
+  /* set points outside the box as visited */
+  memset (&visited [-1][-1], -1, (w+2) * sizeof (uint8_t));
+  memset (&visited [ h][-1], -1, (w+2) * sizeof (uint8_t));
+  for (int y=0; y<h; ++y)
+    visited [y][-1] = visited [y][w] = 1;
+
+  for (int y=0; y<h; ++y)
+  {
+    push (0,y); push (w-1,y);
+  }
+  for (int x=0; x<w; ++x)
+  {
+    push (x,0); push (x,h-1);
+  }
+
+  #undef push
+
+  float elev; uint16_t x, y;
+  while (pq_pop (&pq, &elev, &x, &y))
+  {
+    for (int c=0; c<8; ++c)
+    {
+      int xnbr = x + neighbor[c].x;
+      int ynbr = y + neighbor[c].y;
+      if (visited [ynbr][xnbr])
+        continue;
+      visited [ynbr][xnbr] = 1;
+      if (isnan (elevation [ynbr][xnbr]))
+        continue;
+      if (elev > elevation [ynbr][xnbr])
+        elevation [ynbr][xnbr] = elev;
+      if (pq_push (&pq, elevation [ynbr][xnbr], xnbr, ynbr))
+        return ERR_MALLOC;
+    }
+  }
+
+  grid_free (visited, 1);
+  pq_free   (&pq);
+
+  return 0;
 }
-#endif
 
 
 void flow_network_error ( int type )

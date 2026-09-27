@@ -1,4 +1,3 @@
-#include "geotiff.h"
 #include "pgm.h"
 
 #include <stdlib.h>
@@ -6,18 +5,17 @@
 #include <float.h>
 #include <assert.h>
 
-int pgm_grayscale (DEM dem, const char * out, int width, int height)
+int pgm_grayscale (float ** raster, const char * out, int width, int height)
 {
-  if (width < 0 || height < 0 || out == NULL || out [0] == '\0')
+  if (raster == NULL || width < 0 || height < 0 || out == NULL || out [0] == '\0')
     return -1;
-  width  = width  > dem.n ? dem.n > 1024 ? 1024 : dem.n : width;
-  height = height > dem.m ? dem.m > 1024 ? 1024 : dem.m : height;
+
+  FILE *fp = fopen (out, "wb");
+  if (fp == NULL)
+    return -1;
 
   /* Find range */
   float min = FLT_MAX, max = FLT_MIN;
-  float ** raster = dem.raster;
-  assert (raster != NULL);
-
   for (int y = 0; y < height; y++)
     for (int x = 0; x < width; x++)
     {
@@ -26,10 +24,6 @@ int pgm_grayscale (DEM dem, const char * out, int width, int height)
       if (raster [y][x] > max)
         max = raster [y][x];
     }
-
-  FILE *fp = fopen (out, "wb");
-  if (fp == NULL)
-    return -1;
 
   /* PGM header */
   fprintf(fp, "P5\n%d %d\n255\n", width, height);

@@ -23,6 +23,7 @@
   int  flow_network_grayscale ( FlowNetwork, const char * out, int w, int h );
   int  flow_accumulation_grayscale ( FlowNetwork, const char * out, int w, int h );
   int  flow_accumulation      ( FlowNetwork *, DEM );
+  int  flow_remove_pits       ( DEM * );
   void flow_network_error     ( int type );
   
 #endif

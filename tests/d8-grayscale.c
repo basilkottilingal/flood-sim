@@ -58,7 +58,7 @@ int main (int argc, char **argv)
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
 
-  pgm_grayscale (dem, "dem.pgm", 1024, 1024);
+  geotiff_dem_pgm (dem, "dem.pgm", 1024, 1024);
 
   FlowNetwork network;
   if (flow_network (dem, FLOW_D8, &network))
