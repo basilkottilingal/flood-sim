@@ -23,5 +23,6 @@
 
   /* APIs */
   int  flow_graph ( DEM dem, FlowGraph * g );
+  //free
   
 #endif

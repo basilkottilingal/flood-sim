@@ -1,4 +1,9 @@
-LIBS     := $(patsubst %/,%,$(dir $(wildcard lib*/Makefile))) 
+# dependents first, providers last (link order)
+LINK_ORDER := flow-network geotiff view alloc
+LIBS     := $(addprefix lib,$(LINK_ORDER))
+
+#LIBS     := $(patsubst %/,%,$(dir $(wildcard lib*/Makefile))) 
+
 NAMES    := $(patsubst lib%,%,$(LIBS))
 ARCHIVES := $(foreach l,$(LIBS),$(l)/$(l).a)
 

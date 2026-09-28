@@ -32,7 +32,7 @@ typedef enum
 #   endif
 # endif
 
-static inline int pop_bit (uint8_t * v)
+int pop_bit (uint8_t * v)
 {
   if (*v == 0)
     return -1;
@@ -147,7 +147,7 @@ int flow_accumulation_grayscale (FlowNetwork network, const char * out, int widt
   return pgm_grayscale (network.accumulation, out, width, height);
 }
 
-int flow_accumulation (FlowNetwork * network, DEM dem)
+int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 {
   if (network->dir == NULL || network->accumulation != NULL)
     return -1;
@@ -157,6 +157,8 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
   float ** raster = dem.raster;
   uint8_t ** in_degree = grid (uint8_t, w, h);
   uint8_t ** dir = network->dir;
+  if (sink && pq_create (sink))
+    error ("flow_accumulation () : pq_create () : malloc");
 
   /* find the number of neighbors who are source to (i,j) */
   for (int y=0; y<h; ++y)
@@ -205,7 +207,12 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
     int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
 
     if (xnbr<0 || xnbr>=w || ynbr<0 || ynbr>=h)
+    {
+      /* add this point to sink */
+      if (sink && pq_push (sink, raster [ynbr][xnbr], xnbr, ynbr))
+        error ("flow_accumulation () : pq_push () : realloc");
       continue;
+    }
 
     /* update downstream accumulation*/
     acc [ynbr][xnbr] += acc [y][x];
@@ -214,7 +221,8 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
     /* push */
     if ( (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << nbr)) == 0 )
       queue [push_at] = (struct index) {xnbr, ynbr}, push_at = (push_at + 1) % hw;
-
+    else if (sink && pq_push (sink, raster [ynbr][xnbr], xnbr, ynbr))
+      error ("flow_accumulation () : pq_push () : realloc");
   }
 
   if (processed != hw)
@@ -225,6 +233,9 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
   return 0;
 }
 
+/*
+.. depression filling/priority flood fill algorithm
+*/
 int flow_remove_pits (DEM * dem)
 {
   int w = dem->w, h = dem->h;
@@ -238,11 +249,8 @@ int flow_remove_pits (DEM * dem)
   #define push(X,Y)                                                    \
     visited [Y][X] = 1;                                                \
     if (!isnan (elevation [Y][X]))                                     \
-      if (pq_push (&pq, elevation [Y][X], (uint16_t) X, (uint16_t) X)) \
+      if (pq_push (&pq, elevation [Y][X], X, Y))                       \
         return ERR_MALLOC;
-
-  //for (int y=0; y<h; ++y)
-  //  memcpy (elevation [y], raster [y], w * sizeof (float));
 
   /* set points outside the box as visited */
   memset (&visited [-1][-1], -1, (w+2) * sizeof (uint8_t));
@@ -261,7 +269,7 @@ int flow_remove_pits (DEM * dem)
 
   #undef push
 
-  float elev; uint16_t x, y;
+  float elev; int x, y;
   while (pq_pop (&pq, &elev, &x, &y))
   {
     for (int c=0; c<8; ++c)

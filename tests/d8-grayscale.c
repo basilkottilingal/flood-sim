@@ -63,7 +63,7 @@ int main (int argc, char **argv)
   FlowNetwork network;
   if (flow_network (dem, FLOW_D8, &network))
     filemap_close_all ("d8 flow network failed");
-  if (flow_accumulation (&network, dem))
+  if (flow_accumulation (&network, dem, NULL))
     filemap_close_all ("d8 flow accumulation failed");
 
   flow_network_grayscale (network, "d8.pgm", 1024, 1024);

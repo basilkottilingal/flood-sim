@@ -1,5 +1,5 @@
 CC        = gcc
-LIBS     ?= geotiff view flow-network
+LIBS     ?= flow-network geotiff view alloc # Order in the dependency order
 CPPFLAGS += $(addprefix -I../lib,$(LIBS))
 LDFLAGS  += $(addprefix -L../lib,$(LIBS))
 LDLIBS   += $(addprefix -l,$(LIBS))

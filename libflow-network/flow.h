@@ -2,6 +2,7 @@
 #define _FLOW_NETWORK_FLOW_H
 
   #include "geotiff.h"
+  #include "min-heap.h"
 
   /*
   .. Neighbors in this order
@@ -9,8 +10,12 @@
   ..  4 . 0
   ..  5 6 7               
   */
-  const struct { int x, y; } flow_neighbor [] = 
-    { {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1} };
+  static const struct { int x, y; }
+    flow_neighbor [] = 
+      { 
+        {1, 0},  {1, 1},   {0, 1},  {-1, 1},
+        {-1, 0}, {-1, -1}, {0, -1}, {1, -1}
+      };
 
   typedef enum
   {
@@ -27,11 +32,12 @@
     int w, h;
   } FlowNetwork;
 
+  int  pop_bit (uint8_t * v);
   int  flow_network           ( DEM dem, FLOW_DRAIN type, FlowNetwork * network );
   void flow_network_free      ( FlowNetwork );
   int  flow_network_grayscale ( FlowNetwork, const char * out, int w, int h );
   int  flow_accumulation_grayscale ( FlowNetwork, const char * out, int w, int h );
-  int  flow_accumulation      ( FlowNetwork *, DEM );
+  int  flow_accumulation      ( FlowNetwork *, DEM, MinPQ * pq );
   int  flow_remove_pits       ( DEM * );
   void flow_network_error     ( int type );
   

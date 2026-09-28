@@ -6,7 +6,7 @@
   typedef struct
   {
     float key;
-    uint16_t i, j;
+    int x, y;
   } PQNode;
 
   typedef struct
@@ -19,6 +19,6 @@
   /* APIs */
   int  pq_create (MinPQ *pq);
   void pq_free   (MinPQ *pq);
-  int  pq_push   (MinPQ *pq, float key, uint16_t i, uint16_t j);
-  int  pq_pop    (MinPQ *pq, float * key, uint16_t * i, uint16_t *j);
+  int  pq_push   (MinPQ *pq, float key, int x, int y);
+  int  pq_pop    (MinPQ *pq, float * key, int * x, int * y);
 #endif

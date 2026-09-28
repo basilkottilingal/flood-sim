@@ -55,7 +55,7 @@ static void sift_down(MinPQ *pq, int i)
   }
 }
 
-int pq_push (MinPQ *pq, float key, uint16_t i, uint16_t j)
+int pq_push (MinPQ *pq, float key, int x, int y)
 {
   if (pq->size == pq->capacity)
   {
@@ -65,8 +65,8 @@ int pq_push (MinPQ *pq, float key, uint16_t i, uint16_t j)
       return -1;
   }
   pq->data[pq->size].key = key;
-  pq->data[pq->size].i = i;
-  pq->data[pq->size].j = j;
+  pq->data[pq->size].x = x;
+  pq->data[pq->size].y = y;
   sift_up (pq, pq->size);
   pq->size++;
   return 0;
@@ -79,13 +79,13 @@ float pq_min_key (MinPQ *pq)
   return pq->data[0].key;
 }
 
-int pq_pop (MinPQ *pq, float * key, uint16_t * i, uint16_t * j)
+int pq_pop (MinPQ *pq, float * key, int * x, int * y)
 {
   if (pq->size == 0)
     return 0;
 
   PQNode top = pq->data[0];
-  *key = top.key, *i = top.i, *j = top.j;
+  *key = top.key, *x = top.x, *y = top.y;
   pq->size--;
   pq->data[0] = pq->data[pq->size];
   sift_down (pq, 0);
