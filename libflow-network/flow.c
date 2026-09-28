@@ -196,21 +196,26 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
   {
     processed ++;
 
+    #define collect_sink(X,Y) \
+      if (sink && pq_push (sink, raster [Y][X], X, Y)) \
+        return ERR_MALLOC
+
     /* pop */
     struct index Idx = queue [pop_at]; pop_at = (pop_at+1) % hw;
     int x = Idx.x, y = Idx.y;
     uint8_t code = dir [y][x];
     if (code == 0)
+    {
+      collect_sink (x, y);
       continue;
+    }
     
     uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
     int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
 
     if (xnbr<0 || xnbr>=w || ynbr<0 || ynbr>=h)
     {
-      /* add this point to sink */
-      if (sink && pq_push (sink, raster [ynbr][xnbr], xnbr, ynbr))
-        error ("flow_accumulation () : pq_push () : realloc");
+      collect_sink (xnbr, ynbr);
       continue;
     }
 
@@ -218,11 +223,12 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
     acc [ynbr][xnbr] += acc [y][x];
 
     assert ( in_degree [ynbr][xnbr] & ((uint8_t) 1 << nbr) );
-    /* push */
     if ( (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << nbr)) == 0 )
       queue [push_at] = (struct index) {xnbr, ynbr}, push_at = (push_at + 1) % hw;
-    else if (sink && pq_push (sink, raster [ynbr][xnbr], xnbr, ynbr))
-      error ("flow_accumulation () : pq_push () : realloc");
+    else 
+      collect_sink (xnbr, ynbr);
+
+    #undef push
   }
 
   if (processed != hw)
