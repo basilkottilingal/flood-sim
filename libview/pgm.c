@@ -4,10 +4,34 @@
 #include <stdio.h>
 #include <float.h>
 #include <assert.h>
+#include <math.h>
+#include <string.h>
+
+#define not_unused(v) (void)v
+
+static int limits (float ** raster, int w, int h, float * min, float * max)
+{
+  int foundnan = 0;
+  *min = FLT_MAX, *max = FLT_MIN;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+    {
+      if (isnan (raster [y][x]))
+      {
+        foundnan = 1;
+        continue;
+      }
+      if (raster [y][x] < *min)
+        *min = raster [y][x];
+      if (raster [y][x] > *max)
+        *max = raster [y][x];
+    }
+  return foundnan;
+}
 
 int pgm_grayscale (float ** raster, const char * out, int width, int height)
 {
-  if (raster == NULL || width < 0 || height < 0 || out == NULL || out [0] == '\0')
+  if (raster == NULL || width < 1 || height < 1 || out == NULL || out [0] == '\0')
     return -1;
 
   FILE *fp = fopen (out, "wb");
@@ -15,15 +39,9 @@ int pgm_grayscale (float ** raster, const char * out, int width, int height)
     return -1;
 
   /* Find range */
-  float min = FLT_MAX, max = FLT_MIN;
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++)
-    {
-      if (raster [y][x] < min)
-        min = raster [y][x];
-      if (raster [y][x] > max)
-        max = raster [y][x];
-    }
+  float min, max;
+  int foundNan = limits (raster, width, height, &min, &max);
+  not_unused (foundNan);
 
   /* PGM header */
   fprintf(fp, "P5\n%d %d\n255\n", width, height);
@@ -42,11 +60,188 @@ int pgm_grayscale (float ** raster, const char * out, int width, int height)
   for (int y = 0; y < height; y++)
     for (int x = 0; x < width; x++)
     {
-      float v = (raster [y][x] - min) / den;
+      float v = isnan (raster [y][x]) ? 0. : (raster [y][x] - min) / den;
       unsigned char pixel = (unsigned char)(v * 255.0);
       fwrite (&pixel, 1, 1, fp);
     }
 
   fclose (fp);
   return 0;  
+}
+
+static unsigned char *
+contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
+{
+  unsigned char * img = malloc ((size_t)w * h);
+  if (img == NULL)
+    return NULL;
+
+  /* white background */
+  memset (img, 255, (size_t)w * h);
+
+  for (int k = 0; k < nlevels; ++k)
+  {
+    const float level = levels [k];
+    const unsigned char color = 128u - 128u * (unsigned char) k / nlevels;
+    for (int y = 0; y < h - 1; ++y)
+    {
+      for (int x = 0; x < w - 1; ++x)
+      {
+
+        /*
+        ..   v0 -- e0 -- v1
+        ..   |           |
+        ..   e3          e1
+        ..   |           |
+        ..   v3 -- e2 -- v2
+        */
+        const float v0 = raster [y][x];
+        const float v1 = raster [y][x+1];
+        const float v2 = raster [y+1][x+1];
+        const float v3 = raster [y+1][x];
+
+        if (isnan (v0) || isnan (v1) || isnan (v2) || isnan (v3))
+          continue;
+
+        int c = 0;
+        if (v0 >= level) c |= 1 << 0;
+        if (v1 >= level) c |= 1 << 1;
+        if (v2 >= level) c |= 1 << 2;
+        if (v3 >= level) c |= 1 << 3;
+        if (c == 0 || c == 15)
+          continue;
+
+        float ex[4], ey[4];
+        int edge[4]; not_unused (edge);
+        int n = 0;
+
+        /* intesections */
+        #define intersection(C,N,M) (((C >> M) ^ (C >> N)) & 1u)
+        if (intersection (c, 0, 1))
+        {
+          float t = (level - v0) / (v1 - v0);
+          ex[n] = x + t;
+          ey[n] = y;
+          edge[n++] = 0;
+        }
+
+        if (intersection (c, 1, 2))
+        {
+          float t = (level - v1) / (v2 - v1);
+          ex[n] = x + 1;
+          ey[n] = y + t;
+          edge[n++] = 1;
+        }
+
+        if (intersection (c, 2, 3))
+        {
+          float t = (level - v2) / (v3 - v2);
+          ex[n] = x + 1 - t;
+          ey[n] = y + 1;
+          edge[n++] = 2;
+        }
+
+        if (intersection (c, 3, 0))
+        {
+          float t = (level - v3) / (v0 - v3);
+          ex[n] = x;
+          ey[n] = y + 1 - t;
+          edge[n++] = 3;
+        }
+        #undef intersection
+
+        /*
+        .. Normally there are 2 intersections.
+        .. Saddle cases have 4.
+        ..
+        .. Connect pairs. For a visualization this is
+        .. sufficient; for mathematically exact saddle
+        .. handling, use the cell-center value to decide
+        .. the connectivity.
+        */
+        for (int i = 0; i + 1 < n; i += 2)
+        {
+          int x0 = (int)lround (ex[i]);
+          int y0 = (int)lround (ey[i]);
+          int x1 = (int)lround (ex[i + 1]);
+          int y1 = (int)lround (ey[i + 1]);
+
+          /*
+          .. draw the segment using Bresenham.
+          */
+          int dx = abs (x1 - x0);
+          int sx = x0 < x1 ? 1 : -1;
+          int dy = -abs (y1 - y0);
+          int sy = y0 < y1 ? 1 : -1;
+          int err = dx + dy;
+
+          for (;;)
+          {
+            if ((unsigned) x0 < (unsigned) w && (unsigned) y0 < (unsigned) h)
+              img [y0 * w + x0] = color;
+
+            if (x0 == x1 && y0 == y1)
+              break;
+
+            int e2 = 2 * err;
+
+            if (e2 >= dy)
+            {
+              err += dy;
+              x0 += sx;
+            }
+
+            if (e2 <= dx)
+            {
+              err += dx;
+              y0 += sy;
+            }
+          }
+        }
+      }   /* for (x = 0:w-1)     */
+    }     /* for (y = 0:h-1)     */
+  }       /* for (k = 0:nlevels) */
+
+  return img;
+}
+
+int pgm_contour_grayscale (float ** raster, const char * out, int w, int h, int ncontours)
+{
+  if (raster == NULL || w < 2 || h < 2 || ncontours < 2 || out == NULL || out [0] == '\0')
+    return -1;
+
+  FILE *fp = fopen (out, "wb");
+  if (fp == NULL)
+    return -1;
+
+  /* Find contour levels*/
+  float min, max;
+  int foundNan = limits (raster, w, h, &min, &max);
+  not_unused (foundNan);
+  float * levels = malloc (ncontours * sizeof (float));
+  if (levels == NULL)
+  {
+    fclose (fp);
+    return -1;
+  }
+  float d = (max - min) / ncontours; 
+  for (int i=0; i<ncontours; ++i)
+    levels [i] = min + d * (float) i;
+
+  unsigned char * img = contour_pgm (raster, w, h, levels, ncontours);
+  if (img == NULL)
+  {
+    free (levels);
+    fclose (fp);
+    return -1;
+  }
+
+  /* PGM header */
+  fprintf (fp, "P5\n%d %d\n255\n", w, h);
+  fwrite (img, 1, (size_t) w*h, fp);
+
+  free (img);
+  free (levels);
+  fclose (fp);
+  return 0;
 }

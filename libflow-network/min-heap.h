@@ -1,5 +1,8 @@
 #ifndef _FLOW_NETWORK_MIN_PRIORITY_QUEUE_H
 #define _FLOW_NETWORK_MIN_PRIORITY_QUEUE_H
+
+  #include <stdint.h>
+
   typedef struct
   {
     float key;

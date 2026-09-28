@@ -6,6 +6,7 @@ lib*/*.a
 tests/*.a
 tests/*.s
 tests/*.o
+tests/*.pgm
 
 
 

@@ -3,6 +3,7 @@
 #include "flow.h"
 #include "min-heap.h"
 #include "pgm.h"
+#include "grid.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -51,48 +52,6 @@ static inline int pop_bit (uint8_t * v)
   return idx;
 }
 
-static void ** grid (size_t s, int w, int h, int ng)
-{
-  /* warning : use this only for uint8_t and float */
-  assert (w > 0 && h > 0 && ng >= 0);
-  size_t size = (w + 2*ng) * (h + 2*ng) * s;
-
-  #define _grid_(type)                                          \
-    if (s == sizeof (type))                                     \
-    {                                                           \
-      type * mem = malloc (size);                               \
-      if (mem == NULL)                                          \
-        error ("flow.h : grid () : malloc failed");             \
-      memset (mem, 0, size);                                    \
-      type ** memptr = malloc ((h + 2*ng) * sizeof (type *));   \
-      if (memptr == NULL)                                       \
-        error ("flow.h : grid () : malloc failed");             \
-      for (int y = -ng; y < h + ng; ++y)                        \
-        memptr [y + ng] = & mem [(y + ng) * (w + 2*ng) + ng];   \
-      return (void **) (memptr + ng);                           \
-    }
-
-  _grid_ (uint8_t)
-  _grid_ (float)
-
-  #undef _grid_
-  
-  error ("flow.h : grid () : unknown type");
-  return NULL;
-}
-
-#define grid_free(g,nghost) free (& g[-nghost][-nghost]), free (& g[-nghost])
-
-/*
-.. Neighbors in this order
-..
-..  3 2 1
-..  4 . 0
-..  5 6 7               
-*/
-const struct { int x, y; } neighbor [] = 
-  { {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1} };
-
 int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 {
   if (dem.raster == NULL)
@@ -100,7 +59,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 
   int w = dem.w, h = dem.h;
   assert (w > 0 && h > 0);
-  uint8_t ** dir = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
+  uint8_t ** dir = grid (uint8_t, w, h);
   float ** raster = dem.raster;
 
   *network = (FlowNetwork)
@@ -127,7 +86,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
             continue;
           for (int c=0; c<8; ++c)
           {
-            float nbrVal = raster [y + neighbor[c].y][x + neighbor[c].x];
+            float nbrVal = raster [y + flow_neighbor[c].y][x + flow_neighbor[c].x];
             if (isnan (nbrVal))
               continue;
             float downslope = (val - nbrVal) / delta [c];
@@ -153,10 +112,10 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 void flow_network_free (FlowNetwork network)
 {
   assert (network.dir != NULL);
-  grid_free ( network.dir, 1 );
+  grid_free (network.dir);
   if (network.accumulation == NULL)
     return;
-  grid_free ( network.accumulation, 1 );
+  grid_free (network.accumulation);
 }
 
 int flow_network_grayscale (FlowNetwork network, const char * out, int width, int height)
@@ -194,9 +153,9 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
     return -1;
 
   int w = network->w, h = network->h, hw = w * h;
-  float ** acc = network->accumulation = (float **) grid (sizeof (float), w, h, 1);
+  float ** acc = network->accumulation = grid (float, w, h);
   float ** raster = dem.raster;
-  uint8_t ** in_degree = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
+  uint8_t ** in_degree = grid (uint8_t, w, h);
   uint8_t ** dir = network->dir;
 
   /* find the number of neighbors who are source to (i,j) */
@@ -208,7 +167,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
       if ( code == 0 )
         continue;
       uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
-      int xnbr = x + neighbor[nbr].x, ynbr = y + neighbor[nbr].y;
+      int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
       in_degree [ynbr][xnbr] |= (uint8_t) 1 << nbr;
     }
 
@@ -243,7 +202,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
       continue;
     
     uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
-    int xnbr = x + neighbor[nbr].x, ynbr = y + neighbor[nbr].y;
+    int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
 
     if (xnbr<0 || xnbr>=w || ynbr<0 || ynbr>=h)
       continue;
@@ -262,7 +221,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem)
     fprintf (stderr, "Kahn's topological propagation inconsistency");
 
   free (queue);
-  grid_free (in_degree, 1);
+  grid_free (in_degree);
   return 0;
 }
 
@@ -270,7 +229,7 @@ int flow_remove_pits (DEM * dem)
 {
   int w = dem->w, h = dem->h;
   float ** elevation = dem->raster;
-  uint8_t ** visited = (uint8_t **) grid (sizeof (uint8_t), w, h, 1);
+  uint8_t ** visited = grid (uint8_t, w, h);
   
   MinPQ pq;
   if (pq_create (&pq))
@@ -307,8 +266,8 @@ int flow_remove_pits (DEM * dem)
   {
     for (int c=0; c<8; ++c)
     {
-      int xnbr = x + neighbor[c].x;
-      int ynbr = y + neighbor[c].y;
+      int xnbr = x + flow_neighbor[c].x;
+      int ynbr = y + flow_neighbor[c].y;
       if (visited [ynbr][xnbr])
         continue;
       visited [ynbr][xnbr] = 1;
@@ -321,7 +280,7 @@ int flow_remove_pits (DEM * dem)
     }
   }
 
-  grid_free (visited, 1);
+  grid_free (visited);
   pq_free   (&pq);
 
   return 0;

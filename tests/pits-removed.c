@@ -33,6 +33,7 @@
 #include "filemap.h"
 #include "geotiff.h"
 #include "pgm.h"
+#include "flow.h"
 
 int main (int argc, char **argv)
 {
@@ -45,23 +46,32 @@ int main (int argc, char **argv)
   geotiff_map (argv [1]);
 
   /*
-  .. kozhikode 11.258753 N, 75.780411 E
+  .. Koduvally 11.3595483 N, 75.9091866 E
   */
-  CoordG c = (CoordG) {.lat = 11.258753, .lon = 75.780411};
+  CoordG c = (CoordG) {.lat = 11.3595483, .lon = 75.9091866};
   DEM dem;
   if (geotiff_dem_window (c.lon, c.lat, 0.297, 0.297, &dem))
     filemap_close_all ("dem window failed");
+  if (flow_remove_pits (&dem))
+    filemap_close_all ("remove pits");
 
   printf ("coord %g %g\n", c.lat, c.lon);
   printf ("DEM  tiepoint pixel (%g %g), coord (%g %g)\n",
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
 
-  int imgw = dem.w > 1024 ? 1024 : dem.w;
-  int imgh = dem.h > 1024 ? 1024 : dem.h;
-  pgm_grayscale (dem.raster, "dem.pgm", imgw, imgh);
-  pgm_contour_grayscale (dem.raster, "dem-contour.pgm", imgw, imgh, 10); 
+  pgm_grayscale (dem, "dem.pgm", 1024, 1024);
 
+  FlowNetwork network;
+  if (flow_network (dem, FLOW_D8, &network))
+    filemap_close_all ("d8 flow network failed");
+  if (flow_accumulation (&network, dem))
+    filemap_close_all ("d8 flow accumulation failed");
+
+  flow_network_grayscale (network, "d8-pits-removed.pgm", 1024, 1024);
+  flow_accumulation_grayscale (network, "d8-pits-removed-acc.pgm", 1024, 1024);
+
+  flow_network_free (network);
   geotiff_dem_free (dem);
   geotiff_map_destroy ();
 

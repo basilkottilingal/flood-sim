@@ -3,6 +3,15 @@
 
   #include "geotiff.h"
 
+  /*
+  .. Neighbors in this order
+  ..  3 2 1
+  ..  4 . 0
+  ..  5 6 7               
+  */
+  const struct { int x, y; } flow_neighbor [] = 
+    { {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1} };
+
   typedef enum
   {
     FLOW_D8 = 1,

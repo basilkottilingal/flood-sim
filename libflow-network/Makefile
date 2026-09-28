@@ -1,2 +1,2 @@
-DEPS := geotiff view
+DEPS := alloc geotiff view
 include ../lib.mk
