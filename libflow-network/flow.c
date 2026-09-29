@@ -22,6 +22,7 @@ typedef enum
   ERR_FILE_ACCESS,
   ERR_NOT_IMPLEMENTED,
   ERR_MALLOC,
+  ERR_DATA_MISSING,
 } ERR;
 
 # if defined(__GNUC__) || defined(__clang__)
@@ -71,7 +72,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
       .type   = type,
     };
 
-  float a = 1., b = 1. / sqrt (2.);
+  float a = 1.f, b = sqrtf (2.f);
   const float delta [8] = {a, b, a, b, a, b, a, b};
 
   switch (type)
@@ -149,14 +150,18 @@ int flow_accumulation_grayscale (FlowNetwork network, const char * out, int widt
 
 int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 {
-  if (network->dir == NULL || network->accumulation != NULL)
-    return -1;
+  if (network->dir == NULL || network->accumulation != NULL || dem.raster)
+    return ERR_DATA_MISSING;
 
   int w = network->w, h = network->h, hw = w * h;
   float ** acc = network->accumulation = grid (float, w, h);
   float ** raster = dem.raster;
   uint8_t ** in_degree = grid (uint8_t, w, h);
   uint8_t ** dir = network->dir;
+
+  if (acc == NULL || in_degree == NULL)
+    return ERR_MALLOC;
+
   if (sink && pq_create (sink))
     error ("flow_accumulation () : pq_create () : malloc");
 
@@ -228,11 +233,10 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
     else 
       collect_sink (xnbr, ynbr);
 
-    #undef push
+    #undef collect_sink
   }
 
-  if (processed != hw)
-    fprintf (stderr, "Kahn's topological propagation inconsistency");
+  assert ("Kahn's topological consistency" && processed == hw );
 
   free (queue);
   grid_free (in_degree);
@@ -240,13 +244,21 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 }
 
 /*
-.. depression filling/priority flood fill algorithm
+.. depression filling algorithm. also called as priority flood fill algorithm
 */
 int flow_remove_pits (DEM * dem)
 {
+  if (dem->raster == NULL)
+    return ERR_DATA_MISSING;
+
   int w = dem->w, h = dem->h;
+  assert (w > 0 && h > 0);
+
   float ** elevation = dem->raster;
   uint8_t ** visited = grid (uint8_t, w, h);
+
+  if (visited == NULL)
+    return ERR_MALLOC;
   
   MinPQ pq;
   if (pq_create (&pq))
@@ -264,6 +276,7 @@ int flow_remove_pits (DEM * dem)
   for (int y=0; y<h; ++y)
     visited [y][-1] = visited [y][w] = 1;
 
+  /* boundary points are pushed to the priority queue */
   for (int y=0; y<h; ++y)
   {
     push (0,y); push (w-1,y);
