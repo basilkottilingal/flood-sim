@@ -2,17 +2,17 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <float.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+#include <float.h>
 
 #define not_unused(v) (void)v
 
-static int limits (float ** raster, int w, int h, float * min, float * max)
+static int limits (double ** raster, int w, int h, double * min, double * max)
 {
   int foundnan = 0;
-  *min = FLT_MAX, *max = FLT_MIN;
+  *min = DBL_MAX, *max = DBL_MIN;
   for (int y = 0; y < h; y++)
     for (int x = 0; x < w; x++)
     {
@@ -29,7 +29,7 @@ static int limits (float ** raster, int w, int h, float * min, float * max)
   return foundnan;
 }
 
-int pgm_grayscale (float ** raster, const char * out, int width, int height)
+int pgm_grayscale (double ** raster, const char * out, int width, int height)
 {
   if (raster == NULL || width < 1 || height < 1 || out == NULL || out [0] == '\0')
     return -1;
@@ -39,7 +39,7 @@ int pgm_grayscale (float ** raster, const char * out, int width, int height)
     return -1;
 
   /* Find range */
-  float min, max;
+  double min, max;
   int foundNan = limits (raster, width, height, &min, &max);
   not_unused (foundNan);
 
@@ -49,18 +49,18 @@ int pgm_grayscale (float ** raster, const char * out, int width, int height)
   /* Convert to grayscale */
   if (max == min)
   {
-    float pixel = 0.0f;
+    double pixel = 0.0f;
     for (int i=0; i<width*height; ++i)
       fwrite (&pixel, 1, 1, fp);
     fclose (fp);
     return 0;
   }
 
-  float den = max - min;
+  double den = max - min;
   for (int y = 0; y < height; y++)
     for (int x = 0; x < width; x++)
     {
-      float v = isnan (raster [y][x]) ? 0. : (raster [y][x] - min) / den;
+      double v = isnan (raster [y][x]) ? 0. : (raster [y][x] - min) / den;
       unsigned char pixel = (unsigned char)(v * 255.0);
       fwrite (&pixel, 1, 1, fp);
     }
@@ -70,7 +70,7 @@ int pgm_grayscale (float ** raster, const char * out, int width, int height)
 }
 
 static unsigned char *
-contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
+contour_pgm (double ** raster, int w, int h, double *levels, int nlevels)
 {
   unsigned char * img = malloc ((size_t)w * h);
   if (img == NULL)
@@ -81,7 +81,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
 
   for (int k = 0; k < nlevels; ++k)
   {
-    const float level = levels [k];
+    const double level = levels [k];
     const unsigned char color = 128u - 128u * (unsigned char) k / nlevels;
     for (int y = 0; y < h - 1; ++y)
     {
@@ -95,10 +95,10 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
         ..   |           |
         ..   v3 -- e2 -- v2
         */
-        const float v0 = raster [y][x];
-        const float v1 = raster [y][x+1];
-        const float v2 = raster [y+1][x+1];
-        const float v3 = raster [y+1][x];
+        const double v0 = raster [y][x];
+        const double v1 = raster [y][x+1];
+        const double v2 = raster [y+1][x+1];
+        const double v3 = raster [y+1][x];
 
         if (isnan (v0) || isnan (v1) || isnan (v2) || isnan (v3))
           continue;
@@ -111,7 +111,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
         if (c == 0 || c == 15)
           continue;
 
-        float ex[4], ey[4];
+        double ex[4], ey[4];
         int edge[4]; not_unused (edge);
         int n = 0;
 
@@ -119,7 +119,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
         #define intersection(C,N,M) (((C >> M) ^ (C >> N)) & 1u)
         if (intersection (c, 0, 1))
         {
-          float t = (level - v0) / (v1 - v0);
+          double t = (level - v0) / (v1 - v0);
           ex[n] = x + t;
           ey[n] = y;
           edge[n++] = 0;
@@ -127,7 +127,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
 
         if (intersection (c, 1, 2))
         {
-          float t = (level - v1) / (v2 - v1);
+          double t = (level - v1) / (v2 - v1);
           ex[n] = x + 1;
           ey[n] = y + t;
           edge[n++] = 1;
@@ -135,7 +135,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
 
         if (intersection (c, 2, 3))
         {
-          float t = (level - v2) / (v3 - v2);
+          double t = (level - v2) / (v3 - v2);
           ex[n] = x + 1 - t;
           ey[n] = y + 1;
           edge[n++] = 2;
@@ -143,7 +143,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
 
         if (intersection (c, 3, 0))
         {
-          float t = (level - v3) / (v0 - v3);
+          double t = (level - v3) / (v0 - v3);
           ex[n] = x;
           ey[n] = y + 1 - t;
           edge[n++] = 3;
@@ -205,7 +205,7 @@ contour_pgm (float ** raster, int w, int h, float *levels, int nlevels)
   return img;
 }
 
-int pgm_contour_grayscale (float ** raster, const char * out, int w, int h, int ncontours)
+int pgm_contour_grayscale (double ** raster, const char * out, int w, int h, int ncontours)
 {
   if (raster == NULL || w < 2 || h < 2 || ncontours < 2 || out == NULL || out [0] == '\0')
     return -1;
@@ -215,18 +215,18 @@ int pgm_contour_grayscale (float ** raster, const char * out, int w, int h, int 
     return -1;
 
   /* Find contour levels*/
-  float min, max;
+  double min, max;
   int foundNan = limits (raster, w, h, &min, &max);
   not_unused (foundNan);
-  float * levels = malloc (ncontours * sizeof (float));
+  double * levels = malloc (ncontours * sizeof (double));
   if (levels == NULL)
   {
     fclose (fp);
     return -1;
   }
-  float d = (max - min) / ncontours; 
+  double d = (max - min) / ncontours; 
   for (int i=0; i<ncontours; ++i)
-    levels [i] = min + d * (float) i;
+    levels [i] = min + d * (double) i;
 
   unsigned char * img = contour_pgm (raster, w, h, levels, ncontours);
   if (img == NULL)

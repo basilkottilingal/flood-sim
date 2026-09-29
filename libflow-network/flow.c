@@ -12,7 +12,6 @@
 #include <errno.h>
 #include <assert.h>
 #include <math.h>
-#include <float.h>
 
 #define error(e) filemap_close_all(e)
 
@@ -56,12 +55,12 @@ int pop_bit (uint8_t * v)
 int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 {
   if (dem.raster == NULL)
-    return -1;
+    return ERR_DATA_MISSING;
 
   int w = dem.w, h = dem.h;
   assert (w > 0 && h > 0);
   uint8_t ** dir = grid (uint8_t, w, h);
-  float ** raster = dem.raster;
+  double ** raster = dem.raster;
 
   *network = (FlowNetwork)
     {
@@ -72,8 +71,8 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
       .type   = type,
     };
 
-  float a = 1.f, b = sqrtf (2.f);
-  const float delta [8] = {a, b, a, b, a, b, a, b};
+  double a = 1., b = sqrt (2.);
+  const double delta [8] = {a, b, a, b, a, b, a, b};
 
   switch (type)
   {
@@ -81,16 +80,16 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
       for (int y=0; y<h; ++y)
         for (int x=0; x<w; ++x)
         {
-          float max = 0.f, val = raster [y][x];
+          double max = 0., val = raster [y][x];
           uint8_t code = 0;
           if ( isnan (val) )
             continue;
           for (int c=0; c<8; ++c)
           {
-            float nbrVal = raster [y + flow_neighbor[c].y][x + flow_neighbor[c].x];
+            double nbrVal = raster [y + flow_neighbor[c].y][x + flow_neighbor[c].x];
             if (isnan (nbrVal))
               continue;
-            float downslope = (val - nbrVal) / delta [c];
+            double downslope = (val - nbrVal) / delta [c];
             if (downslope > max)
               code = (uint8_t) 1 << c, max = downslope;
           }
@@ -107,6 +106,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
       error ("unknown flow drain type"); 
   }
 
+  assert (0);
   return -1;
 }
 
@@ -150,12 +150,12 @@ int flow_accumulation_grayscale (FlowNetwork network, const char * out, int widt
 
 int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 {
-  if (network->dir == NULL || network->accumulation != NULL || dem.raster)
+  if (network->dir == NULL || network->accumulation != NULL || dem.raster ==  NULL)
     return ERR_DATA_MISSING;
 
   int w = network->w, h = network->h, hw = w * h;
-  float ** acc = network->accumulation = grid (float, w, h);
-  float ** raster = dem.raster;
+  double ** acc = network->accumulation = grid (double, w, h);
+  double ** raster = dem.raster;
   uint8_t ** in_degree = grid (uint8_t, w, h);
   uint8_t ** dir = network->dir;
 
@@ -254,7 +254,7 @@ int flow_remove_pits (DEM * dem)
   int w = dem->w, h = dem->h;
   assert (w > 0 && h > 0);
 
-  float ** elevation = dem->raster;
+  double ** elevation = dem->raster;
   uint8_t ** visited = grid (uint8_t, w, h);
 
   if (visited == NULL)
@@ -288,7 +288,7 @@ int flow_remove_pits (DEM * dem)
 
   #undef push
 
-  float elev; int x, y;
+  double elev; int x, y;
   while (pq_pop (&pq, &elev, &x, &y))
   {
     for (int c=0; c<8; ++c)

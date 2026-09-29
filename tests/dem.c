@@ -60,12 +60,11 @@ int main (int argc, char **argv)
   {
     printf ("\t");
     for (int x = -2; x < dem.w+2; ++x)
-      printf ("%#4.5g ", (double) dem.raster [y][x]);
+      printf ("%#4.5g ", dem.raster [y][x]);
     printf ("\n");
   }
 
   geotiff_dem_free (dem);
-
   geotiff_map_destroy ();
 
   return 0;

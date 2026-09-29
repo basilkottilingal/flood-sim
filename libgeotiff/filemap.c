@@ -59,6 +59,7 @@ void filemap_close_all (const char * error_if_any)
   unmap (db);
   if (error_if_any != NULL)
   {
+    printf ("closing with error\n");
     if (errno)
       perror (error_if_any);
     else

@@ -34,7 +34,7 @@ int flow_graph (DEM dem, FlowGraph * graph)
   }
 
   int w = network.w, h = network.h, hw = w * h;
-  float ** elevation = dem.raster;
+  double ** elevation = dem.raster;
   uint8_t ** dir         = network.dir;
   uint8_t ** inverse     = grid (uint8_t, w, h);
   uint8_t ** nans        = grid (uint8_t, w, h);
@@ -56,7 +56,7 @@ nans [y][x] = 255u;
     }
 
   unsigned char tag = 2u;
-  float elev; int x, y;
+  double elev; int x, y;
   while (pq_pop (&sink, &elev, &x, &y))
   {
     tag = ((int) tag % 245u) + 5u;

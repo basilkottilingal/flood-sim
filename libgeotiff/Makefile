@@ -1,2 +1,2 @@
-DEPS := view
+DEPS := view alloc
 include ../lib.mk

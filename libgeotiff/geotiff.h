@@ -11,7 +11,7 @@
     .. i.e ghost layer of 2 cell thickness. A new tiepoint will be 
     .. defined for this raster grid.
     */
-    float ** raster;
+    double ** raster;
     double tiepoint [6];
     double scale    [3];
     int w, h;

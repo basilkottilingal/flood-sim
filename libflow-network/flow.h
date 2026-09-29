@@ -27,7 +27,7 @@
   typedef struct
   {
     uint8_t ** dir;
-    float   ** accumulation;
+    double  ** accumulation;
     FLOW_DRAIN type;
     int w, h;
   } FlowNetwork;

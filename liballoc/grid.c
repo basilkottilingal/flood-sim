@@ -27,10 +27,10 @@ void ** grid_general (size_t s, int w, int h, int ng)
     }
 
   _grid_ (uint8_t)
-  _grid_ (float)
   _grid_ (double)
 
   #undef _grid_
-  
+  assert ("unknown type" && 0);
+ 
   return NULL;
 }

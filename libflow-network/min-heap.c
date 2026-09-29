@@ -55,7 +55,7 @@ static void sift_down(MinPQ *pq, int i)
   }
 }
 
-int pq_push (MinPQ *pq, float key, int x, int y)
+int pq_push (MinPQ *pq, double key, int x, int y)
 {
   if (pq->size == pq->capacity)
   {
@@ -72,14 +72,14 @@ int pq_push (MinPQ *pq, float key, int x, int y)
   return 0;
 }
 
-float pq_min_key (MinPQ *pq)
+double pq_min_key (MinPQ *pq)
 {
   if (pq->size == 0)
     return FLT_MAX; /* handle error */
   return pq->data[0].key;
 }
 
-int pq_pop (MinPQ *pq, float * key, int * x, int * y)
+int pq_pop (MinPQ *pq, double * key, int * x, int * y)
 {
   if (pq->size == 0)
     return 0;

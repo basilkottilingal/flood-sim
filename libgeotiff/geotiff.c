@@ -21,6 +21,7 @@
 #include "geotiff.h"
 #include "geodetic.h"
 #include "parse.h"
+#include "grid.h"
 
 #define error(e)                          filemap_close_all(e)
 #define is_available(cur_,end_,reqd_)                        \
@@ -498,21 +499,14 @@ int geotiff_dem_window ( double lon, double lat, double dlon, double dlat, DEM *
     return -1;
 
   assert (jb >= ja && ib >= ia);
-
-  size_t size = (5 + jb - ja) * sizeof (float *);
-  if (size > (1<<14))
-  {
-    fprintf (stderr, "warning : very large raster grid!\n");
-    if (size > (1<<18))
-      error ("DEM : large malloc ()");
-  }
-  float ** raster = malloc (size);
+  int w = ib - ia + 1, h = jb - ja + 1;
+  double ** raster = dem->raster = grid (double, w, h);
   if (raster == NULL)
-    error ("DEM : malloc () failed");
-  dem->raster = raster + 2;
+    error ("dem : malloc");
 
-  for (int j = ja - 2; j <= jb + 2; ++j, ++raster)
-    *raster = & dem_raster [j * geotiff.dim.x + ia];
+  for (int y = -2; y < h+2; ++y)
+    for (int x = -2; x < w+2; ++x)
+      raster [y][x] = (double) dem_raster [ (ja + y) * geotiff.dim.x + (ia + x) ];
 
   double * tp = geotiff.crs.tiepoint, * scale = geotiff.crs.scale;
   double tiepoint [6] = 
@@ -540,10 +534,7 @@ int geotiff_dem_pgm ( DEM dem, const char * out, int w, int h )
 void  geotiff_dem_free ( DEM dem )
 {
   if (dem.raster)
-  {
-    float ** mem = dem.raster - 2;
-    free (mem);
-  }
+    grid_free (dem.raster);
 }
 
 #undef error
