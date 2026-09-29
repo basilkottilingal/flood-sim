@@ -14,5 +14,7 @@
   #define grid(type,w,h)    (type **) grid_general (sizeof (type),w,h,2)
   #define grid_free(g)      free (((char *)&g[-2][-2]) - sizeof (GridData)), free (&g[-2])
   #define grid_data(g)      *(GridData *) (((char *)&g[-2][-2]) - sizeof (GridData))
+  #define grid_copy(type,from,to,w,h) \
+      memcpy (&to[-2][-2], &from[-2][-2], (w+4)*(h+4)*sizeof(type))
   
 #endif

@@ -41,3 +41,33 @@ void ** grid_general (size_t s, int w, int h, int ng)
  
   return NULL;
 }
+
+#if 0
+void ** grid_copy (const void * const * g)
+{
+  GridData gd = grid_data (g);
+  void ** copy = grid_general (gd.size, gd.width, gd.height, gd.nghosts);
+  if (copy == NULL)
+    return NULL;
+  char ** mem, ** source;
+  switch (gd.size)
+  {
+    case sizeof (int) :
+      mem = (char *) (& ((int **) copy) [-nghosts][-nghosts]);
+      source = (char *) (& ((int **) g) [-nghosts][-nghosts]);
+      break;
+    case sizeof (double) :
+      mem = (char *) (& ((double **) copy) [-nghosts][-nghosts]);
+      source = (char *) (& ((double **) g) [-nghosts][-nghosts]);
+    case sizeof (uint8_t) :
+      mem = (char *) (& ((uint8_t **) copy) [-nghosts][-nghosts]);
+      source = (char *) (& ((uint8_t **) g) [-nghosts][-nghosts]);
+      break;
+    default :
+      return NULL;
+  }
+  assert (mem && source);
+  memcpy (mem, source, (gd.width + 2*gd.nghosts) * (gd.height + 2*gd.nghosts) * gd.size);
+  return copy;
+}
+#endif

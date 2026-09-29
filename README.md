@@ -13,6 +13,9 @@
 <a id="1">[1]</a>
 Welch, T. "A technique for high-performance data compression." Computer 17.6 (1984): 8-19.
   5. [An LZW code in libtiff library](https://gitlab.com/libtiff/libtiff/-/blob/master/libtiff/tif_lzw.c)
+  6. [wsServer](https://github.com/Theldus/wsServer/tree/master)
+  7. [Basilisk](basilisk.fr)
+
 
 # Multilayer FVM solver for flood simulation
 
