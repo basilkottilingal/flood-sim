@@ -19,6 +19,16 @@
 
   typedef enum
   {
+    FN_GENERAL = 0,
+    FN_BOUNDARY = 8,
+    FN_RESERVOIR = 1,
+    FN_OCEAN,
+    FN_FEEDER,
+    FN_BREACH,
+  } FLOW_NODE;
+
+  typedef enum
+  {
     FLOW_D8 = 1,
     FLOW_DINFTY,
     FLOW_MFD,
@@ -27,6 +37,7 @@
   typedef struct
   {
     uint8_t ** dir;
+    uint8_t ** invDir;
     double  ** accumulation;
     FLOW_DRAIN type;
     int w, h;

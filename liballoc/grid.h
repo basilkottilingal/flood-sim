@@ -3,9 +3,16 @@
 
   #include <stdlib.h>
 
+  typedef struct
+  {
+    int width, height, nghosts;
+    size_t size;
+  } GridData;
+
   /* API(s) for 2D grid */
   void ** grid_general (size_t type_size, int width, int height, int nghosts);
   #define grid(type,w,h)    (type **) grid_general (sizeof (type),w,h,2)
-  #define grid_free(g)      free ( &g[-2][-2] ), free ( &g[-2] )
+  #define grid_free(g)      free (((char *)&g[-2][-2]) - sizeof (GridData)), free (&g[-2])
+  #define grid_data(g)      *(GridData *) (((char *)&g[-2][-2]) - sizeof (GridData))
   
 #endif

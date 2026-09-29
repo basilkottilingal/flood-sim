@@ -59,8 +59,8 @@ static void d8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDi
   double a = 1., b = sqrt (2.);
   const double delta [8] = {a, b, a, b, a, b, a, b};
 
-  for (int y=0; y<h; ++y)
-    for (int x=0; x<w; ++x)
+  for (int y=-1; y<h+1; ++y)
+    for (int x=-1; x<w+1; ++x)
     {
       double max = 0., val = raster [y][x];
       uint8_t code = 0;
@@ -95,11 +95,15 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
   int w = dem.w, h = dem.h;
   assert (w > 0 && h > 0);
   uint8_t ** dir = grid (uint8_t, w, h);
+  uint8_t ** invDir = grid (uint8_t, w, h);
+  if (dir == NULL || invDir == NULL)
+    return ERR_MALLOC;
   double ** raster = dem.raster;
 
   *network = (FlowNetwork)
     {
       .dir    = dir,
+      .invDir = invDir,
       .accumulation = NULL,
       .w      = w,
       .h      = h,
@@ -109,7 +113,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
   switch (type)
   {
     case FLOW_D8  :
-      d8 (raster, w, h, dir, NULL);
+      d8 (raster, w, h, dir, invDir);
       return 0;
 
     case FLOW_DINFTY :
@@ -328,23 +332,63 @@ int flow_remove_pits (DEM * dem)
   return 0;
 }
 
-static int flow_routine (DEM dem)
+#if 0
+static
+FLOW_NODE ** classify_nodes (double ** elevation, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+{
+  FLOW_NODE ** type = grid (int, w, h);
+  if (visited == NULL || type == NULL)
+    return NULL;
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      if (elevation [y][x] <= 0.)
+      {
+        type = FN_OCEAN;
+        continue; 
+      }
+
+      if (y == 0|| x == 0 || y == h-1 || x == w-1)
+        type = FN_BOUNDARY;
+
+      if (!dir [y][x] && !invDir [y][x])
+      {
+        type |= FN_RESERVOIR;
+        /* see if this pit is an isolated pit or a hydro-flattened reservoir */
+        int depth = 0;
+        do
+        {
+        } while (1);
+        /* designate neighbors if they are feeders or breaches */
+      }
+    }
+  return 0;
+}
+
+int flow_routine (DEM dem)
 {
   if (dem.raster == NULL || dem.w < 2 || dem.h < 2)
     return ERR_DATA_MISSING;
   int w = dem.w, h = dem.h;
-  double ** raster = dem.raster;
-  double ** elevation = grid (double, w, h);
+  const double * const * raster = (const double * const *) dem.raster;
+  double ** elevation = grid (double, w, h); /* for a copy of raster */
   if (elevation == NULL)
     return ERR_MALLOC;
   for (int y=-2; y<h+2; ++y)
     memcpy (&elevation [y][-2], &raster [y][-2], (w+4)*sizeof (double));
-  uint8_t ** classification = grid (uint8_t, w, h);
+  int ** classification = grid (int, w, h);
   uint8_t ** dir = grid (uint8_t, w, h);
-  uint8_t ** opp = grid (uint8_t, w, h);
+  uint8_t ** invDir = grid (uint8_t, w, h);
   uint8_t ** acc = grid (uint8_t, w, h);
+
+  if (classification == NULL || dir == NULL || invDir == NULL || acc == NULL)
+    return ERR_MALLOC;
+
+  d8 (elevation, w, h, dir, invDir);
+
   MinPQ sinks;
 }
+#endif
 
 void flow_network_error ( int type )
 {

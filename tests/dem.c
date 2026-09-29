@@ -32,6 +32,7 @@
 
 #include "filemap.h"
 #include "geotiff.h"
+#include "pgm.h"
 
 int main (int argc, char **argv)
 {
@@ -48,21 +49,19 @@ int main (int argc, char **argv)
   */
   CoordG c = (CoordG) {.lat = 11.258753, .lon = 75.780411};
   DEM dem;
-  if (geotiff_dem_window (c.lon, c.lat, 0., 0., &dem))
+  if (geotiff_dem_window (c.lon, c.lat, 0.297, 0.297, &dem))
     filemap_close_all ("dem window failed");
 
   printf ("coord %g %g\n", c.lat, c.lon);
   printf ("DEM  tiepoint pixel (%g %g), coord (%g %g)\n",
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
-  printf ("elevation grid\n dem.raster[-2:%d][-2:%d]\n", dem.h+1, dem.w+1);
-  for (int y = -2; y < dem.h+2; ++y)
-  {
-    printf ("\t");
-    for (int x = -2; x < dem.w+2; ++x)
-      printf ("%#4.5g ", dem.raster [y][x]);
-    printf ("\n");
-  }
+
+  int imgw = dem.w > 1024 ? 1024 : dem.w;
+  int imgh = dem.h > 1024 ? 1024 : dem.h;
+  pgm_grayscale (dem.raster, "dem.pgm", imgw, imgh);
+  pgm_contour_grayscale (dem.raster, "dem-contour.pgm", imgw, imgh, 10);
+  pgm_hillshade (dem.raster, "hillshade.pgm", imgw, imgh, 315, 45, 30, 1.);
 
   geotiff_dem_free (dem);
   geotiff_map_destroy ();
