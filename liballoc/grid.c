@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 
+/* fixme : use memory pooling */
 void ** grid_general (size_t s, int w, int h, int ng)
 {
   /* warning : use this only for uint8_t, float and double */

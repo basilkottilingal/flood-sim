@@ -52,6 +52,41 @@ int pop_bit (uint8_t * v)
   return idx;
 }
 
+static void d8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+{
+  /* Forest of Directed Acyclic Graph corresponding to D8 flow network */
+
+  double a = 1., b = sqrt (2.);
+  const double delta [8] = {a, b, a, b, a, b, a, b};
+
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      double max = 0., val = raster [y][x];
+      uint8_t code = 0;
+      int xnbr = 0, ynbr = 0;
+      if ( isnan (val) )
+        continue;
+      for (int c=0; c<8; ++c)
+      {
+        double nbrVal = raster [y + flow_neighbor[c].y][x + flow_neighbor[c].x];
+        if (isnan (nbrVal))
+          continue;
+        double downslope = (val - nbrVal) / delta [c];
+        if (downslope > max)
+        {
+          code = (uint8_t) 1 << c, max = downslope;
+          xnbr = x + flow_neighbor [c].x;
+          ynbr = y + flow_neighbor [c].y;
+        }
+      }
+      dir [y][x] = code;
+      /* DAG where every direction is inverted */
+      if (invDir != NULL && code)
+        invDir [ynbr][xnbr] |= (uint8_t) 1 << ((code+4)%8);
+    }
+}
+
 int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 {
   if (dem.raster == NULL)
@@ -71,30 +106,10 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
       .type   = type,
     };
 
-  double a = 1., b = sqrt (2.);
-  const double delta [8] = {a, b, a, b, a, b, a, b};
-
   switch (type)
   {
     case FLOW_D8  :
-      for (int y=0; y<h; ++y)
-        for (int x=0; x<w; ++x)
-        {
-          double max = 0., val = raster [y][x];
-          uint8_t code = 0;
-          if ( isnan (val) )
-            continue;
-          for (int c=0; c<8; ++c)
-          {
-            double nbrVal = raster [y + flow_neighbor[c].y][x + flow_neighbor[c].x];
-            if (isnan (nbrVal))
-              continue;
-            double downslope = (val - nbrVal) / delta [c];
-            if (downslope > max)
-              code = (uint8_t) 1 << c, max = downslope;
-          }
-          dir [y][x] = code;
-        }
+      d8 (raster, w, h, dir, NULL);
       return 0;
 
     case FLOW_DINFTY :
@@ -313,6 +328,23 @@ int flow_remove_pits (DEM * dem)
   return 0;
 }
 
+static int flow_routine (DEM dem)
+{
+  if (dem.raster == NULL || dem.w < 2 || dem.h < 2)
+    return ERR_DATA_MISSING;
+  int w = dem.w, h = dem.h;
+  double ** raster = dem.raster;
+  double ** elevation = grid (double, w, h);
+  if (elevation == NULL)
+    return ERR_MALLOC;
+  for (int y=-2; y<h+2; ++y)
+    memcpy (&elevation [y][-2], &raster [y][-2], (w+4)*sizeof (double));
+  uint8_t ** classification = grid (uint8_t, w, h);
+  uint8_t ** dir = grid (uint8_t, w, h);
+  uint8_t ** opp = grid (uint8_t, w, h);
+  uint8_t ** acc = grid (uint8_t, w, h);
+  MinPQ sinks;
+}
 
 void flow_network_error ( int type )
 {

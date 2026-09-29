@@ -1,3 +1,4 @@
+#include "grid.h"
 #include "pgm.h"
 
 #include <stdlib.h>
@@ -244,4 +245,58 @@ int pgm_contour_grayscale (double ** raster, const char * out, int w, int h, int
   free (levels);
   fclose (fp);
   return 0;
+}
+
+int pgm_hillshade (
+  double ** dem,
+  const char * out,
+  int width,
+  int height,
+  double azimuth,
+  double altitude,
+  double cellsize,
+  double z_factor )
+{
+  if (dem == NULL || width < 3 || height < 3)
+    return -1;
+
+  double ** hillshade = grid (double, width, height);
+  if (hillshade == NULL)
+    return -1;
+
+  if (azimuth < 0 || azimuth > 360)
+    azimuth = 315;
+  if (altitude < 0 || altitude > 90)
+    altitude = 45;
+  if (cellsize <= 0.)
+    cellsize = 30.; /* assumes 30 m x 30 m raster resolution */
+  double zenith = (90-altitude) * M_PI / 180.;
+  double az     = (double) ((int) (360 - azimuth + 90) % 360) * M_PI / 180.;
+
+  /* Horn 1981 algo */
+  for (int y=0; y<height; ++y)
+    for (int x=0; x<width; ++x)
+    {
+      double a = dem [y-1][x-1];
+      double b = dem [y-1][x  ];
+      double c = dem [y-1][x+1];
+      double d = dem [y  ][x-1];
+      double f = dem [y  ][x+1];
+      double g = dem [y+1][x-1];
+      double h = dem [y+1][x  ];
+      double i = dem [y+1][x+1];
+        
+      double dzdx = ((c + 2*f + i) - (a + 2*d + g)) / (8*cellsize);
+      double dzdy = ((g + 2*h + i) - (a + 2*b + c)) / (8*cellsize);
+
+      double slope  = atan (z_factor * sqrt (dzdx*dzdx + dzdy*dzdy));
+      double aspect = atan2 (dzdy, -dzdx);
+
+      hillshade [y][x] = 255 * 
+        fmax (0., cos (zenith) * cos (slope) + sin (zenith) * sin (slope) * cos (az - aspect));
+    }
+
+  int err = pgm_grayscale (hillshade, out, width, height);
+  grid_free (hillshade);
+  return err;
 }

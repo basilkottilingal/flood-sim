@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <math.h>
 
 /*
 .. One of the limitation of this script is the reliance on POSIX
@@ -58,7 +59,11 @@ int main (int argc, char **argv)
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
 
-  geotiff_dem_pgm (dem, "dem.pgm", 1024, 1024);
+  int w = dem.w > 1024 ? 1024 : dem.w;
+  int h = dem.h > 1024 ? 1024 : dem.h;
+
+  geotiff_dem_pgm (dem, "dem.pgm", w, h);
+  pgm_hillshade (dem.raster, "hillshade.pgm", w, h, 315., 45., 30., 2.);
 
   FlowNetwork network;
   if (flow_network (dem, FLOW_D8, &network))
@@ -70,8 +75,8 @@ int main (int argc, char **argv)
     filemap_close_all ("failed");
   }
 
-  flow_network_grayscale (network, "d8.pgm", 1024, 1024);
-  flow_accumulation_grayscale (network, "d8-acc.pgm", 1024, 1024);
+  flow_network_grayscale (network, "d8.pgm", w, h);
+  flow_accumulation_grayscale (network, "d8-acc.pgm", w, h);
 
   flow_network_free (network);
   geotiff_dem_free (dem);
