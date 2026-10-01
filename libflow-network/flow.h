@@ -19,12 +19,13 @@
 
   typedef enum
   {
-    FN_GENERAL = 0,
-    FN_BOUNDARY = 32,
-    FN_OCEAN = 128,
-    FN_RESERVOIR = 64,
-    FN_RESERVOIR_CATCHMENT = 1,
-    FN_RESERVOIR_BREACH = 2,
+    FN_GENERAL               = 0,
+    FN_BOUNDARY              = 32,
+    FN_OCEAN                 = 128,
+    FN_FLAT                  = 64,
+    //FN_RESERVOIR           = 1,
+    //FN_RESERVOIR_CATCHMENT = 2,
+    //FN_RESERVOIR_BREACH    = 4,
   } FLOW_NODE;
 
   typedef enum
