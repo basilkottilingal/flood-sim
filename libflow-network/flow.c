@@ -52,19 +52,20 @@ int pop_bit (uint8_t * v)
   return idx;
 }
 
-static void d8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+static void D8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDir)
 {
   /* Forest of Directed Acyclic Graph corresponding to D8 flow network */
 
   double a = 1., b = sqrt (2.);
   const double delta [8] = {a, b, a, b, a, b, a, b};
 
-  for (int y=-1; y<h+1; ++y)
-    for (int x=-1; x<w+1; ++x)
+  //for (int y=-1; y<h+1; ++y)
+  //  for (int x=-1; x<w+1; ++x)
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
     {
       double max = 0., val = raster [y][x];
-      uint8_t code = 0;
-      int xnbr = 0, ynbr = 0;
+      int nbr = -1;
       if ( isnan (val) )
         continue;
       for (int c=0; c<8; ++c)
@@ -74,16 +75,16 @@ static void d8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDi
           continue;
         double downslope = (val - nbrVal) / delta [c];
         if (downslope > max)
-        {
-          code = (uint8_t) 1 << c, max = downslope;
-          xnbr = x + flow_neighbor [c].x;
-          ynbr = y + flow_neighbor [c].y;
-        }
+          nbr = c, max = downslope;
       }
-      dir [y][x] = code;
-      /* DAG where every direction is inverted */
-      if (invDir != NULL && code)
-        invDir [ynbr][xnbr] |= (uint8_t) 1 << ((code+4)%8);
+      if (nbr >= 0)
+      {
+        dir [y][x] = (uint8_t) 1 << nbr;
+        int xnbr = x + flow_neighbor [nbr].x;
+        int ynbr = y + flow_neighbor [nbr].y;
+        /* DAG where every direction is inverted */
+        invDir [ynbr][xnbr] |= (uint8_t) 1 << ((nbr+4)%8);
+      }
     }
 }
 
@@ -113,7 +114,7 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
   switch (type)
   {
     case FLOW_D8  :
-      d8 (raster, w, h, dir, invDir);
+      D8 (raster, w, h, dir, invDir);
       return 0;
 
     case FLOW_DINFTY :
@@ -167,6 +168,7 @@ int flow_accumulation_grayscale (FlowNetwork network, const char * out, int widt
   return pgm_grayscale (network.accumulation, out, width, height);
 }
 
+
 int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 {
   if (network->dir == NULL || network->accumulation != NULL || dem.raster ==  NULL)
@@ -177,6 +179,9 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
   double ** raster = dem.raster;
   uint8_t ** in_degree = grid (uint8_t, w, h);
   uint8_t ** dir = network->dir;
+uint8_t ** visited = grid (uint8_t, w, h);
+uint8_t ** in = grid (uint8_t, w, h);
+uint8_t ** out = grid (uint8_t, w, h);
 
   if (acc == NULL || in_degree == NULL)
     return ERR_MALLOC;
@@ -184,18 +189,11 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
   if (sink && pq_create (sink))
     error ("flow_accumulation () : pq_create () : malloc");
 
-  /* find the number of neighbors who are source to (i,j) */
-  for (int y=0; y<h; ++y)
-    for (int x=0; x<w; ++x)
-    {
-      acc [y][x] = 1.; /* you first add the "rainfall" at (i,j) to the flow[i][j]*/
-      uint8_t code = dir [y][x];
-      if ( code == 0 )
-        continue;
-      uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
-      int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
-      in_degree [ynbr][xnbr] |= (uint8_t) 1 << nbr;
-    }
+  /* every cell is a source to itself */
+  memset (&acc [-2][-2], 1, (w+4)*(h*4) *sizeof (uint8_t));
+
+  /* neighbors who are source to (x,y) are codified as '1' bits of in_degree*/
+  grid_copy (uint8_t, network->invDir, in_degree, w, h);
 
   /* first in first out queue */
   struct index { int x, y; } * queue = malloc (hw * sizeof (struct index));
@@ -208,6 +206,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
     {
       if (isnan (raster [y][x]))
       {
+visited [y][x] = 255;
         processed ++;
         continue;
       }
@@ -227,6 +226,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
     /* pop */
     struct index Idx = queue [pop_at]; pop_at = (pop_at+1) % hw;
     int x = Idx.x, y = Idx.y;
+visited [y][x] = 255;
     uint8_t code = dir [y][x];
     if (code == 0)
     {
@@ -234,7 +234,7 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
       continue;
     }
     
-    uint8_t nbr = pop_bit (&code); /* (i, j) is a source to nbr */
+    uint8_t nbr = pop_bit (&code), inv = (nbr+4)%8;
     int xnbr = x + flow_neighbor[nbr].x, ynbr = y + flow_neighbor[nbr].y;
 
     if (xnbr<0 || xnbr>=w || ynbr<0 || ynbr>=h)
@@ -246,16 +246,52 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
     /* update downstream accumulation*/
     acc [ynbr][xnbr] += acc [y][x];
 
-    assert ( in_degree [ynbr][xnbr] & ((uint8_t) 1 << nbr) );
-    if ( (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << nbr)) == 0 )
+    assert ( in_degree [ynbr][xnbr] & ((uint8_t) 1 << inv) );
+    if ( ! (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << inv))  )
       queue [push_at] = (struct index) {xnbr, ynbr}, push_at = (push_at + 1) % hw;
-    else 
+    else
       collect_sink (xnbr, ynbr);
 
     #undef collect_sink
   }
+int once = 1;
+for (int y=0;y<h && once;++y)
+for (int x=0;x<w;++x)
+if(!visited[y][x])
+{
+printf ("\n\n");
+for (int dy=-1; dy<2;++dy)
+for (int dx=-1;dx<2;++dx)
+{
+printf ("\n(%d, %d)", dx, dy);
+uint8_t to = dir [y+dy][x+dx], from = network->invDir[y+dy][x+dx];
+printf ("\n\tto : ");
+while (to)
+{
+  int nbr = pop_bit (&to);
+  printf ("(%d,%d)", dx + flow_neighbor [nbr].x, dy + flow_neighbor [nbr].y); 
+}
+printf ("\n\tfrom : ");
+while (from)
+{
+  int nbr = pop_bit (&from);
+  printf ("(%d,%d)", dx + flow_neighbor [nbr].x, dy + flow_neighbor [nbr].y); 
+}
+}
+//once--;break;
+}
+for (int y=0;y<h;++y)
+for (int x=0;x<w;++x)
+{
+in [y][x] = network->invDir [y][x] * (visited == 0);
+out [y][x] = dir [y][x] * (visited == 0);
+}
 
-  assert ("Kahn's topological consistency" && processed == hw );
+flow_network_grayscale ((FlowNetwork) {.dir = visited, .w = w, .h = h}, "visited.pgm", w, h);
+flow_network_grayscale ((FlowNetwork) {.dir = in, .w = w, .h = h}, "in.pgm", w, h);
+flow_network_grayscale ((FlowNetwork) {.dir = out, .w = w, .h = h}, "out.pgm", w, h);
+printf ("[%d %d]", processed, hw); fflush(stdout);
+  //assert ("Kahn's topological consistency" && processed == hw );
 
   free (queue);
   grid_free (in_degree);
@@ -267,18 +303,14 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 */
 int flow_remove_pits (DEM * dem)
 {
-  if (dem->raster == NULL)
-    return ERR_DATA_MISSING;
-
   int w = dem->w, h = dem->h;
   assert (w > 0 && h > 0);
-
   double ** elevation = dem->raster;
+  if (elevation == NULL)
+    return ERR_DATA_MISSING;
   uint8_t ** visited = grid (uint8_t, w, h);
-
   if (visited == NULL)
     return ERR_MALLOC;
-  
   MinPQ pq;
   if (pq_create (&pq))
     return ERR_MALLOC;
@@ -332,38 +364,180 @@ int flow_remove_pits (DEM * dem)
   return 0;
 }
 
-#if 0
-static
-FLOW_NODE ** classify_nodes (double ** elevation, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+/* creates a drain network in flattened reservoirs and filled pits */
+int fix_flattened_patches (uint8_t ** dir, uint8_t ** invDir, uint8_t ** type)
 {
-  FLOW_NODE ** type = grid (int, w, h);
-  if (visited == NULL || type == NULL)
-    return NULL;
+
+  GridData gd = grid_data (dir);
+  int w = gd.width, h = gd.height, hw = w * h;
+  uint8_t ** bit_stack = grid (uint8_t, w, h);
+  uint8_t ** visited = grid (uint8_t, w, h);
+  if (bit_stack == NULL || visited == NULL)
+    return ERR_MALLOC;
   for (int y=0; y<h; ++y)
     for (int x=0; x<w; ++x)
-    {
-      if (elevation [y][x] <= 0.)
+      /* if there are multiple drains to a flattened patch, we will drain all
+      .. those flattened pixels into (x,y). Actually there should be some
+      .. tie-breaking algorithm */
+      if ( (type [y][x] & FN_RESERVOIR) && dir [y][x] && !visited [y][x])
       {
-        type = FN_OCEAN;
-        continue; 
-      }
-
-      if (y == 0|| x == 0 || y == h-1 || x == w-1)
-        type = FN_BOUNDARY;
-
-      if (!dir [y][x] && !invDir [y][x])
-      {
-        type |= FN_RESERVOIR;
-        /* see if this pit is an isolated pit or a hydro-flattened reservoir */
+        /* now connect all the neighboring reservoir points. using tree traversal */
         int depth = 0;
         do
         {
+
+          do {
+            /*
+            .. all the neighbors at same elevation which doesn't have a drain 'dir'
+            .. now will drain to (x,y);
+            */
+            if (!visited [y][x])
+            {
+              visited [y][x] = 1u;
+              assert (!bit_stack[y][x]);
+              uint8_t code = dir [y][x];
+              int nbr = pop_bit (&code);
+              for (int c=0; c<8; ++c)
+              {
+                int xnbr = x+flow_neighbor[c].x;
+                int ynbr = y+flow_neighbor[c].y;
+                if ( c != nbr                         &&
+                   (type [ynbr][xnbr] & FN_RESERVOIR) &&
+                   !visited [ynbr][xnbr]              &&
+                   !dir [ynbr][xnbr]                  &&
+                   !(ynbr < 0 || xnbr < 0 || xnbr >= w || ynbr >= h) )
+                {
+                  bit_stack [y][x] |= (uint8_t) 1 << c;
+                  dir [ynbr][xnbr] = (uint8_t) 1 << ((c+4)%8);
+                }
+              }
+              invDir [y][x] |= bit_stack [y][x];
+            }
+
+            if (!bit_stack [y][x])
+              break;
+
+            depth++;
+            /* remove the popped bit so that you don't traverse it again */
+            int nbr = pop_bit ( &bit_stack [y][x] );
+            x += flow_neighbor [nbr].x;
+            y += flow_neighbor [nbr].y;
+            assert (depth < hw);
+
+          } while (1);
+
+          if (!depth--)
+            break;
+
+          /* don't edit dir[y][x]. Instead use a copy of it in pop_bit () */
+          uint8_t code = dir [y][x]; assert (code);
+          int nbr = pop_bit ( &code );
+          x += flow_neighbor [nbr].x;
+          y += flow_neighbor [nbr].y;
         } while (1);
-        /* designate neighbors if they are feeders or breaches */
       }
-    }
+for (int y=-1; y<=h; ++y) for(int x=-1; x<=w; ++x) if (dir [y][x]) {
+assert (! (y<0 || x<0 ||x>=w || y>=h));
+uint8_t code = dir [y][x]; int nbr = pop_bit (&code), inv = (nbr+4)%8, xnbr = x + flow_neighbor [nbr].x, ynbr = y + flow_neighbor [nbr].y;
+assert (!(dir [ynbr][xnbr] & (1<<inv)));
+assert (invDir [ynbr][xnbr] & (1 << inv));
+}
+for (int y=0; y<h; ++y) for(int x=0; x<w; ++x) if (invDir [y][x]) {
+uint8_t code = invDir [y][x];
+while (code)
+{
+int nbr = pop_bit (&code), inv = (nbr+4)%8, xnbr = x + flow_neighbor [nbr].x, ynbr = y + flow_neighbor [nbr].y;
+assert (dir [ynbr][xnbr] == 1<<inv);
+}
+}
+for (int y=-1; y<=h; ++y) for(int x=-1; x<=w; ++x) if (dir [y][x]) {
+int depth = 0;
+int xb = x, yb = y;
+while ( !(y<0 || x < 0 || x>= w || y>=h) && dir [y][x])
+{
+ uint8_t code = dir [y][x]; int nbr = pop_bit ( &code );
+ x += flow_neighbor [nbr].x, y += flow_neighbor [nbr].y;
+ assert (x != xb && y != yb);
+  assert(depth++ < hw);
+}
+x =xb, y = yb;
+}
+
+  grid_free (bit_stack);
+  grid_free (visited);
   return 0;
 }
+
+static
+uint8_t ** classify_nodes (double ** elevation, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+{
+  uint8_t ** type = grid (uint8_t, w, h);
+  uint8_t ** invDirCopy = grid (uint8_t, w, h);
+  grid_copy (uint8_t, invDir, invDirCopy, w, h);
+  if (type == NULL || invDirCopy == NULL)
+    return NULL;
+  int hw = w * h;
+  /* fixme : change this to -1:y, -1:w */
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      if (y == 0|| x == 0 || y == h-1 || x == w-1)
+        type [y][x] |= FN_BOUNDARY;
+
+      if (elevation [y][x] <= 0.)
+      {
+        type [y][x] |= FN_OCEAN;
+        continue; 
+      }
+
+      /* no source & no sink : most likely flattened reservoirs.
+      .. This happens usually when the neighbors are also flattened
+      .. to the same elevation by removing noises to be specifically identified
+      .. as reservoirs. */
+      if (!dir [y][x] && !invDir [y][x])
+      {
+        for (int dx =-1; dx <=1; ++dx)
+          for (int dy =-1; dy <=1; ++dy)
+          {
+            type [y+dy][x+dx] |= FN_RESERVOIR;
+            if (invDir [y+dy][x+dx])
+            {
+    /* tree traversal to identify the catchement area */
+    int depth = 0;
+    int xbackup = x, ybackup = y;
+    x += dx, y += dy;
+    do
+    {
+      while ( invDirCopy [y][x] )
+      {
+        depth++;
+        /* remove the popped bit so that you don't traverse it again */
+        int nbr = pop_bit ( &invDirCopy [y][x] );
+        x += flow_neighbor [nbr].x;
+        y += flow_neighbor [nbr].y;
+        assert (depth < hw);
+      }
+
+      type [y][x] |= FN_RESERVOIR_CATCHMENT;
+
+      if (!depth--)
+        break; 
+
+      /* don't edit dir[y][x]. Instead use a copy of it in pop_bit () */
+      uint8_t code = dir [y][x]; assert (code);
+      int nbr = pop_bit ( &code );
+      x += flow_neighbor [nbr].x;
+      y += flow_neighbor [nbr].y;
+    } while (1);
+    /* end of tree traversal. iterators x and y are updated with the back up*/
+    x = xbackup, y= ybackup;
+            }
+          }
+      }
+    }
+  return type;
+}
+
 
 int flow_routine (DEM dem)
 {
@@ -374,28 +548,69 @@ int flow_routine (DEM dem)
   double ** elevation = grid (double, w, h); /* for a copy of raster */
   if (elevation == NULL)
     return ERR_MALLOC;
-  for (int y=-2; y<h+2; ++y)
-    memcpy (&elevation [y][-2], &raster [y][-2], (w+4)*sizeof (double));
-  int ** classification = grid (int, w, h);
+  grid_copy (double, raster, elevation, w, h);
   uint8_t ** dir = grid (uint8_t, w, h);
   uint8_t ** invDir = grid (uint8_t, w, h);
-  uint8_t ** acc = grid (uint8_t, w, h);
+  uint8_t ** color = grid (uint8_t, w, h);
 
-  if (classification == NULL || dir == NULL || invDir == NULL || acc == NULL)
+  if (dir == NULL || invDir == NULL || color == NULL)
     return ERR_MALLOC;
 
-  d8 (elevation, w, h, dir, invDir);
+  D8 (elevation, w, h, dir, invDir);
 
-  MinPQ sinks;
+  uint8_t ** type = classify_nodes (elevation, w, h, dir, invDir);
+  if (type == NULL)
+    return ERR_MALLOC;
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+      color [y][x] =
+        (type [y][x] & FN_OCEAN) ? 255u :
+        (type [y][x] & FN_RESERVOIR) ? 220u :
+        (type [y][x] & FN_RESERVOIR_CATCHMENT) ? 128u:
+        (type [y][x] & FN_BOUNDARY) ? 32u : 0u;
+
+  if (fix_flattened_patches (dir, invDir, type))
+    return ERR_MALLOC;
+
+  FlowNetwork network = {.w = w, .h = h, .dir = dir, .invDir = invDir};
+  int err = flow_accumulation (&network, dem, NULL);
+  if (err)
+    return err;
+  //uint8_t ** acc = network.accumulation;
+
+//test
+flow_network_grayscale ((FlowNetwork) {.dir = dir, .w = w, .h = h}, "pits.pgm", w, h);
+flow_network_grayscale ((FlowNetwork) {.dir = invDir, .w = w, .h = h}, "invDir.pgm", w, h);
+flow_network_grayscale ((FlowNetwork) {.dir = color, .w = w, .h = h}, "reservoir-ocean.pgm", w, h);
+flow_accumulation_grayscale (network, "accumulation.pgm", w, h);
+
+  //MinPQ sinks;
+
+  return 0;
 }
-#endif
 
 void flow_network_error ( int type )
 {
+  if (type == SUCCESS)
+    return;
+
+  fprintf (stderr, "flow.h : ");
   switch (type)
   {
+    case ERR_FILE_ACCESS : 
+      fprintf (stderr, "file access error\n");
+      break;
+    case ERR_NOT_IMPLEMENTED :
+      fprintf (stderr, "implementation error\n");
+      break;
+    case ERR_MALLOC :
+      fprintf (stderr, "malloc/realloc failed\n");
+      break;
+    case ERR_DATA_MISSING :
+      fprintf (stderr, "required data missing\n");
+      break;
     default :
-      fprintf (stderr, "unknonw flow network error\n");
+      fprintf (stderr, "unknown flow network error\n");
   }
 }
 

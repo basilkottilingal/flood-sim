@@ -13,18 +13,18 @@
   static const struct { int x, y; }
     flow_neighbor [] = 
       { 
-        {1, 0},  {1, 1},   {0, 1},  {-1, 1},
+        {1, 0}, {1, 1}, {0, 1}, {-1, 1},
         {-1, 0}, {-1, -1}, {0, -1}, {1, -1}
       };
 
   typedef enum
   {
     FN_GENERAL = 0,
-    FN_BOUNDARY = 8,
-    FN_RESERVOIR = 1,
-    FN_OCEAN,
-    FN_FEEDER,
-    FN_BREACH,
+    FN_BOUNDARY = 32,
+    FN_OCEAN = 128,
+    FN_RESERVOIR = 64,
+    FN_RESERVOIR_CATCHMENT = 1,
+    FN_RESERVOIR_BREACH = 2,
   } FLOW_NODE;
 
   typedef enum
@@ -51,5 +51,6 @@
   int  flow_accumulation      ( FlowNetwork *, DEM, MinPQ * pq );
   int  flow_remove_pits       ( DEM * );
   void flow_network_error     ( int type );
+  int  flow_routine           ( DEM );
   
 #endif
