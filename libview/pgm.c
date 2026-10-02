@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 #include <float.h>
+#include <stdint.h>
 
 #define not_unused(v) (void)v
 
@@ -65,6 +66,25 @@ int pgm_grayscale (double ** raster, const char * out, int width, int height)
       unsigned char pixel = (unsigned char)(v * 255.0);
       fwrite (&pixel, 1, 1, fp);
     }
+
+  fclose (fp);
+  return 0;  
+}
+
+static int pgm_u8_grayscale (uint8_t ** pixel, const char * out, int width, int height)
+{
+  if (pixel == NULL || width < 1 || height < 1 || out == NULL || out [0] == '\0')
+    return -1;
+
+  FILE *fp = fopen (out, "wb");
+  if (fp == NULL)
+    return -1;
+
+  /* PGM header */
+  fprintf(fp, "P5\n%d %d\n255\n", width, height);
+
+  for (int y = 0; y < height; y++)
+    fwrite (pixel [y], 1, width, fp);
 
   fclose (fp);
   return 0;  
@@ -299,4 +319,19 @@ int pgm_hillshade (
   int err = pgm_grayscale (hillshade, out, width, height);
   grid_free (hillshade);
   return err;
+}
+
+int pgm_general (void ** g, const char * out, GridData gd)
+{
+  int w = gd.width  > 1024 ? 1024 : gd.width;
+  int h = gd.height > 1024 ? 1024 : gd.height;
+  switch (gd.size)
+  {
+    case sizeof (double) :
+      return pgm_grayscale ((double **) g, out, w, h);
+    case sizeof (uint8_t) :
+      return pgm_u8_grayscale ((uint8_t **) g, out, w, h);
+    default :
+  }
+  return -1;
 }
