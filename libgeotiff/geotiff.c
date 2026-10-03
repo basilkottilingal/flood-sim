@@ -524,13 +524,6 @@ int geotiff_dem_window ( double lon, double lat, double dlon, double dlat, DEM *
   return 0;
 }
 
-int geotiff_dem_pgm ( DEM dem, const char * out, int w, int h )
-{
-  w = w > dem.w ? dem.w > 1024 ? 1024 : dem.w : w;
-  h = h > dem.h ? dem.h > 1024 ? 1024 : dem.h : h;
-  return pgm_grayscale (dem.raster, out, w, h);
-}
-
 void  geotiff_dem_free ( DEM dem )
 {
   if (dem.raster)

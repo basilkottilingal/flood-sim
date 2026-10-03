@@ -47,8 +47,6 @@
   int  pop_bit (uint8_t * v);
   int  flow_network           ( DEM dem, FLOW_DRAIN type, FlowNetwork * network );
   void flow_network_free      ( FlowNetwork );
-  int  flow_network_grayscale ( FlowNetwork, const char * out, int w, int h );
-  int  flow_accumulation_grayscale ( FlowNetwork, const char * out, int w, int h );
   int  flow_accumulation      ( FlowNetwork *, DEM, MinPQ * pq );
   int  flow_remove_pits       ( DEM * );
   void flow_network_error     ( int type );

@@ -132,42 +132,13 @@ int flow_network (DEM dem, FLOW_DRAIN type, FlowNetwork * network)
 
 void flow_network_free (FlowNetwork network)
 {
-  assert (network.dir != NULL);
+  assert (network.dir != NULL && network.invDir != NULL);
   grid_free (network.dir);
+  grid_free (network.invDir);
   if (network.accumulation == NULL)
     return;
   grid_free (network.accumulation);
 }
-
-int flow_network_grayscale (FlowNetwork network, const char * out, int width, int height)
-{
-  if (network.dir == NULL || out == NULL || out [0] == '\0' || width < 0 || height < 0)
-    return -1;
-
-  width  = width  > network.w ? network.w > 1024 ? 1024 : network.w : width;
-  height = height > network.h ? network.h > 1024 ? 1024 : network.h : height;
-
-  FILE *fp = fopen (out, "wb");
-  if (fp == NULL)
-    return -1;
-
-  /* PGM header */
-  fprintf (fp, "P5\n%d %d\n255\n", width, height);
-  for (int y = 0; y < height; y++)
-    fwrite (network.dir [y], 1, width, fp);
-  fclose(fp);
-
-  return 0;  
-}
-
-int flow_accumulation_grayscale (FlowNetwork network, const char * out, int width, int height)
-{
-  width  = width  > network.w ? network.w > 1024 ? 1024 : network.w : width;
-  height = height > network.h ? network.h > 1024 ? 1024 : network.h : height;
-
-  return pgm_grayscale (network.accumulation, out, width, height);
-}
-
 
 int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 {
@@ -453,7 +424,9 @@ static int fix_flattened_patches (uint8_t ** dir, uint8_t ** invDir, uint8_t ** 
           y += flow_neighbor [nbr].y;
         } while (1);
       }
-DAG_validity (dir, invDir);
+  #ifdef _FLOW_DEBUG_
+  DAG_validity (dir, invDir);
+  #endif
   grid_free (bit_stack);
   grid_free (visited);
   return 0;
@@ -550,7 +523,6 @@ int flow_routine (DEM dem)
     return ERR_MALLOC;
 
   D8 (elevation, w, h, dir, invDir);
-DAG_validity (dir, invDir);
 
   uint8_t ** type = classify_nodes (elevation, w, h, dir, invDir);
   if (type == NULL)
@@ -573,10 +545,10 @@ DAG_validity (dir, invDir);
   //uint8_t ** acc = network.accumulation;
 
 //test
-flow_network_grayscale ((FlowNetwork) {.dir = dir, .w = w, .h = h}, "pits.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = invDir, .w = w, .h = h}, "invDir.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = color, .w = w, .h = h}, "reservoir-ocean.pgm", w, h);
-flow_accumulation_grayscale (network, "accumulation.pgm", w, h);
+pgm (dir, "d8.pgm");
+pgm (invDir, "invDir.pgm");
+pgm (color, "reservoir-ocean.pgm");
+pgm (network.accumulation, "accumulation.pgm");
 
   //MinPQ sinks;
 

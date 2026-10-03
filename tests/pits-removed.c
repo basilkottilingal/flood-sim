@@ -60,9 +60,7 @@ int main (int argc, char **argv)
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
 
-  int imgw = dem.w > 1024 ? 1024 : dem.w;
-  int imgh = dem.h > 1024 ? 1024 : dem.h;
-  pgm_grayscale (dem.raster, "dem.pgm", imgw, imgh);
+  pgm (dem.raster, "dem.pgm");
 
   FlowNetwork network;
   if (flow_network (dem, FLOW_D8, &network))
@@ -70,8 +68,8 @@ int main (int argc, char **argv)
   if (flow_accumulation (&network, dem, NULL))
     filemap_close_all ("d8 flow accumulation failed");
 
-  flow_network_grayscale (network, "d8-pits-removed.pgm", 1024, 1024);
-  flow_accumulation_grayscale (network, "d8-pits-removed-acc.pgm", 1024, 1024);
+  pgm (network.dir, "d8-pits-removed.pgm");
+  pgm (network.accumulation, "d8-pits-removed-acc.pgm");
 
   flow_network_free (network);
   geotiff_dem_free (dem);

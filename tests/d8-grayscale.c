@@ -75,8 +75,8 @@ int main (int argc, char **argv)
     filemap_close_all ("failed");
   }
 
-  flow_network_grayscale (network, "d8.pgm", w, h);
-  flow_accumulation_grayscale (network, "d8-acc.pgm", w, h);
+  pgm (network.dir, "d8.pgm")
+  pgm (network.accumulation, "d8-acc.pgm");
 
   flow_network_free (network);
   geotiff_dem_free (dem);

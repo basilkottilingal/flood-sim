@@ -23,6 +23,5 @@
   int   geotiff_elevation   ( CoordL * point_array, float * elevation, int npoints, CoordG c0 );
   int   geotiff_dem_window  ( double lon, double lat, double dlon, double dlat, DEM * dem );
   void  geotiff_dem_free    ( DEM dem );
-  int   geotiff_dem_pgm     ( DEM dem, const char * out, int w, int h );
 
 #endif 

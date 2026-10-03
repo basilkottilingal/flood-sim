@@ -321,7 +321,7 @@ int pgm_hillshade (
   return err;
 }
 
-int pgm_general (void ** g, const char * out, GridData gd)
+int pgm_general (void * g, const char * out, GridData gd)
 {
   int w = gd.width  > 1024 ? 1024 : gd.width;
   int h = gd.height > 1024 ? 1024 : gd.height;

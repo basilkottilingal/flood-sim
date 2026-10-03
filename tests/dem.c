@@ -59,7 +59,7 @@ int main (int argc, char **argv)
 
   int imgw = dem.w > 1024 ? 1024 : dem.w;
   int imgh = dem.h > 1024 ? 1024 : dem.h;
-  pgm_grayscale (dem.raster, "dem.pgm", imgw, imgh);
+  pgm (dem.raster, "dem.pgm");
   pgm_contour_grayscale (dem.raster, "dem-contour.pgm", imgw, imgh, 10);
   pgm_hillshade (dem.raster, "hillshade.pgm", imgw, imgh, 315, 45, 30, 1.);
 
