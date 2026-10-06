@@ -24,6 +24,59 @@ typedef enum
   ERR_DATA_MISSING,
 } ERR;
 
+void flow_network_error (int type)
+{
+  if (type == SUCCESS)
+    return;
+
+  fprintf (stderr, "flow.h : ");
+  switch (type)
+  {
+    case ERR_FILE_ACCESS : 
+      fprintf (stderr, "file access error\n");
+      break;
+    case ERR_NOT_IMPLEMENTED :
+      fprintf (stderr, "implementation error\n");
+      break;
+    case ERR_MALLOC :
+      fprintf (stderr, "malloc/realloc failed\n");
+      break;
+    case ERR_DATA_MISSING :
+      fprintf (stderr, "required data missing\n");
+      break;
+    default :
+      fprintf (stderr, "unknown flow network error\n");
+  }
+}
+
+
+#define tree_start_cell(invDirCopy)               \
+do                                                \
+{                                                 \
+  assert (!dir[y][x]);                            \
+  int xb = x, yb = y;                             \
+  int depth = 0;                                  \
+  do {                                            \
+    while (invDirCopy[y][x])                      \
+    {                                             \
+      int nbr = pop_bit (&invDirCopy [y][x]);     \
+      x += flow_neighbor [nbr].x;                 \
+      y += flow_neighbor [nbr].y;                 \
+      assert (depth ++ < hw);                     \
+    }
+#define tree_end_cell()                           \
+    if (!depth--)                                 \
+      break;                                      \
+    uint8_t code = dir [y][x];                    \
+    int nbr = pop_bit (&code);                    \
+    x += flow_neighbor [nbr].x;                   \
+    y += flow_neighbor [nbr].y;                   \
+  } while (1);                                    \
+  assert (x == xb);                               \
+  assert (y == yb);                               \
+}                                                 \
+while (0)
+
 # if defined(__GNUC__) || defined(__clang__)
 #   if defined(__has_builtin)
 #     if __has_builtin(__builtin_ctz)
@@ -293,7 +346,7 @@ int flow_remove_pits (DEM * dem)
   return 0;
 }
 
-static void DAG_validity (uint8_t ** dir, uint8_t ** invDir)
+void DAG_validity (uint8_t ** dir, uint8_t ** invDir)
 {
   GridData gd = grid_data (dir);
   int w = gd.width, h = gd.height, hw = w * h;
@@ -504,6 +557,74 @@ uint8_t ** classify_nodes (double ** elevation, int w, int h, uint8_t ** dir, ui
   return type;
 }
 
+static int pits (MinPQ * pq, double ** raster, uint8_t ** dir)
+{
+  GridData gd = grid_data (dir);
+  int w = gd.width, h = gd.height;// hw = w * h;
+  uint8_t ** visited = grid (uint8_t, w, h);
+  if (visited == NULL || pq_create (pq))
+    return ERR_MALLOC;
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      if (visited [y][x])
+        continue;
+
+      int ybackup = y;
+      int xbackup = x;
+      do
+      {
+        visited [y][x] = 1u;
+        if (!dir [y][x])
+        {
+          /* warning : the (x,y) may fall outside [0:w-1]x[0:h-1] */
+          if (pq_push (pq, raster [y][x], x, y))
+            return ERR_MALLOC;
+          break;
+        }
+        uint8_t code = dir [y][x];
+        int nbr = pop_bit (&code);
+        x += flow_neighbor [nbr].x;
+        y += flow_neighbor [nbr].y;
+      } while (!visited [y][x]);
+      y = ybackup;
+      x = xbackup;
+
+    }
+  grid_free (visited);
+  return 0;
+}
+
+static int pit_color (MinPQ pq, uint8_t ** dir, uint8_t ** invDirConst)
+{
+  GridData gd = grid_data (dir);
+  int w = gd.width, h = gd.height, hw = w * h;
+  uint8_t ** color = grid (uint8_t, w, h);
+  if (color == NULL)
+    return ERR_MALLOC;
+  uint8_t ** invDir = grid (uint8_t, w, h);
+  if (!invDir)
+    return ERR_MALLOC;
+  grid_copy (uint8_t, invDirConst, invDir, w, h);
+  int nnodes = pq.size;
+  PQNode * node = pq.data;
+  uint8_t tag = 0;
+  while (nnodes--)
+  {
+    double elev = node->key; (void) elev;
+    int x = node->x;
+    int y = node->y;
+    tag = ((int) tag + 1) % 255;
+    tree_start_cell (invDir);
+      color [y][x] = tag;
+    tree_end_cell ();
+    node++;
+  }
+  pgm (color, "pit-tag.pgm");
+  grid_free (invDir);
+  grid_free (color);
+  return 0;
+}
 
 int flow_routine (DEM dem)
 {
@@ -544,6 +665,10 @@ int flow_routine (DEM dem)
     return err;
   //uint8_t ** acc = network.accumulation;
 
+  MinPQ pq;
+  pits (&pq, elevation, dir);
+  pit_color (pq, dir, invDir);
+
 //test
 pgm (dir, "d8.pgm");
 pgm (invDir, "invDir.pgm");
@@ -553,31 +678,6 @@ pgm (network.accumulation, "accumulation.pgm");
   //MinPQ sinks;
 
   return 0;
-}
-
-void flow_network_error ( int type )
-{
-  if (type == SUCCESS)
-    return;
-
-  fprintf (stderr, "flow.h : ");
-  switch (type)
-  {
-    case ERR_FILE_ACCESS : 
-      fprintf (stderr, "file access error\n");
-      break;
-    case ERR_NOT_IMPLEMENTED :
-      fprintf (stderr, "implementation error\n");
-      break;
-    case ERR_MALLOC :
-      fprintf (stderr, "malloc/realloc failed\n");
-      break;
-    case ERR_DATA_MISSING :
-      fprintf (stderr, "required data missing\n");
-      break;
-    default :
-      fprintf (stderr, "unknown flow network error\n");
-  }
 }
 
 #undef error

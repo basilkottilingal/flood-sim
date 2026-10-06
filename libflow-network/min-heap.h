@@ -17,8 +17,9 @@
   } MinPQ;
 
   /* APIs */
-  int  pq_create (MinPQ *pq);
-  void pq_free   (MinPQ *pq);
-  int  pq_push   (MinPQ *pq, double key, int x, int y);
-  int  pq_pop    (MinPQ *pq, double * key, int * x, int * y);
+  int  pq_create (MinPQ * pq);
+  void pq_free   (MinPQ * pq);
+  void pq_truncate (MinPQ * pq);
+  int  pq_push   (MinPQ * pq, double key, int x, int y);
+  int  pq_pop    (MinPQ * pq, double * key, int * x, int * y);
 #endif

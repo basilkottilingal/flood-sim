@@ -17,6 +17,17 @@ int pq_create (MinPQ * pq)
   return 0;
 }
 
+void pq_truncate (MinPQ * pq)
+{
+  int n = pq->size ? pq->size : 1;
+  PQNode * data = realloc (pq->data, n * sizeof (PQNode));
+  if (data != NULL)
+  {
+    pq->data = data;
+    pq->capacity = n;
+  }
+}
+
 static inline void swap (PQNode *a, PQNode *b)
 {
   PQNode tmp = *a;
