@@ -13,7 +13,9 @@
 #include <assert.h>
 #include <math.h>
 
-#define error(e) filemap_close_all(e)
+#define error(e)        filemap_close_all(e)
+#define ISFLAT(x,y)     (!dir [y][x] && !invDir [y][x])
+#define ISOUTSIDE(x,y)  (x<0 || y<0 || x>=w || y>=h)
 
 typedef enum
 {
@@ -404,6 +406,8 @@ void DAG_validity (uint8_t ** dir, uint8_t ** invDir)
   printf ("DAG looks fine"); fflush (stdout);
 }
 
+
+#if 0
 /* creates a drain network in flattened reservoirs and filled pits */
 static int fix_flattened_patches (uint8_t ** dir, uint8_t ** invDir, uint8_t ** type)
 {
@@ -557,13 +561,20 @@ uint8_t ** classify_nodes (double ** elevation, int w, int h, uint8_t ** dir, ui
   return type;
 }
 
-static int pits (MinPQ * pq, double ** raster, uint8_t ** dir)
+#endif
+
+static int pits (MinPQ * pq, double ** raster, uint8_t ** dir, uint8_t ** invDir)
 {
+
+  assert ( ! (pq == NULL || raster == NULL || dir == NULL || invDir == NULL) );
+
   GridData gd = grid_data (dir);
-  int w = gd.width, h = gd.height;// hw = w * h;
+  int w = gd.width, h = gd.height, hw = w * h;
   uint8_t ** visited = grid (uint8_t, w, h);
-  if (visited == NULL || pq_create (pq))
+  uint8_t ** bit_stack = grid (uint8_t, w, h);
+  if (visited == NULL || bit_stack == NULL || pq_create (pq))
     return ERR_MALLOC;
+
   for (int y=0; y<h; ++y)
     for (int x=0; x<w; ++x)
     {
@@ -577,6 +588,61 @@ static int pits (MinPQ * pq, double ** raster, uint8_t ** dir)
         visited [y][x] = 1u;
         if (!dir [y][x])
         {
+
+          if (!invDir [y][x])
+          {
+  /* grouping connected flat points as a single pit */
+  int depth = 0;
+  visited [y][x] = 0;
+  do
+  {
+    do
+    {
+      /*
+      .. all the neighbors at same elevation which doesn't have a drain 'dir'
+      .. now will drain to (x,y);
+      */
+      if (!visited [y][x])
+      {
+        visited [y][x] = 1u;
+        assert (!bit_stack[y][x]);
+        uint8_t code = dir [y][x];
+        int nbr = pop_bit (&code);
+        for (int c=0; c<8; ++c)
+        {
+          int xnbr = x + flow_neighbor[c].x;
+          int ynbr = y + flow_neighbor[c].y;
+          if ( c != nbr && ISFLAT (xnbr,ynbr) && !visited [ynbr][xnbr] && !ISOUTSIDE (xnbr, ynbr))
+          {
+            bit_stack [y][x] |= (uint8_t) 1 << c;
+            dir [ynbr][xnbr]  = (uint8_t) 1 << ((c+4)%8);
+          }
+        }
+        invDir [y][x] |= bit_stack [y][x];
+      }
+
+      if (!bit_stack [y][x])
+        break;
+
+      /* remove the popped bit so that you don't traverse it again */
+      int nbr = pop_bit ( &bit_stack [y][x] );
+      x += flow_neighbor [nbr].x;
+      y += flow_neighbor [nbr].y;
+      assert (depth++ < hw);
+
+    } while (1);
+
+    if (!depth--)
+      break;
+
+    uint8_t code = dir [y][x]; assert (code);
+    int nbr = pop_bit ( &code );
+    x += flow_neighbor [nbr].x;
+    y += flow_neighbor [nbr].y;
+  } while (1);
+  /* end of grouping connected flat points */
+          }
+
           /* warning : the (x,y) may fall outside [0:w-1]x[0:h-1] */
           if (pq_push (pq, raster [y][x], x, y))
             return ERR_MALLOC;
@@ -590,8 +656,13 @@ static int pits (MinPQ * pq, double ** raster, uint8_t ** dir)
       y = ybackup;
       x = xbackup;
 
-    }
+    }  /* end of x, y loops */
+
   grid_free (visited);
+  grid_free (bit_stack);
+  DAG_validity (dir, invDir);
+  pq_truncate (pq); 
+
   return 0;
 }
 
@@ -638,13 +709,13 @@ int flow_routine (DEM dem)
   grid_copy (double, raster, elevation, w, h);
   uint8_t ** dir = grid (uint8_t, w, h);
   uint8_t ** invDir = grid (uint8_t, w, h);
-  uint8_t ** color = grid (uint8_t, w, h);
 
-  if (dir == NULL || invDir == NULL || color == NULL)
+  if (dir == NULL || invDir == NULL)
     return ERR_MALLOC;
 
   D8 (elevation, w, h, dir, invDir);
 
+  #if 0
   uint8_t ** type = classify_nodes (elevation, w, h, dir, invDir);
   if (type == NULL)
     return ERR_MALLOC;
@@ -658,6 +729,7 @@ int flow_routine (DEM dem)
 
   if (fix_flattened_patches (dir, invDir, type))
     return ERR_MALLOC;
+  #endif
 
   FlowNetwork network = {.w = w, .h = h, .dir = dir, .invDir = invDir};
   int err = flow_accumulation (&network, dem, NULL);
@@ -666,18 +738,23 @@ int flow_routine (DEM dem)
   //uint8_t ** acc = network.accumulation;
 
   MinPQ pq;
-  pits (&pq, elevation, dir);
+  pits (&pq, elevation, dir, invDir);
   pit_color (pq, dir, invDir);
 
-//test
-pgm (dir, "d8.pgm");
-pgm (invDir, "invDir.pgm");
-pgm (color, "reservoir-ocean.pgm");
-pgm (network.accumulation, "accumulation.pgm");
+  //test
+  pgm (dir, "d8.pgm");
+  pgm (invDir, "invDir.pgm");
+  pgm (network.accumulation, "accumulation.pgm");
 
-  //MinPQ sinks;
+  /* freeing all memory associated */
+  grid_free (elevation);
+  grid_free (dir);
+  grid_free (invDir);
+  pq_free (&pq);
 
   return 0;
 }
 
 #undef error
+#undef ISFLAT
+#undef ISOUTSIDE
