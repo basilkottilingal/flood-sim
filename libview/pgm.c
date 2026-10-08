@@ -8,6 +8,7 @@
 #include <string.h>
 #include <float.h>
 #include <stdint.h>
+#include <limits.h>
 
 #define not_unused(v) (void)v
 
@@ -87,6 +88,29 @@ static int pgm_u8_grayscale (uint8_t ** pixel, const char * out, int width, int 
     fwrite (pixel [y], 1, width, fp);
 
   fclose (fp);
+  return 0;  
+}
+
+static int pgm_int_grayscale (int ** pixel, const char * out, int width, int height)
+{
+  if (pixel == NULL || width < 1 || height < 1)
+    return -1;
+  uint8_t ** color = grid (uint8_t, width, height);
+  int max = INT_MIN, min = INT_MAX;
+  for (int y=0; y<height; ++y)
+    for (int x=0; x<width; ++x)
+    {
+      if (pixel [y][x] > max) max = pixel [y][x];
+      if (pixel [y][x] < min) min = pixel [y][x];
+    }
+  int den = min == max ? 1 : max - min;
+  for (int y=0; y<height; ++y)
+    for (int x=0; x<width; ++x)
+    {
+      color [y][x] = (uint8_t) ( (pixel [y][x] - min) * 255 / den );
+    }
+  pgm_u8_grayscale (color, out, width, height);
+  grid_free (color);
   return 0;  
 }
 
@@ -331,6 +355,8 @@ int pgm_general (void * g, const char * out, GridData gd)
       return pgm_grayscale ((double **) g, out, w, h);
     case sizeof (uint8_t) :
       return pgm_u8_grayscale ((uint8_t **) g, out, w, h);
+    case sizeof (int) :
+      return pgm_int_grayscale ((int **) g, out, w, h);
     default :
   }
   return -1;
