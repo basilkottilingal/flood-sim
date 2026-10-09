@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <math.h>
 
 /*
 .. One of the limitation of this script is the reliance on POSIX
@@ -52,26 +53,25 @@ int main (int argc, char **argv)
   DEM dem;
   if (geotiff_dem_window (c.lon, c.lat, 0.297, 0.297, &dem))
     filemap_close_all ("dem window failed");
-  if (flow_remove_pits (&dem))
-    filemap_close_all ("remove pits");
+  #if 0
+  flow_remove_pits (&dem);
+  #endif
 
   printf ("coord %g %g\n", c.lat, c.lon);
   printf ("DEM  tiepoint pixel (%g %g), coord (%g %g)\n",
    dem.tiepoint [0], dem.tiepoint [1], 
    dem.tiepoint [4], dem.tiepoint [3]);
 
+  int w = dem.w > 1024 ? 1024 : dem.w;
+  int h = dem.h > 1024 ? 1024 : dem.h;
+
   pgm (dem.raster, "dem.pgm");
+  pgm_hillshade (dem.raster, "hillshade.pgm", w, h, 315., 45., 30., 2.);
 
-  FlowNetwork network;
-  if (flow_network (dem, FLOW_D8, &network))
-    filemap_close_all ("d8 flow network failed");
-  if (flow_accumulation (&network, dem, NULL))
-    filemap_close_all ("d8 flow accumulation failed");
+  FlowNetwork fn;
+  flow_network (dem, FLOW_D8, &fn); 
+  flow_network_free (&fn);
 
-  pgm (network.dir, "d8-pits-removed.pgm");
-  pgm (network.accumulation, "d8-pits-removed-acc.pgm");
-
-  flow_network_free (network);
   geotiff_dem_free (dem);
   geotiff_map_destroy ();
 
