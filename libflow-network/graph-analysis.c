@@ -19,6 +19,7 @@
 
 int flow_graph (DEM dem, FlowGraph * graph)
 {
+(void) graph;
   FlowNetwork network;
   if (flow_network (dem, FLOW_D8, &network))
   {
@@ -100,13 +101,13 @@ nans [y][x] = 255u;
       if (!visited [y][x])
         printf ("{%u}", dir [y][x]);
 #endif
+pgm (pit_centers,"pits.pgm");
+pgm (inverse,"dag-inverse.pgm");
+pgm (tree_tag,"pit-tag.pgm");
+pgm (visited,"visited.pgm");
+pgm (nans,"NAN.pgm");
 
 //test
-flow_network_grayscale ((FlowNetwork) {.dir = pit_centers, .w = w, .h = h}, "pits.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = inverse, .w = w, .h = h}, "dag-inverse.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = tree_tag, .w = w, .h = h}, "pit-tag.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = visited, .w = w, .h = h}, "visited.pgm", w, h);
-flow_network_grayscale ((FlowNetwork) {.dir = nans, .w = w, .h = h}, "NAN.pgm", w, h);
 
   /* travering through each DAG rooted about a pit center */
   

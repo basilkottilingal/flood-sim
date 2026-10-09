@@ -115,10 +115,9 @@ int pop_bit (uint8_t * v)
 /* Forest of Directed Acyclic Graph corresponding to D8 flow network */
 static void D8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDir)
 {
-
+  /* warning : assumes dir and invDir are set to 0 */
   double a = 1., b = sqrt (2.);
   const double delta [8] = {a, b, a, b, a, b, a, b};
-
   for (int y=0; y<h; ++y)
     for (int x=0; x<w; ++x)
     {
@@ -142,6 +141,32 @@ static void D8 (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDi
         int ynbr = y + flow_neighbor [nbr].y;
         /* DAG where every direction is inverted */
         invDir [ynbr][xnbr] |= (uint8_t) 1 << ((nbr+4)%8);
+      }
+    }
+}
+
+/* may not be equivalent to D infty algorithm in the literature*/
+static void DInfty (double ** raster, int w, int h, uint8_t ** dir, uint8_t ** invDir)
+{
+  /* warning : assumes dir and invDir are set to 0 */
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      double val = raster [y][x];
+      if ( isnan (val) )
+        continue;
+      for (int c=0; c<8; ++c)
+      {
+        int xnbr = x + flow_neighbor [c].x;
+        int ynbr = y + flow_neighbor [c].y;
+        double nbrVal = raster [ynbr][xnbr];
+        if (isnan (nbrVal))
+          continue;
+        if (nbrVal < val) /* positive downslope */
+        {
+          dir [y][x]    = (uint8_t) 1 << c;
+          invDir [y][x] = (uint8_t) 1 << ((c+4)%8);
+        }
       }
     }
 }
@@ -268,7 +293,6 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
 
     /* update downstream accumulation*/
     acc [ynbr][xnbr] += acc [y][x];
-
     assert ( in_degree [ynbr][xnbr] & ((uint8_t) 1 << inv) );
     if ( ! (in_degree [ynbr][xnbr] &= ~((uint8_t) 1 << inv)) )
     {
@@ -285,6 +309,15 @@ int flow_accumulation (FlowNetwork * network, DEM dem, MinPQ * sink)
   queue_destroy (&queue);
   grid_free (in_degree);
   return 0;
+}
+
+static void log_accumulation (double ** acc, double ** l)
+{
+  GridData gd = grid_data (acc);
+  int w = gd.width, h = gd.height;
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+      l [y][x] = log (acc [y][x]);
 }
 
 /*
@@ -358,6 +391,20 @@ static int flat_tag (double ** elevation, int ** tag, int * ntags)
   #undef push
 }
 
+static void accumulation_bug (int ** tag, uint8_t ** dir, uint8_t ** invDir)
+{
+  GridData gd = grid_data (tag);
+  int w = gd.width, h = gd.height;
+  double ** elevation = grid (double, w, h);
+  uint8_t ** bug    = grid (uint8_t, w, h);
+  D8 (elevation, w, h, dir, invDir);
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+      bug [y][x] = !dir [y][x] ? 255 : tag [y][x] ? 16 : 0;
+  pgm (bug, "no-drain-bug.pgm");
+  grid_free (bug);
+}
+
 static int flat_type (double ** elevation, int ** tag, uint8_t ** type)
 {
   GridData gd = grid_data (elevation);
@@ -366,18 +413,77 @@ static int flat_type (double ** elevation, int ** tag, uint8_t ** type)
   uint8_t ** invDir  = grid (uint8_t, w, h);
   if (!dir || !invDir)
     return ERR_MALLOC;
+  //DInfty (elevation, w, h, dir, invDir);
   D8 (elevation, w, h, dir, invDir);
+//accumulation_bug (tag, dir, invDir);
   for (int y=-2; y<h+2; ++y)
     for (int x=-2; x<w+2; ++x)
+    {
       type [y][x] =
         !tag [y][x]      ? 0           :
         dir [y][x]       ? FLAT_OUTLET :
         invDir [y][x]    ? FLAT_INLET  :
         IS_OUTSIDE (x,y) ? FLAT_OUTLET :
                            FLAT        ;
+    }
   grid_free (dir);
   grid_free (invDir);
   return 0;
+}
+
+static int drain_validity (double ** elevation, int ** tag, int ntags)
+{
+  GridData gd = grid_data (elevation);
+  int w = gd.width, h = gd.height;
+  uint8_t ** dir     = grid (uint8_t, w, h);
+  uint8_t ** invDir  = grid (uint8_t, w, h);
+  assert (dir && invDir);
+  //DInfty (elevation, w, h, dir, invDir);
+  D8 (elevation, w, h, dir, invDir);
+
+  int * isdrain = malloc (ntags * sizeof (int));
+  assert (isdrain);
+  memset (isdrain, 0, ntags * sizeof (int));
+
+  int err1 = 0, err2 = 0;
+
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      if (!tag [y][x])
+      {
+        if (dir [y][x] || (x == 0 || x == w-1 || y == 0 || y == h-1))
+          continue;
+        err1++;
+      }
+      else if (dir [y][x] || (x == 0 || x == w-1 || y == 0 || y == h-1))
+        isdrain [tag [y][x]] = 1;
+    }
+
+  if (err1 || err2)
+  {
+    uint8_t ** stagnant = grid (uint8_t, w, h); assert (stagnant);
+    for (int y=0; y<h; ++y)
+      for (int x=0; x<w; ++x)
+      {
+        if (!tag [y][x])
+        {
+          if (dir [y][x] || (x == 0 || x == w-1 || y == 0 || y == h-1))
+            continue;
+          stagnant [y][x] = 255u;
+        }
+        else if (!isdrain [tag [y][x]])
+          stagnant [y][x] = 255u;
+      }
+    pgm (stagnant, "stagnant.pgm");
+    grid_free (stagnant);
+  }
+
+  free (isdrain);
+  grid_free (dir);
+  grid_free (invDir);
+
+  return !(err1 || err2);
 }
 
 /*
@@ -412,9 +518,9 @@ int flow_remove_pits (DEM * dem)
   .. non-zero ID (corresponding to reservoir) will be skipped
   */
 //fixme : not skipping reservoirs.
-//int ntags;
-//if (flat_tag (elevation, reservoir, &ntags))
-  //return ERR_MALLOC;
+int ntags;
+if (flat_tag (elevation, reservoir, &ntags))
+  return ERR_MALLOC;
 
 pgm (reservoir, "reservoirs.pgm");
 
@@ -699,6 +805,7 @@ static int handle_flat (double ** elevation)
     return ERR_MALLOC;
   if (flat_tag (elevation, tag, &ntags))
     return ERR_MALLOC;
+drain_validity (elevation, tag, ntags);
   if (flat_type (elevation, tag, type))
     return ERR_MALLOC;
 
@@ -717,9 +824,10 @@ pgm (type, "flat-type.pgm");
     return ERR_MALLOC;
 
   /*
-  .. Gradient (downslope) away from the inlets.
+  .. [creating] Gradient (downslope) away from the inlets.
   .. We use fifo queue to BFS search in each flat patches, starting with
-  .. inlet points (which has some higher elevation neighors) as the seed
+  .. inlet points (which has some higher elevation neighors) as the seed.
+  .. BFS using bits & pop_bit() is tricky. FIFO is the best option. 
   */
   int ** g1 = grid (int, w, h);
   if (!g1) return ERR_MALLOC;
@@ -735,8 +843,8 @@ pgm (type, "flat-type.pgm");
   while (queue_pop (&in, &x, &y))
   {
     const int xb = x, yb = y, itag = tag [y][x], g = g1 [y][x] + 1;
-    for (y = yb-1; y < yb+1; ++y)
-      for (x = xb-1; x < xb+1; ++x)
+    for (y = yb-1; y <= yb+1; ++y)
+      for (x = xb-1; x <= xb+1; ++x)
         if (!visited [y][x] && tag [y][x] == itag)
         {
           push (in);
@@ -766,12 +874,17 @@ pgm (type, "flat-type.pgm");
         g1 [y][x] = max [tag [y][x]] - g1 [y][x] + 1;
       }
 
+
+  /* resetting visited [] for reuse */
+  memset (& visited [-2][-2], 0, (w+4)*(h+4)*sizeof (uint8_t));
+
   /*
-  .. Gradient toward the outlets.
+  .. [creating] Gradient toward the outlets.
   .. We use fifo queue to BFS search in each flat patches, starting with
   .. outlet points (which has some lower elevation neighors) as the seed
   .. includes one layer of ghost cells as outlet drains may fall outside [0:w-1][0:h-1]
   */
+  
   int ** g2 = grid (int, w, h);
   if (!g2) return ERR_MALLOC;
   for (int y=-1; y<h+1; ++y)
@@ -785,8 +898,8 @@ pgm (type, "flat-type.pgm");
   while (queue_pop (&out, &x, &y))
   {
     const int xb = x, yb = y, itag = tag [y][x], g = g2 [y][x] + 1;
-    for (y = yb-1; y < yb+1; ++y)
-      for (x = xb-1; x < xb+1; ++x)
+    for (y = yb-1; y <= yb+1; ++y)
+      for (x = xb-1; x <= xb+1; ++x)
         if (!visited [y][x] && tag [y][x] == itag)
         {
           push (out);
@@ -794,17 +907,73 @@ pgm (type, "flat-type.pgm");
         }
   }
 
+pgm (g1,"g1.pgm");
+pgm (g2,"g2.pgm");
 
-  /* adding perturbation weighted by g1 and g2 */
+
+  /* adding perturbation weighted by g1 and g2
   double eps = 1.e-3, W1 = 1., W2 = 2.;
   for (int y=-1; y<h+1; ++y)
     for (int x=-1; x<w+1; ++x)
     {
       elevation [y][x] += eps * (W1 * (double) g1 [y][x] + W2 * (double) g2 [y][x]);
     }
+  */
+  uint8_t ** dir     = grid (uint8_t, w, h);
+  uint8_t ** invDir  = grid (uint8_t, w, h);
+  if (!dir || !invDir)
+    return ERR_MALLOC;
+  D8 (elevation, w, h, dir, invDir);
+  int W1 = 0, W2 = 2;
+  double a = 1., b = sqrt (2.);
+  const double delta [8] = {a, b, a, b, a, b, a, b};
+  for (int y=0; y<h; ++y)
+    for (int x=0; x<w; ++x)
+    {
+      /* if (flood filled) elevation can find a direction, we rely on it */
+      if (dir [y][x])
+        continue;
+      /* for non-tagged (i.e not flat) points at boundary, we skip */
+      if (!tag [y][x] && (x == 0 || x == w-1 || y == 0 || y == h-1))
+        continue;
+      /* fallback. use g1 and g2 to resolve dir */
+      double max = 0.;
+      int itag   = tag [y][x];
+      int val    = W1 * g1 [y][x] + W2 * g2 [y][x];
+      int nbr    = -1;
+      for (int c=0; c<8; ++c)
+      {
+        int xnbr = x + flow_neighbor [c].x;
+        int ynbr = y + flow_neighbor [c].y;
+        if (tag [ynbr][xnbr] != itag)
+          continue; /* warning : skipping this will create cycles */
+        int nbrVal = W1 * g1 [ynbr][xnbr] + W2 * g2 [ynbr][xnbr];
+        double downslope = (double) (val - nbrVal) / delta [c];
+        if (downslope > max)
+          nbr = c, max = downslope;
+      }
+      if (nbr >= 0)
+      {
+        dir [y][x] = (uint8_t) 1 << nbr;
+        int xnbr = x + flow_neighbor [nbr].x;
+        int ynbr = y + flow_neighbor [nbr].y;
+        /* DAG where every direction is inverted */
+        invDir [ynbr][xnbr] |= (uint8_t) 1 << ((nbr+4)%8);
+      }
+    }
+pgm (dir, "d8.pgm");
+pgm (invDir, "invDir.pgm");
+  FlowNetwork network = {.w = w, .h = h, .dir = dir, .invDir = invDir};
+  flow_accumulation (&network, (DEM) {.raster = elevation}, NULL);
+  double ** acc = network.accumulation;
+  double ** log_acc = grid (double, w, h);
+  log_accumulation (acc, log_acc);
+  pgm (log_acc, "accumulation.pgm");
+grid_free (log_acc);
+grid_free (network.accumulation);
 
-pgm (g1,"g1.pgm");
-pgm (g2,"g2.pgm");
+    DAG_validity (dir, invDir);
+    accumulation_bug (tag, dir, invDir);
 
   free (max);
   queue_destroy (&in);
@@ -812,6 +981,8 @@ pgm (g2,"g2.pgm");
   grid_free (type);
   grid_free (visited);
   grid_free (tag);
+  grid_free (dir);
+  grid_free (invDir);
   grid_free (g1);
   grid_free (g2);
 
@@ -988,23 +1159,7 @@ int flow_routine (DEM dem)
 
   /* flood fill test */ 
   handle_flat (elevation);
-  D8 (elevation, w, h, dir, invDir);
-  FlowNetwork network = {.w = w, .h = h, .dir = dir, .invDir = invDir};
-  flow_accumulation (&network, dem, NULL);
-  double ** acc = network.accumulation;
-
-#if 0
-#endif
-double ** val = grid (double, w, h);
-double min = DBL_MAX, max = DBL_MIN;
-for (int y=0; y<h;++y)
-for (int x=0; x<w;++x)
-{
-val[y][x] = log (acc [y][x]);
-if (min > acc [y][x]) min = acc[y][x];
-if (max < acc [y][x]) max = acc[y][x];
-}
-printf ("acc range [%g %g]\n", min, max);
+  //D8 (elevation, w, h, dir, invDir);
 
   /* create a min heap with key corresponding to pit centers (lowest point of each pit) */
   MinPQ pq;
@@ -1013,11 +1168,11 @@ printf ("acc range [%g %g]\n", min, max);
   pit_color (pq, dir, invDir);
   pq_free (&pq);
 
+
   //test
   pgm_hillshade (elevation, "dem-corrected.pgm", w, h, 315, 45, 30, 1);
-  pgm (dir, "d8.pgm");
-  pgm (invDir, "invDir.pgm");
-  pgm (val, "accumulation.pgm");
+  //pgm (dir, "d8.pgm");
+  //pgm (invDir, "invDir.pgm");
 
   /* freeing all memory associated */
   grid_free (elevation);
