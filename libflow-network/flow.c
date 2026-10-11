@@ -490,9 +490,7 @@ pgm (g2,"g2.pgm");
   double eps = 1.e-3, W1 = 1., W2 = 2.;
   for (int y=-1; y<h+1; ++y)
     for (int x=-1; x<w+1; ++x)
-TanDEM-X    {
       elevation [y][x] += eps * (W1 * (double) g1 [y][x] + W2 * (double) g2 [y][x]);
-    }
   #endif
   /*
   .. G-M algorithm add perturbation weighted by g1 and g2 to elevation

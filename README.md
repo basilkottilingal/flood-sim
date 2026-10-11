@@ -1,7 +1,22 @@
 # Data 
 
   1. Topography contour can be downloaded from opentopography.org
-     (File is put in .gitignore due to heavy size of the Geotiff topographiy data)
+     (File is put in .gitignore due to heavy size of the Geotiff topographiy data).
+     You may use API to download raster from opentopography.
+```python
+import os, requests
+params = {
+    "demtype": "COP30",
+    "south": 10.00, "north": 10.05,
+    "west": 76.25,  "east": 76.30,
+    "outputFormat": "GTiff",
+    "API_Key": os.environ["OT_API_KEY"],
+}
+r = requests.get("https://portal.opentopography.org/API/globaldem", params=params, timeout=120)
+r.raise_for_status()
+with open("patch.tif", "wb") as f:
+    f.write(r.content)
+```
   2. (Missing rainfall data)
   3. [Kerala state boundary](https://github.com/opendatakerala/map.opendatakerala.org/blob/main/data/kerala_lsg_mapdata.geojson)
 

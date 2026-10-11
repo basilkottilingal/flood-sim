@@ -1,0 +1,2 @@
+DEPS :=
+include ../lib.mk
