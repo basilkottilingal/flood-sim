@@ -2,6 +2,7 @@
 /* these line will be visible in json.tab.h */
 #include "ast.h"
 }
+
 %define api.pure full
 %define api.value.type {Ast *}
 
@@ -22,8 +23,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "lexer.h"
 #include "ast.h"
+#include "lexer.h"
 
 /* forward declaration of functions declared in the lexer */
 extern int yylex (YYSTYPE *);
@@ -34,46 +35,46 @@ extern int yycolno;
 void yyerror (const char *s);
 
 %}
-%token J_TRUE J_FALSE J_NULL J_STRING J_NUMBER
+%token jtrue jfalse jnull jstring jnumber
 
 %%
 
-JSON
-    : J_VALUE                  {$$ = ast1 ($1);}
+jjson
+    : jvalue                  {$$ = ast_json ($1);}
     ;
 
-J_VALUE
-    : J_OBJECT                 {$$ = ast1 ($1);}
-    | J_ARRAY                  {$$ = ast1 ($1);}
-    | J_STRING                 {$$ = ast1 ($1);}
-    | J_NUMBER                 {$$ = ast1 ($1);}
-    | J_TRUE                   {$$ = ast1 ($1);}
-    | J_FALSE                  {$$ = ast1 ($1);}
-    | J_NULL                   {$$ = ast1 ($1);}
+jvalue
+    : jobject                 {$$ = ast_val ($1); }
+    | jarray                  {$$ = ast_val ($1); }
+    | jstring                 {$$ = ast_val ($1); }
+    | jnumber                 {$$ = ast_val ($1); }
+    | jtrue                   {$$ = ast_val ($1); }
+    | jfalse                  {$$ = ast_val ($1); }
+    | jnull                   {$$ = ast_val ($1); }
     ;
 
-J_OBJECT
-    : '{' '}'                  {$$ = ast2 ($1, $2);}
-    | '{' J_MEMBERS '}'        {$$ = ast3 ($1, $2, $3);}
+jobject
+    : '{' '}'                 {$$ = ast_obj (NULL);}
+    | '{' jmembers '}'        {$$ = ast_obj ($2);}
     ;
 
-J_MEMBERS
-    : J_PAIR                   {$$ = ast1 ($1);}
-    | J_MEMBERS ',' J_PAIR     {$$ = ast3 ($1, $2, $3);}
+jmembers
+    : jpair                   {$$ = ast_append (NULL, $1);}
+    | jmembers ',' jpair      {$$ = ast_append ($1, $3);}
     ;
 
-J_PAIR
-    : J_STRING ':' J_VALUE     {$$ = ast3 ($1, $2, $3);}
+jpair
+    : jstring ':' jvalue      {$$ = ast_pair ($1, $3);}
     ;
 
-J_ARRAY
-    : '[' ']'                  {$$ = ast2 ($1, $2);}
-    | '[' J_ELEMENTS ']'       {$$ = ast3 ($1, $2, $3);}
+jarray
+    : '[' ']'                 {$$ = ast_array (NULL);}
+    | '[' jelements ']'       {$$ = ast_array ($2);}
     ;
 
-J_ELEMENTS
-    : J_VALUE                  {$$ = ast1 ($1);}
-    | J_ELEMENTS ',' J_VALUE   {$$ = ast3 ($1, $2, $3);}
+jelements
+    : jvalue                  {$$ = ast_append (NULL, $1);}
+    | jelements ',' jvalue    {$$ = ast_append ($1, $3);}
     ;
 
 %%

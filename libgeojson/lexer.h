@@ -1,5 +1,25 @@
 
-# line 2 "languages/json/json.lex"
+  /*
+  Table based lexer generator, made by Ahmed Basil KOTTILINGAL
+
+  Copyright (C) [2026] [Ahmed Basil KOTTILINGAL]
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+  */
+
+# line 2 "json.l"
 /*
 .. refer to the combined lexer + grammar rules of json at
 .. https://www.json.org/json-en.html 
@@ -9,10 +29,10 @@
 #include "json.tab.h"
 #include "ast.h"
 #define YY_DECL   int yylex (YYSTYPE * lvalp)
-#define AST(TKN)  *lvalp = ast_leaf (yytext); return TKN
+#define AST(TKN)  *lvalp = ast_leaf (yytext, yyleng, ast_token (TKN)); return TKN
 
 
-# line 16 "languages/json/lexer.h"
+# line 36 "lexer.h"
 
 /*
 .. Equivalence classes for alphabets in [0x00, 0xFF] are
@@ -359,6 +379,7 @@ void lxr_clean () {
   if (lxr_class_buff) {
     free (lxr_class_buff);
     lxr_class_buff = NULL;
+    lxr_class_buff_size = 0;
   }
 
   if (lxr_in)
@@ -677,49 +698,49 @@ YY_DECL
           #endif
           break;
 
-
+        
         case 1 :
-          # line 17 "languages/json/json.lex"
-          { AST (J_TRUE); }
+          # line 17 "json.l"
+          { AST (jtrue); }
           break;
 
         case 2 :
-          # line 18 "languages/json/json.lex"
-          { AST (J_FALSE); }
+          # line 18 "json.l"
+          { AST (jfalse); }
           break;
 
         case 3 :
-          # line 19 "languages/json/json.lex"
-          { AST (J_NULL); }
+          # line 19 "json.l"
+          { AST (jnull); }
           break;
 
         case 4 :
-          # line 20 "languages/json/json.lex"
-          { AST (J_STRING); }
+          # line 20 "json.l"
+          { AST (jstring); }
           break;
 
         case 5 :
-          # line 21 "languages/json/json.lex"
-          { AST (yytext [0]); }
+          # line 21 "json.l"
+          { return (yytext [0]); }
           break;
 
         case 6 :
-          # line 22 "languages/json/json.lex"
-          { AST (J_NUMBER); }
+          # line 22 "json.l"
+          { AST (jnumber); }
           break;
 
         case 7 :
-          # line 23 "languages/json/json.lex"
+          # line 23 "json.l"
           { /* skip */ }
           break;
 
         case 8 :
-          # line 24 "languages/json/json.lex"
+          # line 24 "json.l"
           { fprintf (stderr, "\nerror : %s", yytext); }
           break;
 
 
-# line 723 "languages/json/lexer.h"
+# line 744 "lexer.h"
 
         case lxr_eof_accept :
           lxr_bptr = lxr_start;
@@ -759,5 +780,5 @@ YY_DECL
   return EOF;                     /* The code will never reach here */
 }
 
-# line 27 "languages/json/json.lex"
+# line 27 "json.l"
 

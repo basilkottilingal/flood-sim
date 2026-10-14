@@ -1,9 +1,20 @@
-#include "ast.h"
-
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "ast.h"
+
+/*
+.. Abstract Syntax Tree for (Geo)JSON
+*/
+
+/*fixme : after testing, remove [almost all of the] asserts */
+
+
+/*
+.. allocation, reuse and free
+*/
 
 typedef struct Allocator
 {
@@ -11,8 +22,13 @@ typedef struct Allocator
   struct Allocator * next;
   size_t left;
 } Allocator;
+struct Free
+{
+  struct Free * next;
+};
 
-static Allocator dummy = (Allocator) {NULL, NULL, 0};
+static struct Free * ast_fhead = NULL, * astl_fhead = NULL;
+static Allocator dummy = (Allocator) {0};
 static Allocator * allocator = & dummy;
 
 void ast_free_all ()
@@ -24,6 +40,7 @@ void ast_free_all ()
     free (m);
   }
   assert (allocator == &dummy);
+  ast_fhead = astl_fhead = NULL;
 }
 
 static void * allocate (size_t s)
@@ -32,16 +49,21 @@ static void * allocate (size_t s)
   s = (s + mask) & ~mask;
   if (allocator->left < s)
   {
-    char * m = malloc (1<<16);
+    #ifndef _AST_PAGE_SIZE_
+    #define _AST_PAGE_SIZE_ (1<<16)
+    #endif
+    char * m = malloc (_AST_PAGE_SIZE_);
     assert ("ast.h : malloc ()" && m);
+    memset (m, 0, _AST_PAGE_SIZE_);
     Allocator * old = allocator;
     allocator = (Allocator *) m;
+    
     size_t salloc = (sizeof (Allocator) + mask) & ~mask;
     *allocator = (Allocator) 
       {
         .mem  = m + salloc,
         .next = old,
-        .left = (size_t) (1 << 16) - salloc
+        .left = (size_t) _AST_PAGE_SIZE_ - salloc
       };
   }
   char * m = allocator->mem;
@@ -50,45 +72,112 @@ static void * allocate (size_t s)
   return m;
 }
 
-Ast * ast1 (Ast * child)
+static Ast * ast ()
 {
-  Ast * p = (Ast *) allocate (sizeof (Ast));
-  Ast ** children = (Ast **) allocate (2 * sizeof (Ast *));
-  p->children = children;
-  p->parent = NULL;
-  children [0] = child, children [1] = NULL;
-  child->parent = p;
-  return p;
+  if (ast_fhead)
+  {
+    Ast * a = (Ast *) ast_fhead;
+    ast_fhead = ast_fhead->next;
+    *a = (Ast) {0};
+    return a;
+  }
+  return (Ast *) allocate (sizeof (Ast));
 }
 
-Ast * ast2 (Ast * c0, Ast * c1)
+static void ast_free (Ast * a)
 {
-  Ast * p = (Ast *) allocate (sizeof (Ast));
-  Ast ** children = (Ast **) allocate (3 * sizeof (Ast *));
-  p->children = children;
-  p->parent = NULL;
-  children [0] = c0, children [1] = c1, children [2] = NULL;
-  c0->parent = c1->parent = p;
-  return p;
+  struct Free * f = (struct Free *) a;
+  f->next = ast_fhead;
+  ast_fhead = f;
 }
 
-Ast * ast3 (Ast * c0, Ast * c1, Ast * c2)
+static AstLeaf * astl ()
 {
-  Ast * p = (Ast *) allocate (sizeof (Ast));
-  Ast ** children = (Ast **) allocate (4 * sizeof (Ast *));
-  p->children = children;
-  p->parent = NULL;
-  children [0] = c0, children [1] = c1, children [2] = c2, children [3] = NULL;
-  c0->parent = c1->parent = c2->parent = p;
-  return p;
+  if (astl_fhead)
+  {
+    AstLeaf * l = (AstLeaf *) astl_fhead;
+    astl_fhead = astl_fhead->next;
+    *l = (AstLeaf) {0};
+    return l;
+  }
+  return (AstLeaf *) allocate (sizeof (Ast));
 }
 
-Ast * ast_leaf (char * yytext)
+static void astl_free (AstLeaf * l)
 {
-  AstLeaf * l = (AstLeaf *) allocate (sizeof (AstLeaf));
-  l->start = yytext, l->end = yytext + strlen (yytext);
-  Ast * p = (Ast *) l;
-  p->children = NULL;
-  return p;
+  struct Free * f = (struct Free *) l;
+  f->next = astl_fhead;
+  astl_fhead = f;
 }
 
+Ast * ast_json (Ast * val)
+{
+  Ast * json = ast ();
+  json->child = val, val->parent = json;
+  json->type = ast_token (jjson) ;
+  return json;
+}
+
+Ast * ast_val (Ast * a)
+{
+  Ast * val = ast ();
+  assert (a);
+  a->parent = val;
+  val->child = a;
+  val->type = ast_token (jvalue);
+  return val;
+}
+
+Ast * ast_obj (Ast * members)
+{
+  Ast * parent = members ? members->parent : ast ();
+  assert (parent);
+  parent->type = ast_token (jobject);
+  return parent;
+}
+
+Ast * ast_append (Ast * prev, Ast * a)
+{
+  Ast * parent =  prev ? prev->parent : ast ();
+  assert (parent && a);
+  a->parent = parent;
+  if (prev)
+  {
+    assert (!prev->next);
+    prev->next = a;
+  }
+  else
+  {
+    assert (!parent->child);
+    parent->child = a;
+  }
+  return a;
+}
+
+Ast * ast_pair (Ast * str, Ast * val)
+{
+  Ast * pair = ast ();
+  pair->type = ast_token (jpair);
+  pair->child = str, str->next = val;
+  assert (str->type == ast_token (jstring) && val->type == ast_token (jvalue));
+  /* maybe you can reuse 'str' as 'pair' */
+  return pair; 
+}
+
+Ast * ast_array (Ast * elements)
+{
+  Ast * parent = elements ? elements->parent : ast ();
+  assert (parent);
+  parent->type = ast_token (jarray);
+  return parent;
+}
+
+Ast * ast_leaf (char * yytext, int yyleng, int tkn)
+{
+  AstLeaf * l = astl ();
+  Ast * a = (Ast *) l;
+  l->start = yytext, l->end = yytext + yyleng;
+  assert (tkn);
+  a->type = tkn;
+  return a;
+}

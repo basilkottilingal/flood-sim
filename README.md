@@ -7,8 +7,8 @@
 import os, requests
 params = {
     "demtype": "COP30",
-    "south": 10.00, "north": 10.05,
-    "west": 76.25,  "east": 76.30,
+    "south": 8.29, "north": 12.79,
+    "west": 74.85,  "east": 77.40,
     "outputFormat": "GTiff",
     "API_Key": os.environ["OT_API_KEY"],
 }
@@ -30,6 +30,8 @@ Welch, T. "A technique for high-performance data compression." Computer 17.6 (19
   5. [An LZW code in libtiff library](https://gitlab.com/libtiff/libtiff/-/blob/master/libtiff/tif_lzw.c)
   6. [wsServer](https://github.com/Theldus/wsServer/tree/master)
   7. [Basilisk](basilisk.fr)
+  8. [GeoJSON format](https://www.rfc-editor.org/info/rfc7946/)
+  9. [photogrammetry](https://github.com/awesome-photogrammetry/awesome-photogrammetry)
 
 
 # Multilayer FVM solver for flood simulation
