@@ -3,19 +3,27 @@
 
   #include "ast.h"
 
-  typedef struct
+  typedef struct GJHashEntry
   {
-  }
+    const char *key;
+    const Ast * geometry;
+    struct GJHashEntry *next;
+  } GJHashEntry;
+
+  typedef struct
+  { 
+    GJHashEntry **b;
+    size_t nb, n, mask;
+  } GJHashTable;
 
   typedef struct
   {
-    Ast ** geometry;
-    Ast * json;
+    GJHashTable hashtable;
+    Ast * tree;
   } GeoJSON;
 
   /* API */
-  int   geojson (const char * json, GeoJSON * g);
-  Ast * geojson_locate (const char * byname);
-  
+  int   geojson (const char * json, GeoJSON * gj, const char * uniqueTag);
+  const Ast * geojson_locate (GeoJSON * gj, const char * byname);
 
 #endif

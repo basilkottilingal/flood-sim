@@ -1,10 +1,24 @@
 %code requires {
-/* these line will be visible in json.tab.h */
-#include "ast.h"
+  /* these lines will be visible in json.tab.h */
+  #include "ast.h"
+
+  /* fixme : lexer (github.com/basilkottilingal/lexer) cannot
+  .. split the lexer file into a header and .c. So we cannot
+  .. use multiple instances of lexer.h (produced using json.l)
+  .. Thus we limit the use of lexer.h only in this parser. API to
+  .. the lexer is thus called via parser (json.tab.h)
+  */
+
+  /* call before yyparse () */
+  void yyparse_open_file (const char * file);
+
+  /* can be called to clean the lexer buffer and fclose () the source */
+  void yyparse_close_file ();
 }
 
 %define api.pure full
 %define api.value.type {Ast *}
+%parse-param { Ast ** json }
 
 %{
 
@@ -13,7 +27,10 @@
 .. generator] bison. Note that -d option of bison splits the parser into
 .. two [json.tab.h and json.tab.c]
 .. The header will contain YYSTYPE, yyparse forward declarations.
+.. You can update the parser using :
 .. $ bison -d json.y
+.. however it's not recommended to put this in the Makefile. Run it only
+.. when you want to update the parser.
 ..
 .. Refer to the combined lexer + grammar rules of json at
 .. https://www.json.org/json-en.html 
@@ -22,6 +39,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "ast.h"
 #include "lexer.h"
@@ -32,7 +50,7 @@ extern int yylineno;
 extern int yycolno;
 
 /* error handling */
-void yyerror (const char *s);
+void yyerror (Ast **, const char *s);
 
 %}
 %token jtrue jfalse jnull jstring jnumber
@@ -40,7 +58,7 @@ void yyerror (const char *s);
 %%
 
 jjson
-    : jvalue                  {$$ = ast_json ($1);}
+    : jvalue                  {*json = $$ = ast_json ($1);}
     ;
 
 jvalue
@@ -82,23 +100,42 @@ jelements
 #include "json.tab.h"
 
 /* Error handling routine called automatically by Yacc on syntax error */
-void yyerror (const char *s)
+void yyerror (Ast ** j, const char *s)
 {
+  (void) j;
   fprintf(stderr, "JSON Syntax Error: %s at line %d\n", s, yylineno);
+}
+
+void yyparse_open_file (const char * f)
+{
+  /* in absence of calling, lexer will assume stdin as the source */
+  lxr_source (f);
+}
+
+void yyparse_close_file ()
+{
+  /*
+  .. warning : will clean all the token buffers. recommend
+  .. a copy of tokens (may use strdup (yytext)) while creating AST
+  */
+  lxr_clean ();
 }
 
 #ifdef JSON_PARSER_TESTING
 int main (void)
 {
   printf("Parsing JSON input...\n");
-  if (yyparse() == 0)
+  Ast * json = NULL;
+  if (yyparse(&json) == 0)
   {
-    printf("Result: Valid JSON document!\n");
+    printf ("Result: Valid JSON document!\n");
+    assert (json);
     return 0;
   } else
   {
     printf("Result: Invalid JSON.\n");
     return 1;
   }
+  lxr_clean ();
 }
 #endif

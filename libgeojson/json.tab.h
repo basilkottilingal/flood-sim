@@ -50,7 +50,16 @@ extern int yydebug;
 /* these line will be visible in json.tab.h */
 #include "ast.h"
 
-#line 54 "json.tab.h"
+/* fixme : lexer (github.com/basilkottilingal/lexer) cannot
+.. split the lexer file into a header and .c. So we cannot
+.. use multiple instances of lexer.h (produced using json.l)
+.. Thus we limit the use of lexer.h only in this parser. API to
+.. the lexer is thus called via parser (json.tab.h)
+*/
+void yyparse_open_file (const char * file); /* call before yyparse () */
+void yyparse_close_file ();  /* can be called to clean the lexer buffer and fclose () the source */
+
+#line 63 "json.tab.h"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -80,7 +89,7 @@ typedef Ast * YYSTYPE;
 
 
 
-int yyparse (void);
+int yyparse (Ast ** json);
 
 
 #endif /* !YY_YY_JSON_TAB_H_INCLUDED  */

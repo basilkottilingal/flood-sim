@@ -1,5 +1,5 @@
 # dependents first, providers last (link order)
-LINK_ORDER := flow-network geotiff view alloc
+LINK_ORDER := flow-network geotiff geojson view alloc
 LIBS     := $(addprefix lib,$(LINK_ORDER))
 
 #LIBS     := $(patsubst %/,%,$(dir $(wildcard lib*/Makefile))) 

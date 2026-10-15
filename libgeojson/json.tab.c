@@ -67,7 +67,7 @@
 
 
 /* First part of user prologue.  */
-#line 9 "json.y"
+#line 19 "json.y"
 
 
 /*
@@ -84,6 +84,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "ast.h"
 #include "lexer.h"
@@ -94,10 +95,10 @@ extern int yylineno;
 extern int yycolno;
 
 /* error handling */
-void yyerror (const char *s);
+void yyerror (Ast **, const char *s);
 
 
-#line 101 "json.tab.c"
+#line 102 "json.tab.c"
 
 # ifndef YY_CAST
 #  ifdef __cplusplus
@@ -533,8 +534,8 @@ static const yytype_int8 yytranslate[] =
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
 static const yytype_int8 yyrline[] =
 {
-       0,    43,    43,    47,    48,    49,    50,    51,    52,    53,
-      57,    58,    62,    63,    67,    71,    72,    76,    77
+       0,    54,    54,    58,    59,    60,    61,    62,    63,    64,
+      68,    69,    73,    74,    78,    82,    83,    87,    88
 };
 #endif
 
@@ -670,7 +671,7 @@ enum { YYENOMEM = -2 };
       }                                                           \
     else                                                          \
       {                                                           \
-        yyerror (YY_("syntax error: cannot back up")); \
+        yyerror (json, YY_("syntax error: cannot back up")); \
         YYERROR;                                                  \
       }                                                           \
   while (0)
@@ -703,7 +704,7 @@ do {                                                                      \
     {                                                                     \
       YYFPRINTF (stderr, "%s ", Title);                                   \
       yy_symbol_print (stderr,                                            \
-                  Kind, Value); \
+                  Kind, Value, json); \
       YYFPRINTF (stderr, "\n");                                           \
     }                                                                     \
 } while (0)
@@ -715,10 +716,11 @@ do {                                                                      \
 
 static void
 yy_symbol_value_print (FILE *yyo,
-                       yysymbol_kind_t yykind, YYSTYPE const * const yyvaluep)
+                       yysymbol_kind_t yykind, YYSTYPE const * const yyvaluep, Ast ** json)
 {
   FILE *yyoutput = yyo;
   YY_USE (yyoutput);
+  YY_USE (json);
   if (!yyvaluep)
     return;
   YY_IGNORE_MAYBE_UNINITIALIZED_BEGIN
@@ -733,12 +735,12 @@ yy_symbol_value_print (FILE *yyo,
 
 static void
 yy_symbol_print (FILE *yyo,
-                 yysymbol_kind_t yykind, YYSTYPE const * const yyvaluep)
+                 yysymbol_kind_t yykind, YYSTYPE const * const yyvaluep, Ast ** json)
 {
   YYFPRINTF (yyo, "%s %s (",
              yykind < YYNTOKENS ? "token" : "nterm", yysymbol_name (yykind));
 
-  yy_symbol_value_print (yyo, yykind, yyvaluep);
+  yy_symbol_value_print (yyo, yykind, yyvaluep, json);
   YYFPRINTF (yyo, ")");
 }
 
@@ -772,7 +774,7 @@ do {                                                            \
 
 static void
 yy_reduce_print (yy_state_t *yyssp, YYSTYPE *yyvsp,
-                 int yyrule)
+                 int yyrule, Ast ** json)
 {
   int yylno = yyrline[yyrule];
   int yynrhs = yyr2[yyrule];
@@ -785,7 +787,7 @@ yy_reduce_print (yy_state_t *yyssp, YYSTYPE *yyvsp,
       YYFPRINTF (stderr, "   $%d = ", yyi + 1);
       yy_symbol_print (stderr,
                        YY_ACCESSING_SYMBOL (+yyssp[yyi + 1 - yynrhs]),
-                       &yyvsp[(yyi + 1) - (yynrhs)]);
+                       &yyvsp[(yyi + 1) - (yynrhs)], json);
       YYFPRINTF (stderr, "\n");
     }
 }
@@ -793,7 +795,7 @@ yy_reduce_print (yy_state_t *yyssp, YYSTYPE *yyvsp,
 # define YY_REDUCE_PRINT(Rule)          \
 do {                                    \
   if (yydebug)                          \
-    yy_reduce_print (yyssp, yyvsp, Rule); \
+    yy_reduce_print (yyssp, yyvsp, Rule, json); \
 } while (0)
 
 /* Nonzero means print parse trace.  It is left uninitialized so that
@@ -834,9 +836,10 @@ int yydebug;
 
 static void
 yydestruct (const char *yymsg,
-            yysymbol_kind_t yykind, YYSTYPE *yyvaluep)
+            yysymbol_kind_t yykind, YYSTYPE *yyvaluep, Ast ** json)
 {
   YY_USE (yyvaluep);
+  YY_USE (json);
   if (!yymsg)
     yymsg = "Deleting";
   YY_SYMBOL_PRINT (yymsg, yykind, yyvaluep, yylocationp);
@@ -856,7 +859,7 @@ yydestruct (const char *yymsg,
 `----------*/
 
 int
-yyparse (void)
+yyparse (Ast ** json)
 {
 /* Lookahead token kind.  */
 int yychar;
@@ -1111,109 +1114,109 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* jjson: jvalue  */
-#line 43 "json.y"
-                              {yyval = ast_json (yyvsp[0]);}
-#line 1117 "json.tab.c"
+#line 54 "json.y"
+                              {*json = yyval = ast_json (yyvsp[0]);}
+#line 1120 "json.tab.c"
     break;
 
   case 3: /* jvalue: jobject  */
-#line 47 "json.y"
+#line 58 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1123 "json.tab.c"
+#line 1126 "json.tab.c"
     break;
 
   case 4: /* jvalue: jarray  */
-#line 48 "json.y"
+#line 59 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1129 "json.tab.c"
+#line 1132 "json.tab.c"
     break;
 
   case 5: /* jvalue: jstring  */
-#line 49 "json.y"
+#line 60 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1135 "json.tab.c"
+#line 1138 "json.tab.c"
     break;
 
   case 6: /* jvalue: jnumber  */
-#line 50 "json.y"
+#line 61 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1141 "json.tab.c"
+#line 1144 "json.tab.c"
     break;
 
   case 7: /* jvalue: jtrue  */
-#line 51 "json.y"
+#line 62 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1147 "json.tab.c"
+#line 1150 "json.tab.c"
     break;
 
   case 8: /* jvalue: jfalse  */
-#line 52 "json.y"
+#line 63 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1153 "json.tab.c"
+#line 1156 "json.tab.c"
     break;
 
   case 9: /* jvalue: jnull  */
-#line 53 "json.y"
+#line 64 "json.y"
                               {yyval = ast_val (yyvsp[0]); }
-#line 1159 "json.tab.c"
+#line 1162 "json.tab.c"
     break;
 
   case 10: /* jobject: '{' '}'  */
-#line 57 "json.y"
-                               {yyval = ast_obj (NULL);}
-#line 1165 "json.tab.c"
+#line 68 "json.y"
+                              {yyval = ast_obj (NULL);}
+#line 1168 "json.tab.c"
     break;
 
   case 11: /* jobject: '{' jmembers '}'  */
-#line 58 "json.y"
+#line 69 "json.y"
                               {yyval = ast_obj (yyvsp[-1]);}
-#line 1171 "json.tab.c"
+#line 1174 "json.tab.c"
     break;
 
   case 12: /* jmembers: jpair  */
-#line 62 "json.y"
+#line 73 "json.y"
                               {yyval = ast_append (NULL, yyvsp[0]);}
-#line 1177 "json.tab.c"
+#line 1180 "json.tab.c"
     break;
 
   case 13: /* jmembers: jmembers ',' jpair  */
-#line 63 "json.y"
-                             {yyval = ast_append (yyvsp[-2], yyvsp[0]);}
-#line 1183 "json.tab.c"
+#line 74 "json.y"
+                              {yyval = ast_append (yyvsp[-2], yyvsp[0]);}
+#line 1186 "json.tab.c"
     break;
 
   case 14: /* jpair: jstring ':' jvalue  */
-#line 67 "json.y"
-                             {yyval = ast_pair (yyvsp[-2], yyvsp[0]);}
-#line 1189 "json.tab.c"
+#line 78 "json.y"
+                              {yyval = ast_pair (yyvsp[-2], yyvsp[0]);}
+#line 1192 "json.tab.c"
     break;
 
   case 15: /* jarray: '[' ']'  */
-#line 71 "json.y"
-                               {yyval = ast_array (NULL);}
-#line 1195 "json.tab.c"
+#line 82 "json.y"
+                              {yyval = ast_array (NULL);}
+#line 1198 "json.tab.c"
     break;
 
   case 16: /* jarray: '[' jelements ']'  */
-#line 72 "json.y"
+#line 83 "json.y"
                               {yyval = ast_array (yyvsp[-1]);}
-#line 1201 "json.tab.c"
+#line 1204 "json.tab.c"
     break;
 
   case 17: /* jelements: jvalue  */
-#line 76 "json.y"
+#line 87 "json.y"
                               {yyval = ast_append (NULL, yyvsp[0]);}
-#line 1207 "json.tab.c"
+#line 1210 "json.tab.c"
     break;
 
   case 18: /* jelements: jelements ',' jvalue  */
-#line 77 "json.y"
-                             {yyval = ast_append (yyvsp[-2], yyvsp[0]);}
-#line 1213 "json.tab.c"
+#line 88 "json.y"
+                              {yyval = ast_append (yyvsp[-2], yyvsp[0]);}
+#line 1216 "json.tab.c"
     break;
 
 
-#line 1217 "json.tab.c"
+#line 1220 "json.tab.c"
 
       default: break;
     }
@@ -1260,7 +1263,7 @@ yyerrlab:
   if (!yyerrstatus)
     {
       ++yynerrs;
-      yyerror (YY_("syntax error"));
+      yyerror (json, YY_("syntax error"));
     }
 
   if (yyerrstatus == 3)
@@ -1277,7 +1280,7 @@ yyerrlab:
       else
         {
           yydestruct ("Error: discarding",
-                      yytoken, &yylval);
+                      yytoken, &yylval, json);
           yychar = YYEMPTY;
         }
     }
@@ -1333,7 +1336,7 @@ yyerrlab1:
 
 
       yydestruct ("Error: popping",
-                  YY_ACCESSING_SYMBOL (yystate), yyvsp);
+                  YY_ACCESSING_SYMBOL (yystate), yyvsp, json);
       YYPOPSTACK (1);
       yystate = *yyssp;
       YY_STACK_PRINT (yyss, yyssp);
@@ -1371,7 +1374,7 @@ yyabortlab:
 | yyexhaustedlab -- YYNOMEM (memory exhaustion) comes here.  |
 `-----------------------------------------------------------*/
 yyexhaustedlab:
-  yyerror (YY_("memory exhausted"));
+  yyerror (json, YY_("memory exhausted"));
   yyresult = 2;
   goto yyreturnlab;
 
@@ -1386,7 +1389,7 @@ yyreturnlab:
          user semantic actions for why this is necessary.  */
       yytoken = YYTRANSLATE (yychar);
       yydestruct ("Cleanup: discarding lookahead",
-                  yytoken, &yylval);
+                  yytoken, &yylval, json);
     }
   /* Do not reclaim the symbols of the rule whose action triggered
      this YYABORT or YYACCEPT.  */
@@ -1395,7 +1398,7 @@ yyreturnlab:
   while (yyssp != yyss)
     {
       yydestruct ("Cleanup: popping",
-                  YY_ACCESSING_SYMBOL (+*yyssp), yyvsp);
+                  YY_ACCESSING_SYMBOL (+*yyssp), yyvsp, json);
       YYPOPSTACK (1);
     }
 #ifndef yyoverflow
@@ -1406,29 +1409,48 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 80 "json.y"
+#line 91 "json.y"
 
 
 #include "json.tab.h"
 
 /* Error handling routine called automatically by Yacc on syntax error */
-void yyerror (const char *s)
+void yyerror (Ast ** j, const char *s)
 {
+  (void) j;
   fprintf(stderr, "JSON Syntax Error: %s at line %d\n", s, yylineno);
+}
+
+void yyparse_open_file (const char * f)
+{
+  /* in absence of calling, lexer will assume stdin as the source */
+  lxr_source (f);
+}
+
+void yyparse_close_file ()
+{
+  /*
+  .. warning : will clean all the token buffers. recommend
+  .. a copy of tokens (may use strdup (yytext)) while creating AST
+  */
+  lxr_clean ();
 }
 
 #ifdef JSON_PARSER_TESTING
 int main (void)
 {
   printf("Parsing JSON input...\n");
-  if (yyparse() == 0)
+  Ast * json = NULL;
+  if (yyparse(&json) == 0)
   {
-    printf("Result: Valid JSON document!\n");
+    printf ("Result: Valid JSON document!\n");
+    assert (json);
     return 0;
   } else
   {
     printf("Result: Invalid JSON.\n");
     return 1;
   }
+  lxr_clean ();
 }
 #endif

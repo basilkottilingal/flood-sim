@@ -11,17 +11,6 @@
 
 /*fixme : after testing, remove [almost all of the] asserts */
 
-
-/*
-.. allocation, reuse and free
-*/
-
-typedef struct Allocator
-{
-  char * mem;
-  struct Allocator * next;
-  size_t left;
-} Allocator;
 struct Free
 {
   struct Free * next;
@@ -43,7 +32,7 @@ void ast_free_all ()
   ast_fhead = astl_fhead = NULL;
 }
 
-static void * allocate (size_t s)
+void * allocate (size_t s)
 {
   size_t sptr = sizeof (void *), mask = sptr - 1;
   s = (s + mask) & ~mask;
@@ -52,8 +41,9 @@ static void * allocate (size_t s)
     #ifndef _AST_PAGE_SIZE_
     #define _AST_PAGE_SIZE_ (1<<16)
     #endif
+    assert ("ast.h : alloc () : page limit" && s <= _AST_PAGE_SIZE_);
     char * m = malloc (_AST_PAGE_SIZE_);
-    assert ("ast.h : malloc ()" && m);
+    assert ("ast.h : alloc ()" && m);
     memset (m, 0, _AST_PAGE_SIZE_);
     Allocator * old = allocator;
     allocator = (Allocator *) m;
@@ -70,6 +60,20 @@ static void * allocate (size_t s)
   allocator->left -= s;
   allocator->mem  += s;
   return m;
+}
+
+static char * alloc_str (const char * yytext, int yyleng, int is_string)
+{
+  if (is_string)
+  {
+    /* remove the quotes */
+    yyleng -= 2;
+    yytext += 1; 
+  }
+  char * s = allocate (yyleng + 1);
+  memcpy (s, yytext, yyleng);
+  s [yyleng] = '\0';
+  return s;
 }
 
 static Ast * ast ()
@@ -100,7 +104,7 @@ static AstLeaf * astl ()
     *l = (AstLeaf) {0};
     return l;
   }
-  return (AstLeaf *) allocate (sizeof (Ast));
+  return (AstLeaf *) allocate (sizeof (AstLeaf));
 }
 
 static void astl_free (AstLeaf * l)
@@ -160,6 +164,7 @@ Ast * ast_pair (Ast * str, Ast * val)
   pair->type = ast_token (jpair);
   pair->child = str, str->next = val;
   assert (str->type == ast_token (jstring) && val->type == ast_token (jvalue));
+  str->parent = val->parent = pair;
   /* maybe you can reuse 'str' as 'pair' */
   return pair; 
 }
@@ -176,8 +181,8 @@ Ast * ast_leaf (char * yytext, int yyleng, int tkn)
 {
   AstLeaf * l = astl ();
   Ast * a = (Ast *) l;
-  l->start = yytext, l->end = yytext + yyleng;
-  assert (tkn);
+  l->token = alloc_str (yytext, yyleng, tkn == ast_token (jstring));
+  assert (ast_is_leaf (tkn));
   a->type = tkn;
   return a;
 }
