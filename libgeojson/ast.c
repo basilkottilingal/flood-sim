@@ -4,65 +4,30 @@
 #include <string.h>
 
 #include "ast.h"
+#include "allocator.h"
 
 /*
-.. Abstract Syntax Tree for (Geo)JSON
+.. Abstract Syntax Tree for JSON
 */
 
 /*fixme : after testing, remove [almost all of the] asserts */
 
-struct Free
-{
-  struct Free * next;
-};
+#define MAGIC 13947582016482937511ULL
 
-static struct Free * ast_fhead = NULL, * astl_fhead = NULL;
-static Allocator dummy = (Allocator) {0};
-static Allocator * allocator = & dummy;
-
-void ast_free_all ()
+Allocator * ast_allocator (Ast * root)
 {
-  while (allocator->next)
-  {
-    void * m = allocator;
-    allocator = allocator->next;
-    free (m);
-  }
-  assert (allocator == &dummy);
-  ast_fhead = astl_fhead = NULL;
+  AstRoot * r = (AstRoot *) root;
+  assert (r->magic == MAGIC && r->alloc);
+  return r->alloc;
 }
 
-void * allocate (size_t s)
+void ast_free (Ast * root)
 {
-  size_t sptr = sizeof (void *), mask = sptr - 1;
-  s = (s + mask) & ~mask;
-  if (allocator->left < s)
-  {
-    #ifndef _AST_PAGE_SIZE_
-    #define _AST_PAGE_SIZE_ (1<<16)
-    #endif
-    assert ("ast.h : alloc () : page limit" && s <= _AST_PAGE_SIZE_);
-    char * m = malloc (_AST_PAGE_SIZE_);
-    assert ("ast.h : alloc ()" && m);
-    memset (m, 0, _AST_PAGE_SIZE_);
-    Allocator * old = allocator;
-    allocator = (Allocator *) m;
-    
-    size_t salloc = (sizeof (Allocator) + mask) & ~mask;
-    *allocator = (Allocator) 
-      {
-        .mem  = m + salloc,
-        .next = old,
-        .left = (size_t) _AST_PAGE_SIZE_ - salloc
-      };
-  }
-  char * m = allocator->mem;
-  allocator->left -= s;
-  allocator->mem  += s;
-  return m;
+  if (root)
+    allocator_free (ast_allocator (root));
 }
 
-static char * alloc_str (const char * yytext, int yyleng, int is_string)
+static char * alloc_str (Allocator * alloc, const char * yytext, int yyleng, int is_string)
 {
   if (is_string)
   {
@@ -70,61 +35,41 @@ static char * alloc_str (const char * yytext, int yyleng, int is_string)
     yyleng -= 2;
     yytext += 1; 
   }
-  char * s = allocate (yyleng + 1);
+  char * s = allocate (alloc, yyleng + 1);
   memcpy (s, yytext, yyleng);
   s [yyleng] = '\0';
   return s;
 }
 
-static Ast * ast ()
+static inline Ast * ast (Allocator * alloc)
 {
-  if (ast_fhead)
-  {
-    Ast * a = (Ast *) ast_fhead;
-    ast_fhead = ast_fhead->next;
-    *a = (Ast) {0};
-    return a;
-  }
-  return (Ast *) allocate (sizeof (Ast));
+  return allocate (alloc, sizeof (Ast));
 }
 
-static void ast_free (Ast * a)
+static inline Ast * astr (Allocator * alloc)
 {
-  struct Free * f = (struct Free *) a;
-  f->next = ast_fhead;
-  ast_fhead = f;
+  AstRoot * r = allocate (alloc, sizeof (AstRoot));
+  r->alloc = alloc;
+  r->magic = MAGIC;
+  return (Ast *) r;
 }
 
-static AstLeaf * astl ()
+static inline AstLeaf * astl (Allocator * alloc)
 {
-  if (astl_fhead)
-  {
-    AstLeaf * l = (AstLeaf *) astl_fhead;
-    astl_fhead = astl_fhead->next;
-    *l = (AstLeaf) {0};
-    return l;
-  }
-  return (AstLeaf *) allocate (sizeof (AstLeaf));
+  return allocate (alloc, sizeof (AstLeaf));
 }
 
-static void astl_free (AstLeaf * l)
+Ast * ast_json (Allocator * alloc, Ast * val)
 {
-  struct Free * f = (struct Free *) l;
-  f->next = astl_fhead;
-  astl_fhead = f;
-}
-
-Ast * ast_json (Ast * val)
-{
-  Ast * json = ast ();
+  Ast * json = astr (alloc);
   json->child = val, val->parent = json;
   json->type = ast_token (jjson) ;
   return json;
 }
 
-Ast * ast_val (Ast * a)
+Ast * ast_val (Allocator * alloc, Ast * a)
 {
-  Ast * val = ast ();
+  Ast * val = ast (alloc);
   assert (a);
   a->parent = val;
   val->child = a;
@@ -132,17 +77,17 @@ Ast * ast_val (Ast * a)
   return val;
 }
 
-Ast * ast_obj (Ast * members)
+Ast * ast_obj (Allocator * alloc, Ast * members)
 {
-  Ast * parent = members ? members->parent : ast ();
+  Ast * parent = members ? members->parent : ast (alloc);
   assert (parent);
   parent->type = ast_token (jobject);
   return parent;
 }
 
-Ast * ast_append (Ast * prev, Ast * a)
+Ast * ast_append (Allocator * alloc, Ast * prev, Ast * a)
 {
-  Ast * parent =  prev ? prev->parent : ast ();
+  Ast * parent =  prev ? prev->parent : ast (alloc);
   assert (parent && a);
   a->parent = parent;
   if (prev)
@@ -158,9 +103,9 @@ Ast * ast_append (Ast * prev, Ast * a)
   return a;
 }
 
-Ast * ast_pair (Ast * str, Ast * val)
+Ast * ast_pair (Allocator * alloc, Ast * str, Ast * val)
 {
-  Ast * pair = ast ();
+  Ast * pair = ast (alloc);
   pair->type = ast_token (jpair);
   pair->child = str, str->next = val;
   assert (str->type == ast_token (jstring) && val->type == ast_token (jvalue));
@@ -169,19 +114,19 @@ Ast * ast_pair (Ast * str, Ast * val)
   return pair; 
 }
 
-Ast * ast_array (Ast * elements)
+Ast * ast_array (Allocator * alloc, Ast * elements)
 {
-  Ast * parent = elements ? elements->parent : ast ();
+  Ast * parent = elements ? elements->parent : ast (alloc);
   assert (parent);
   parent->type = ast_token (jarray);
   return parent;
 }
 
-Ast * ast_leaf (char * yytext, int yyleng, int tkn)
+Ast * ast_leaf (Allocator * alloc, char * yytext, int yyleng, int tkn)
 {
-  AstLeaf * l = astl ();
+  AstLeaf * l = astl (alloc);
   Ast * a = (Ast *) l;
-  l->token = alloc_str (yytext, yyleng, tkn == ast_token (jstring));
+  l->token = alloc_str (alloc, yytext, yyleng, tkn == ast_token (jstring));
   assert (ast_is_leaf (tkn));
   a->type = tkn;
   return a;

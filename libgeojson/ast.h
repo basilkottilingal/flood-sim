@@ -1,7 +1,8 @@
 #ifndef _GEOJSON_PARSER_AST_H_
 #define _GEOJSON_PARSER_AST_H_
 
-  #include <stdlib.h>
+  #include <stdint.h>
+  #include "allocator.h"
 
   typedef struct Ast
   {
@@ -9,21 +10,23 @@
     struct Ast * parent;
     struct Ast * next;
     int type;
-    int yylineno;
+    int n;
   } Ast;
 
   typedef struct
   {
     Ast a;
     char * token;
+    int yylineno;
+    int yycolno;
   } AstLeaf;
 
-  typedef struct Allocator
+  typedef struct AstRoot
   {
-    char * mem;
-    struct Allocator * next;
-    size_t left;
-  } Allocator;
+    Ast a;
+    Allocator * alloc;
+    uint64_t magic;
+  } AstRoot;
 
   /* in order to avoid circular dependency, we set ast.h as the root
   .. [and thus avoid dependency on lexer/parser definitions]. so we
@@ -47,13 +50,13 @@
   #define ast_is_leaf(tkn) (tkn < 256)
 
   /* APIs */
-  void * allocate (size_t s);
-  void   ast_free_all ();
-  Ast *  ast_json   (Ast * val);
-  Ast *  ast_val    (Ast * );
-  Ast *  ast_obj    (Ast * members);
-  Ast *  ast_pair   (Ast * str, Ast * val);
-  Ast *  ast_array  (Ast * elements);
-  Ast *  ast_append (Ast *, Ast *);
-  Ast *  ast_leaf   (char * yyText,int yyLen, int tkn);
+  Ast *  ast_json   (Allocator *, Ast * val);
+  Ast *  ast_val    (Allocator *, Ast * );
+  Ast *  ast_obj    (Allocator *, Ast * members);
+  Ast *  ast_pair   (Allocator *, Ast * str, Ast * val);
+  Ast *  ast_array  (Allocator *, Ast * elements);
+  Ast *  ast_append (Allocator *, Ast *, Ast *);
+  Ast *  ast_leaf   (Allocator *, char * yyText,int yyLen, int tkn);
+  Allocator * ast_allocator (Ast * root);
+  void   ast_free   (Ast * root);
 #endif

@@ -28,8 +28,8 @@
 
 #include "json.tab.h"
 #include "ast.h"
-#define YY_DECL   int yylex (YYSTYPE * lvalp)
-#define AST(TKN)  *lvalp = ast_leaf (yytext, yyleng, ast_token (TKN)); return TKN
+#define YY_DECL   int yylex (YYSTYPE * lvalp, Allocator * alloc)
+#define AST(TKN)  *lvalp = ast_leaf (alloc, yytext, yyleng, ast_token (TKN)); return TKN
 
 
 # line 36 "lexer.h"
@@ -782,3 +782,5 @@ YY_DECL
 
 # line 27 "json.l"
 
+
+#undef AST

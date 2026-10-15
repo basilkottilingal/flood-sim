@@ -7,8 +7,8 @@
 
 #include "json.tab.h"
 #include "ast.h"
-#define YY_DECL   int yylex (YYSTYPE * lvalp)
-#define AST(TKN)  *lvalp = ast_leaf (yytext, yyleng, ast_token (TKN)); return TKN
+#define YY_DECL   int yylex (YYSTYPE * lvalp, Allocator * alloc)
+#define AST(TKN)  *lvalp = ast_leaf (alloc, yytext, yyleng, ast_token (TKN)); return TKN
 
 %}
 
@@ -24,3 +24,5 @@ null                                            { AST (jnull); }
 .                                               { fprintf (stderr, "\nerror : %s", yytext); }
 
 %%
+
+#undef AST

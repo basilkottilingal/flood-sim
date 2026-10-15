@@ -6,14 +6,14 @@ class LRU
   .. Create a hash map for insert/probing. when map size reaches
   .. 'max' it evicts
   */
-  constructor(max)
+  constructor (max)
   {
     this.max = max;
     this.map = new Map();
   }
 
      
-  get(k)
+  get (k)
   {
     if (!this.map.has(k))
       return undefined;
@@ -23,7 +23,7 @@ class LRU
     return v;
   }
 
-  set(k, v, onEvict)
+  set (k, v, onEvict)
   {
     this.map.set(k, v);
     if (this.map.size > this.max) 

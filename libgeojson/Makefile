@@ -1,4 +1,4 @@
-DEPS :=
+DEPS := alloc
 include ../lib.mk
 
 lxr: json.l

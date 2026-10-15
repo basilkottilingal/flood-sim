@@ -18,7 +18,9 @@
 
 %define api.pure full
 %define api.value.type {Ast *}
-%parse-param { Ast ** json }
+%parse-param {Ast ** json}
+%parse-param {Allocator * alloc}
+%lex-param   {Allocator * alloc}
 
 %{
 
@@ -45,12 +47,12 @@
 #include "lexer.h"
 
 /* forward declaration of functions declared in the lexer */
-extern int yylex (YYSTYPE *);
+extern int yylex (Ast **, Allocator *);
 extern int yylineno;
 extern int yycolno;
 
 /* error handling */
-void yyerror (Ast **, const char *s);
+void yyerror (Ast **, Allocator *, const char *s);
 
 %}
 %token jtrue jfalse jnull jstring jnumber
@@ -58,41 +60,41 @@ void yyerror (Ast **, const char *s);
 %%
 
 jjson
-    : jvalue                  {*json = $$ = ast_json ($1);}
+    : jvalue                  {*json = $$ = ast_json (alloc, $1);}
     ;
 
 jvalue
-    : jobject                 {$$ = ast_val ($1); }
-    | jarray                  {$$ = ast_val ($1); }
-    | jstring                 {$$ = ast_val ($1); }
-    | jnumber                 {$$ = ast_val ($1); }
-    | jtrue                   {$$ = ast_val ($1); }
-    | jfalse                  {$$ = ast_val ($1); }
-    | jnull                   {$$ = ast_val ($1); }
+    : jobject                 {$$ = ast_val (alloc, $1); }
+    | jarray                  {$$ = ast_val (alloc, $1); }
+    | jstring                 {$$ = ast_val (alloc, $1); }
+    | jnumber                 {$$ = ast_val (alloc, $1); }
+    | jtrue                   {$$ = ast_val (alloc, $1); }
+    | jfalse                  {$$ = ast_val (alloc, $1); }
+    | jnull                   {$$ = ast_val (alloc, $1); }
     ;
 
 jobject
-    : '{' '}'                 {$$ = ast_obj (NULL);}
-    | '{' jmembers '}'        {$$ = ast_obj ($2);}
+    : '{' '}'                 {$$ = ast_obj (alloc, NULL);}
+    | '{' jmembers '}'        {$$ = ast_obj (alloc, $2);}
     ;
 
 jmembers
-    : jpair                   {$$ = ast_append (NULL, $1);}
-    | jmembers ',' jpair      {$$ = ast_append ($1, $3);}
+    : jpair                   {$$ = ast_append (alloc, NULL, $1);}
+    | jmembers ',' jpair      {$$ = ast_append (alloc, $1, $3);}
     ;
 
 jpair
-    : jstring ':' jvalue      {$$ = ast_pair ($1, $3);}
+    : jstring ':' jvalue      {$$ = ast_pair (alloc, $1, $3);}
     ;
 
 jarray
-    : '[' ']'                 {$$ = ast_array (NULL);}
-    | '[' jelements ']'       {$$ = ast_array ($2);}
+    : '[' ']'                 {$$ = ast_array (alloc, NULL);}
+    | '[' jelements ']'       {$$ = ast_array (alloc, $2);}
     ;
 
 jelements
-    : jvalue                  {$$ = ast_append (NULL, $1);}
-    | jelements ',' jvalue    {$$ = ast_append ($1, $3);}
+    : jvalue                  {$$ = ast_append (alloc, NULL, $1);}
+    | jelements ',' jvalue    {$$ = ast_append (alloc, $1, $3);}
     ;
 
 %%
@@ -100,9 +102,10 @@ jelements
 #include "json.tab.h"
 
 /* Error handling routine called automatically by Yacc on syntax error */
-void yyerror (Ast ** j, const char *s)
+void yyerror (Ast ** a, Allocator * alloc, const char *s)
 {
-  (void) j;
+  (void) a;
+  (void) alloc;
   fprintf(stderr, "JSON Syntax Error: %s at line %d\n", s, yylineno);
 }
 
@@ -126,7 +129,7 @@ int main (void)
 {
   printf("Parsing JSON input...\n");
   Ast * json = NULL;
-  if (yyparse(&json) == 0)
+  if (yyparse(&json, allocator ()) == 0)
   {
     printf ("Result: Valid JSON document!\n");
     assert (json);
@@ -137,5 +140,7 @@ int main (void)
     return 1;
   }
   lxr_clean ();
+  if (json)
+    ast_free (json);
 }
 #endif

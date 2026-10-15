@@ -13,6 +13,10 @@ int main (int argc, const char ** argv)
 {
   assert (argc >= 3);
   GeoJSON g;
-  geojson (argv [1], &g, argv [2]); 
-  ast_free_all ();
+  if (geojson (argv [1], &g, argv [2]))
+  {
+    printf ("cannot find parse geojson");
+    exit (-1);
+  }
+  ast_free (g.tree);
 }
