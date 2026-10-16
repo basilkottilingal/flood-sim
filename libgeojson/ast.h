@@ -59,4 +59,5 @@
   Ast *  ast_leaf   (Allocator *, char * yyText,int yyLen, int tkn);
   Allocator * ast_allocator (Ast * root);
   void   ast_free   (Ast * root);
+  void   ast_print  (Ast * root);
 #endif
