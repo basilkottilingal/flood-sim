@@ -9,13 +9,15 @@ int main (int argc, const char ** argv)
 {
   /*
   .. $ make json.parse.s && ./json.parse.s ../libgeojson/test.json
+  .. $ make json.parse.s && ./json.parse.s < ../libgeojson/test.json
   */
 
   fprintf(stderr, "Parsing JSON input...\n");
   Ast * json = NULL;
-  if (argc > 1)
-    yyparse_open_file (argv [1]);
-  if (yyparse (&json, allocator ()) == 0)
+  int y =
+    argc > 1 ? yyparse_file (&json, argv [1]) :
+               yyparse (&json, allocator ());
+  if (!y)
   {
     fprintf (stderr, "Result: Valid JSON document!\n");
     assert (json);
@@ -25,7 +27,5 @@ int main (int argc, const char ** argv)
     exit (-1);
   }
   ast_print (json);
-  yyparse_close_file ();
-  if (json)
-    ast_free (json);
+  ast_free (json);
 }

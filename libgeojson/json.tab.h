@@ -57,13 +57,10 @@ extern int yydebug;
   .. the lexer is thus called via parser (json.tab.h)
   */
 
-  /* call before yyparse () */
-  void yyparse_open_file (const char * file);
+  int yyparse_file (Ast ** root, const char * file);
+  int yyparse_text (Ast ** root, const char * text);
 
-  /* can be called to clean the lexer buffer and fclose () the source */
-  void yyparse_close_file ();
-
-#line 67 "json.tab.h"
+#line 64 "json.tab.h"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE

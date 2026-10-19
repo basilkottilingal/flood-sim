@@ -102,10 +102,12 @@ static char * find_tag (Ast * prop, const char * tag)
 int geojson (const char * json_file, GeoJSON * gj, const char * uniqueTag)
 {
   /* parse & create AST */
-  yyparse_open_file (json_file);
-  Allocator * ast_alloc = allocator ();
-  yyparse (&gj->tree, ast_alloc);
-  yyparse_close_file ();
+  if (yyparse_file (&gj->tree, json_file))
+    return -1;
+  Ast * root = gj->tree;
+
+  /* reusing the ast allocator */
+  Allocator * alloc = ast_allocator (root);
 
   /* count the number of geometry features */ 
   int nf = 0;
@@ -124,7 +126,7 @@ int geojson (const char * json_file, GeoJSON * gj, const char * uniqueTag)
 
   /* create a hashtable */
   GJHashTable * idx = &gj->hashtable; 
-  index_init (ast_alloc, idx, nf);
+  index_init (alloc, idx, nf);
 
   /* locate tag in the "properties" and add the tag Id to hashtable */
   a = gj->tree;
@@ -152,7 +154,7 @@ int geojson (const char * json_file, GeoJSON * gj, const char * uniqueTag)
         *gj = (GeoJSON) {0};
         return -1;
       }
-      index_add (ast_alloc, idx, a, tag_id);
+      index_add (alloc, idx, a, tag_id);
       a = a->parent, depth--;
       break;
     }

@@ -1,6 +1,8 @@
 
-  /*
-  Table based lexer generator, made by Ahmed Basil KOTTILINGAL
+/*
+  Table based lexer auto-generated using the lexer generator
+  [https://github.com/basilkottilingal/lexer].
+
 
   Copyright (C) [2026] [Ahmed Basil KOTTILINGAL]
 
@@ -17,7 +19,7 @@
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-  */
+*/
 
 # line 2 "json.l"
 /*
@@ -32,7 +34,7 @@
 #define AST(TKN)  *lvalp = ast_leaf (alloc, yytext, yyleng, ast_token (TKN)); return TKN
 
 
-# line 36 "lexer.h"
+# line 38 "lexer.h"
 
 /*
 .. Equivalence classes for alphabets in [0x00, 0xFF] are
@@ -740,7 +742,7 @@ YY_DECL
           break;
 
 
-# line 744 "lexer.h"
+# line 746 "lexer.h"
 
         case lxr_eof_accept :
           lxr_bptr = lxr_start;

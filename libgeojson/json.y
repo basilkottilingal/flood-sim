@@ -9,11 +9,8 @@
   .. the lexer is thus called via parser (json.tab.h)
   */
 
-  /* call before yyparse () */
-  void yyparse_open_file (const char * file);
-
-  /* can be called to clean the lexer buffer and fclose () the source */
-  void yyparse_close_file ();
+  int yyparse_file (Ast ** root, const char * file);
+  int yyparse_text (Ast ** root, const char * text);
 }
 
 %define api.pure full
@@ -109,19 +106,33 @@ void yyerror (Ast ** a, Allocator * alloc, const char *s)
   fprintf(stderr, "JSON Syntax Error: %s at line %d\n", s, yylineno);
 }
 
-void yyparse_open_file (const char * f)
+int yyparse_file (Ast ** root, const char * json_file)
 {
   /* in absence of calling, lexer will assume stdin as the source */
-  lxr_source (f);
+  lxr_source (json_file);
+  Allocator * alloc = allocator ();
+  int y = yyparse (root, alloc);
+  lxr_clean ();
+  if (y)
+  {
+    fprintf (stderr, "\njson parse failed.\n freeing allocator");
+    allocator_free (alloc);
+  }
+  return y;
 }
 
-void yyparse_close_file ()
+int yyparse_text (Ast ** root, const char * json)
 {
-  /*
-  .. warning : will clean all the token buffers. recommend
-  .. a copy of tokens (may use strdup (yytext)) while creating AST
-  */
+  lxr_read_bytes (json, strlen (json), 1);
+  Allocator * alloc = allocator ();
+  int y = yyparse (root, alloc);
   lxr_clean ();
+  if (y)
+  {
+    fprintf (stderr, "\njson parse failed.\n freeing allocator");
+    allocator_free (alloc);
+  }
+  return y;
 }
 
 #ifdef JSON_PARSER_TESTING
@@ -129,7 +140,7 @@ int main (void)
 {
   printf("Parsing JSON input...\n");
   Ast * json = NULL;
-  if (yyparse(&json, allocator ()) == 0)
+  if ( !yyparse(&json, allocator ()) )
   {
     printf ("Result: Valid JSON document!\n");
     assert (json);

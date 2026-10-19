@@ -67,7 +67,7 @@
 
 
 /* First part of user prologue.  */
-#line 25 "json.y"
+#line 22 "json.y"
 
 
 /*
@@ -537,8 +537,8 @@ static const yytype_int8 yytranslate[] =
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
 static const yytype_int8 yyrline[] =
 {
-       0,    63,    63,    67,    68,    69,    70,    71,    72,    73,
-      77,    78,    82,    83,    87,    91,    92,    96,    97
+       0,    60,    60,    64,    65,    66,    67,    68,    69,    70,
+      74,    75,    79,    80,    84,    88,    89,    93,    94
 };
 #endif
 
@@ -1119,103 +1119,103 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* jjson: jvalue  */
-#line 63 "json.y"
+#line 60 "json.y"
                               {*json = yyval = ast_json (alloc, yyvsp[0]);}
 #line 1125 "json.tab.c"
     break;
 
   case 3: /* jvalue: jobject  */
-#line 67 "json.y"
+#line 64 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1131 "json.tab.c"
     break;
 
   case 4: /* jvalue: jarray  */
-#line 68 "json.y"
+#line 65 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1137 "json.tab.c"
     break;
 
   case 5: /* jvalue: jstring  */
-#line 69 "json.y"
+#line 66 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1143 "json.tab.c"
     break;
 
   case 6: /* jvalue: jnumber  */
-#line 70 "json.y"
+#line 67 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1149 "json.tab.c"
     break;
 
   case 7: /* jvalue: jtrue  */
-#line 71 "json.y"
+#line 68 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1155 "json.tab.c"
     break;
 
   case 8: /* jvalue: jfalse  */
-#line 72 "json.y"
+#line 69 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1161 "json.tab.c"
     break;
 
   case 9: /* jvalue: jnull  */
-#line 73 "json.y"
+#line 70 "json.y"
                               {yyval = ast_val (alloc, yyvsp[0]); }
 #line 1167 "json.tab.c"
     break;
 
   case 10: /* jobject: '{' '}'  */
-#line 77 "json.y"
+#line 74 "json.y"
                               {yyval = ast_obj (alloc, NULL);}
 #line 1173 "json.tab.c"
     break;
 
   case 11: /* jobject: '{' jmembers '}'  */
-#line 78 "json.y"
+#line 75 "json.y"
                               {yyval = ast_obj (alloc, yyvsp[-1]);}
 #line 1179 "json.tab.c"
     break;
 
   case 12: /* jmembers: jpair  */
-#line 82 "json.y"
+#line 79 "json.y"
                               {yyval = ast_append (alloc, NULL, yyvsp[0]);}
 #line 1185 "json.tab.c"
     break;
 
   case 13: /* jmembers: jmembers ',' jpair  */
-#line 83 "json.y"
+#line 80 "json.y"
                               {yyval = ast_append (alloc, yyvsp[-2], yyvsp[0]);}
 #line 1191 "json.tab.c"
     break;
 
   case 14: /* jpair: jstring ':' jvalue  */
-#line 87 "json.y"
+#line 84 "json.y"
                               {yyval = ast_pair (alloc, yyvsp[-2], yyvsp[0]);}
 #line 1197 "json.tab.c"
     break;
 
   case 15: /* jarray: '[' ']'  */
-#line 91 "json.y"
+#line 88 "json.y"
                               {yyval = ast_array (alloc, NULL);}
 #line 1203 "json.tab.c"
     break;
 
   case 16: /* jarray: '[' jelements ']'  */
-#line 92 "json.y"
+#line 89 "json.y"
                               {yyval = ast_array (alloc, yyvsp[-1]);}
 #line 1209 "json.tab.c"
     break;
 
   case 17: /* jelements: jvalue  */
-#line 96 "json.y"
+#line 93 "json.y"
                               {yyval = ast_append (alloc, NULL, yyvsp[0]);}
 #line 1215 "json.tab.c"
     break;
 
   case 18: /* jelements: jelements ',' jvalue  */
-#line 97 "json.y"
+#line 94 "json.y"
                               {yyval = ast_append (alloc, yyvsp[-2], yyvsp[0]);}
 #line 1221 "json.tab.c"
     break;
@@ -1414,7 +1414,7 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 100 "json.y"
+#line 97 "json.y"
 
 
 #include "json.tab.h"
@@ -1427,19 +1427,32 @@ void yyerror (Ast ** a, Allocator * alloc, const char *s)
   fprintf(stderr, "JSON Syntax Error: %s at line %d\n", s, yylineno);
 }
 
-void yyparse_open_file (const char * f)
+int yyparse_file (Ast ** root, const char * json_file)
 {
-  /* in absence of calling, lexer will assume stdin as the source */
-  lxr_source (f);
+  lxr_source (json_file);
+  Allocator * alloc = allocator ();
+  int y = yyparse (root, alloc);
+  lxr_clean ();
+  if (y)
+  {
+    fprintf (stderr, "\njson parse failed.\n freeing allocator");
+    allocator_free (alloc);
+  }
+  return y;
 }
 
-void yyparse_close_file ()
+int yyparse_text (Ast ** root, const char * json)
 {
-  /*
-  .. warning : will clean all the token buffers. recommend
-  .. a copy of tokens (may use strdup (yytext)) while creating AST
-  */
+  lxr_read_bytes (json, strlen (json), 1);
+  Allocator * alloc = allocator ();
+  int y = yyparse (root, alloc);
   lxr_clean ();
+  if (y)
+  {
+    fprintf (stderr, "\njson parse failed.\n freeing allocator");
+    allocator_free (alloc);
+  }
+  return y;
 }
 
 #ifdef JSON_PARSER_TESTING
@@ -1447,7 +1460,7 @@ int main (void)
 {
   printf("Parsing JSON input...\n");
   Ast * json = NULL;
-  if (yyparse(&json) == 0)
+  if ( !yyparse(&json, allocator ()) )
   {
     printf ("Result: Valid JSON document!\n");
     assert (json);
@@ -1458,5 +1471,7 @@ int main (void)
     return 1;
   }
   lxr_clean ();
+  if (json)
+    ast_free (json);
 }
 #endif
