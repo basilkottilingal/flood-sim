@@ -2,7 +2,7 @@ NAME     := $(notdir $(CURDIR))
 LIB      := $(NAME).a
 SRCS     := $(wildcard *.c)
 OBJS     := $(SRCS:.c=.o)
-CFLAGS   ?= -Wall -Wextra -O2 -D_XOPEN_SOURCE=700
+CFLAGS   += -Wall -Wextra -O2 -D_XOPEN_SOURCE=700
 
 DEPS     ?=
 CPPFLAGS += -I. $(foreach d,$(DEPS),-I../lib$(d))
