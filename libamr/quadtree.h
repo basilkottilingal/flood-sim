@@ -15,9 +15,20 @@
   #define QAMR_MAX_DEPTH 20
   #endif
 
+  typedef enum
+  {
+    QUADTREE_NODE_LEAF   = 1,
+    QUADTREE_NODE_PRUNED = 2,
+    QUADTREE_NODE_CHILDREN = 4,
+  } QuadtreeNodeFlags;
+
+  #define quadtree_has_children(c)           \
+    ((c->flags & QUADTREE_NODE_CHILDREN) &&  \
+     !(c->flags & QUADTREE_NODE_PRUNED))
+
   typedef struct
   {
-    int i, j, l;
+    int i, j, level;
   } Index;
 
   typedef struct
@@ -31,7 +42,7 @@
   .. scalar_size in {sizeof (double), sizeof (int), sizeof (uint8_t)}
   */
   
-  int quadtree (int depthmax, int blocksize);
-  int scalar   (size_t scalar_size);
+  int  quadtree (int depthmax, int blocksize);
+  void quadtree_shift_translate (double x0, double y0, double h);
   
 #endif

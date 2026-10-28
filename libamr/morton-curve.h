@@ -3,36 +3,38 @@
 
   #include <assert.h>
   #include "quadtree.h"
+  #include "array.h"
 
-  #define QAMR_MAX_STACK_SIZE ( (1 << dimension) * QAMR_MAX_DEPTH )
-
-  #define qamr_morton_start(i,j,l) do {                     \
-    Index stack [QAMR_MAX_STACK_SIZE ];                     \
-    depth = 0;                                              \
+  #define quadtree_morton_start(i,j,l) do {                 \
+    struct _index_ {int i, j, level, visited;}              \
+      stack [ (1 << dimension) * QAMR_MAX_DEPTH + 1];       \
+    int depth = 0, v = 0;                                   \
+    stack [depth++] = (struct _index_) {i, j, l, 0};        \
     do                                                      \
     {                                                       \
-      assert (depth < Q_AMR_MAX_STACK_SIZE);                \
-      while (qamr_child (i, j, l))                          \
+      while (!v && quadtree_has_children (i, j, l))         \
       {                                                     \
         i *= 2, j *= 2, l++;                                \
-        stack [depth++] = (Index) {i+1, j+1, l};            \
-        stack [depth++] = (Index) {i+1, j,   l};            \
-        stack [depth++] = (Index) {i,   j+1, l};            \
-        stack [depth++] = (Index) {i,   j,   l};            \
+        assert (l <= QAMR_MAX_DEPTH);                       \
+        stack [depth-1].visited = 1;                        \
+        stack [depth++] = (struct _index_) {i+1, j+1, l, 0};\
+        stack [depth++] = (struct _index_) {i+1, j,   l, 0};\
+        stack [depth++] = (struct _index_) {i,   j+1, l, 0};\
+        stack [depth++] = (struct _index_) {i,   j,   l, 0};\
       }                                                     \
       /* do something here */
-  #define qamr_morton_end(i,j,l)                            \
-                                                            \
+  #define quadtree_morton_end(i,j,l)                        \
       if (depth) {                                          \
         depth--;                                            \
         i = stack [depth].i;                                \
         j = stack [depth].j;                                \
-        l = stack [depth].l;                                \
+        l = stack [depth].level;                            \
+        v = stack [depth].visited;                          \
       }                                                     \
-    } while (depth)                                         \
+    } while (depth);                                        \
   } while (0)
 
   /* API */
-  IndexStack qamr_block_indices ();
+  Array * quadtree_block_indices ();
   
 #endif
