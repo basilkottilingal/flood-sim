@@ -1,5 +1,5 @@
-#include "coordinates.h"
-#include "geodetic.h"
+#include "libgeotiff/coordinates.h"
+#include "libgeotiff/geodetic.h"
 
 #include <stdio.h>
 

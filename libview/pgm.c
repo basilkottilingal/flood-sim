@@ -1,5 +1,6 @@
-#include "grid.h"
 #include "pgm.h"
+
+#include "liballoc/grid.h"
 
 #include <stdlib.h>
 #include <stdio.h>

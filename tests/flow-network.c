@@ -31,10 +31,10 @@
 .. virtual reading
 */
 
-#include "filemap.h"
-#include "geotiff.h"
-#include "pgm.h"
-#include "flow.h"
+#include "libgeotiff/filemap.h"
+#include "libgeotiff/geotiff.h"
+#include "libview/pgm.h"
+#include "libflow-network/flow.h"
 
 int main (int argc, char **argv)
 {

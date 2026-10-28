@@ -4,10 +4,9 @@
 #include <stdint.h>
 #include <assert.h>
 
-#include "ast.h"
-#include "json.tab.h"
-#include "allocator.h"
 #include "geojson.h"
+
+#include "liballoc/allocator.h"
 
 static uint64_t hash (const char *s)
 {

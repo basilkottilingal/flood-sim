@@ -2,6 +2,7 @@
 #define _GEOJSON_H_
 
   #include "ast.h"
+  #include "json.tab.h"
 
   typedef struct GJHashEntry
   {

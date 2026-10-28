@@ -30,9 +30,9 @@
 .. virtual reading
 */
 
-#include "filemap.h"
-#include "geotiff.h"
-#include "pgm.h"
+#include "libgeotiff/filemap.h"
+#include "libgeotiff/geotiff.h"
+#include "libview/pgm.h"
 
 int main (int argc, char **argv)
 {

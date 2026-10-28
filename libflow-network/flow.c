@@ -1,11 +1,12 @@
 #include "flow.h"
 #include "flow-utils.h"
-#include "geotiff.h"
-#include "filemap.h"
 #include "min-heap.h"
-#include "pgm.h"
-#include "grid.h"
 #include "fifo.h"
+
+#include "libgeotiff/geotiff.h"
+#include "libgeotiff/filemap.h"
+#include "libview/pgm.h"
+#include "liballoc/grid.h"
 
 #include <stdio.h>
 #include <float.h>

@@ -1,7 +1,7 @@
 #ifndef _VIEW_PGM_H
 #define _VIEW_PGM_H
 
-  #include "grid.h"
+  #include "liballoc/grid.h"
 
   #define pgm(g,out) pgm_general ((void *) g, out, grid_data(g))
   int pgm_grayscale  (double **, const char * out, int width, int height);

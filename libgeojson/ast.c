@@ -4,7 +4,8 @@
 #include <string.h>
 
 #include "ast.h"
-#include "allocator.h"
+
+#include "liballoc/allocator.h"
 
 /*
 .. Abstract Syntax Tree for JSON

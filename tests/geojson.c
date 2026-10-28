@@ -1,5 +1,4 @@
-#include "geojson.h"
-#include "ast.h"
+#include "libgeojson/geojson.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -21,7 +21,8 @@
 #include "geotiff.h"
 #include "geodetic.h"
 #include "parse.h"
-#include "grid.h"
+
+#include "liballoc/grid.h"
 
 #define error(e)                          filemap_close_all(e)
 #define is_available(cur_,end_,reqd_)                        \

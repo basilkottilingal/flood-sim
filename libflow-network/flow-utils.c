@@ -1,6 +1,6 @@
 #include "flow-utils.h"
-#include "pgm.h"
-#include "grid.h"
+#include "libview/pgm.h"
+#include "liballoc/grid.h"
 
 #include <stdio.h>
 #include <float.h>

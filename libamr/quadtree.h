@@ -10,9 +10,8 @@
   #define dimension    2
   #define BLOCK_AMR    1
   #define _2_1_BALANCE 1
-
   #ifndef QAMR_MAX_DEPTH
-  #define QAMR_MAX_DEPTH 20
+  # define QAMR_MAX_DEPTH 20
   #endif
 
   typedef enum
@@ -22,27 +21,27 @@
     QUADTREE_NODE_CHILDREN = 4,
   } QuadtreeNodeFlags;
 
-  #define quadtree_has_children(c)           \
-    ((c->flags & QUADTREE_NODE_CHILDREN) &&  \
-     !(c->flags & QUADTREE_NODE_PRUNED))
-
   typedef struct
   {
-    int i, j, level;
-  } Index;
+    int flags;
+    int pid;
+  } QuadtreeNode;
 
-  typedef struct
-  {
-    Index * indices;
-    int n;
-  } IndexStack;
+  #if dimension == 1
+  # define quadtree_node(i,l)  
+  #endif
+  #define quadtree_has_children(n)           \
+    ((n->flags & QUADTREE_NODE_CHILDREN) &&  \
+     !(n->flags & QUADTREE_NODE_PRUNED))
+
 
   /* API (s)
   .. assumes depthmax in [1, 20), blocksize in 2 ^ {1, 2,.., 10},
   .. scalar_size in {sizeof (double), sizeof (int), sizeof (uint8_t)}
   */
-  
+
   int  quadtree (int depthmax, int blocksize);
   void quadtree_shift_translate (double x0, double y0, double h);
+  QuadtreeNode quadtree_node (int i, int j, int level); 
   
 #endif

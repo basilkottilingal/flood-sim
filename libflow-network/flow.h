@@ -1,7 +1,8 @@
 #ifndef _FLOW_NETWORK_FLOW_H_
 #define _FLOW_NETWORK_FLOW_H_
 
-  #include "geotiff.h"
+  #include "libgeotiff/geotiff.h"
+
   #include "min-heap.h"
 
   typedef enum

@@ -2,7 +2,6 @@
 #define _GEOTIFF_H_
 
   #include "coordinates.h"
-  #include "pgm.h"
 
   typedef struct
   {

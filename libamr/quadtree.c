@@ -25,12 +25,12 @@ static int add_children (int i, int j, int k, int level)
   assert (level >= G(depthmin) && level <= G(depth));
   if (level == G(depthmax))
     return 0;
-  
+
+  return 1;    
 }
 
 static int grid_init (int depth, int depthmax, int blockdepth)
 {
-  G(nb) = 
 }
 
 void quadtree (int depth, int depthmax, int blockdepth)

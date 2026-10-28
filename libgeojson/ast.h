@@ -2,7 +2,7 @@
 #define _GEOJSON_PARSER_AST_H_
 
   #include <stdint.h>
-  #include "allocator.h"
+  #include "liballoc/allocator.h"
 
   typedef struct Ast
   {
