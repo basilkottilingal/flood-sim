@@ -1,3 +1,23 @@
+/*
+ * Portions of this file are derived from basilik <https://basilisk.fr/>
+ * Copyright (C) [2019-2026] [Stephane Popinet et al]
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Modifications Copyright (C) [2026] [Ahmed Basil KOTTILINGAL]
+ */
+
 /**
 # Multi-dimensional arrays using virtual memory
 
@@ -68,8 +88,8 @@ void mem_destroy (Memindex m, int len)
 
 /**
 The `mem_assign()` function assigns a (pointer) value to a given index. */
-
-#define mymap(len) mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+#define mymap(len) \
+  mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
 
 #if dimension == 1
 void mem_assign (Memindex m, int i, int len, void * b)
@@ -115,7 +135,7 @@ static int mem_free1d (char ** const b, const int i, int len)
  // Assumes 4k pages = 512*sizeof(char *) = 512*8 = 4096
   char ** const start = b + (i/512)*512;
   if (len > 512) len = 512;
-  for (char ** j = start; j < start + len /*min(len, 512)*/; j++)
+  for (char ** j = start; j < start + len; j++)
     if (*j)
       return 0;
   if (madvise (start, 4096, MADV_DONTNEED))

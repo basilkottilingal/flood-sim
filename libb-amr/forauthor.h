@@ -55,3 +55,31 @@ Mapping (octree traversal) [note that z > y > x in the axis preference in this m
 can be mapped by
 f(x) = (0x5AFAC >> (3*x)) & 7 
 
+
+  #if dimension == 1
+    # define IJK           i
+    # define IJKargs       i
+    # define IJKarray      [i]
+  #elif dimension == 2
+    # define IJK           i, j
+    # define IJKargs       i, int j
+    # define IJKarray      [i][j]
+  #else
+    # define IJK           i, j, k
+    # define IJKargs       i, int j, int k
+    # define IJKarray      [i][j][k]
+  #endif
+  #define IJKL             IJK, level
+  #define IJKLargs         IJKargs, int level
+  #define IJKEXPAND(...)   __VA_ARGS__
+  #define tree_is_allocated(IJKL)                                             \
+    (level <= BAMR_MAX_DEPTH && mem_allocated (&grid_info_layers [level], IJK))
+  #define tree_node(IJKL)                                                     \
+    ((BAMRNode *) mem_data (&grid_info_layers [level], IJK))
+  #define mem_data(m,IJK) ((m)->b IJKarray)
+  #define tree_has_children(n)                                                 \
+    ((n->flags & BAMR_NODE_CHILDREN) &&                                        \
+     !(n->flags & BAMR_NODE_PRUNED))
+  #define BAMR_NODE_ENV()                                                     \
+      BAMRNode * node = tree_is_allocated (IJKL) ?  tree_node (IJKL) : NULL;   \
+      (void) node

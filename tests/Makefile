@@ -1,10 +1,10 @@
 CC        = gcc
-LIBS     ?= flow-network geotiff view geojson alloc # Order in the dependency order
+LIBS     ?= flow-network geotiff view geojson b-amr alloc # Order in the dependency order
 CPPFLAGS += -I. -I../
           #$(addprefix -I../lib,$(LIBS))
 LDFLAGS  += $(addprefix -L../lib,$(LIBS))
 LDLIBS   += $(addprefix -l,$(LIBS))
-CFLAGS   ?= -Wall -Wextra -g
+CFLAGS   += -Wall -Wextra -g
 
 TESTS    := $(wildcard *.c)
 SERIAL   := $(TESTS:.c=.s)
