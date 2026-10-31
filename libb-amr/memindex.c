@@ -77,13 +77,13 @@ void mem_destroy (Memindex m, int len)
       for (int j = 0; j < len; j++)
 	if (m->b[i][j])
 	  munmap (m->b[i][j], m->len*sizeof (char *));
-  #endif // dimension > 2
+  #endif
       munmap (m->b[i], m->len*sizeof (char *));
     }
-#endif // dimension > 1
+#endif
   if (m->b)
     munmap (m->b, m->len*sizeof (char *));
-  free (m);
+  /* free (m); */
 }
 
 /**

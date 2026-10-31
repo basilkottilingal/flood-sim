@@ -5,7 +5,8 @@
 #include <assert.h>
 
 #include "tree.h"
-#include "liballoc/allocator.h"
+#include "morton-curve.h"
+#include "liballoc/reuse-allocator.h"
 
 #define G(x) grid_info_##x
 
@@ -20,12 +21,36 @@ static int G(depthmin) = 1;   /* min {level of leaves}            */
 static int G(depthmax) = 1;   /* max depth forced by user         */
 static int G(blockdepth) = 1; /* number of cells in block 2^(2*blockdepth) */
 struct _Memindex G(layers) [BAMR_MAX_DEPTH + 1] = {0};
-static Allocator * alloc_node  = NULL;
-static Allocator * alloc_block = NULL;
+static RAllocator * alloc_node  = NULL;
+static RAllocator * alloc_block = NULL;
+
+void tree_destroy ()
+{
+  for (int l=0; l<= G(depth); ++l)
+  {
+    Memindex m = & G(layers) [l];
+    mem_destroy (m, m->len);
+    *m = (struct _Memindex) {0};
+  }
+  G(x0) = 0.;
+  G(y0) = 0.;
+  G(z0) = 0.;
+  G(h0) = 1.;
+  G(nb) = 1;
+  G(nlb) = 1;
+  G(depth) = 1;
+  G(depthmin) = 1;
+  G(depthmax) = 1;
+  G(blockdepth) = 1;
+  r_allocator_free (alloc_node);
+  r_allocator_free (alloc_block);
+  alloc_node  = NULL;
+  alloc_block = NULL;
+}
 
 BAMRNode * allocate_node ()
 {
-  BAMRNode * node = allocate (alloc_node, sizeof (BAMRNode));
+  BAMRNode * node = r_allocate (alloc_node);
   // fixme : 1) allocator. 2)append scalars 3) allocate block
   return node;
 }
@@ -126,8 +151,8 @@ static int grid_init (int depthmax, int blockdepth)
   }
   Memindex m = & G (layers) [level];
   m->len = 1 << level; // fixme : add ghost layer
-  alloc_node = allocator ();
-  alloc_block = allocator (); //fixme : use a large allocator
+  alloc_node = r_allocator (sizeof (BAMRNode));
+  alloc_block = r_allocator (1); //fixme : use a large allocator
   node = allocate_node ();
   node->flags |= BAMR_NODE_LEAF;
   mem_assign (m, i, j, m->len, node);

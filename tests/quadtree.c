@@ -11,5 +11,5 @@ int main ()
     printf("\n[%d %d %d]", i, j, level);
     fflush (stdout);
   } morton_end ();
-  
+  tree_destroy ();  
 }

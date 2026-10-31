@@ -105,5 +105,6 @@
   */
   int  tree (int depthmax, int blocksize);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
+  void tree_destroy ();
   
 #endif

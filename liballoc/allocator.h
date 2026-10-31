@@ -7,6 +7,8 @@
 
   #include <stdlib.h>
 
+  /* suitable for arena allocator */
+
   typedef struct Allocator
   {
     char * mem;
