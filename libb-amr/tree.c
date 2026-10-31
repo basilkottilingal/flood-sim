@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #include "tree.h"
+#include "scalar.h"
 #include "morton-curve.h"
 #include "liballoc/reuse-allocator.h"
 
@@ -22,44 +23,20 @@ static int G(depthmax) = 1;   /* max depth forced by user         */
 static int G(blockdepth) = 1; /* number of cells in block 2^(2*blockdepth) */
 struct _Memindex G(layers) [BAMR_MAX_DEPTH + 1] = {0};
 static RAllocator * alloc_node  = NULL;
-static RAllocator * alloc_block = NULL;
 
-void tree_destroy ()
-{
-  for (int l=0; l<= G(depth); ++l)
-  {
-    Memindex m = & G(layers) [l];
-    mem_destroy (m, m->len);
-    *m = (struct _Memindex) {0};
-  }
-  G(x0) = 0.;
-  G(y0) = 0.;
-  G(z0) = 0.;
-  G(h0) = 1.;
-  G(nb) = 1;
-  G(nlb) = 1;
-  G(depth) = 1;
-  G(depthmin) = 1;
-  G(depthmax) = 1;
-  G(blockdepth) = 1;
-  r_allocator_free (alloc_node);
-  r_allocator_free (alloc_block);
-  alloc_node  = NULL;
-  alloc_block = NULL;
-}
-
-BAMRNode * allocate_node ()
-{
-  BAMRNode * node = r_allocate (alloc_node);
-  // fixme : 1) allocator. 2)append scalars 3) allocate block
-  return node;
-}
-
-#if dimension == 2
-#define is_node()   tree_is_allocated (i,j,level)
-#define node_print(msg)                        \
-  printf("%s : [%d %d %d]", msg, i,j,level);   \
-  fflush (stdout);
+#define bb           ( (1 << G (blockdepth)) + 2 * GHOSTS)
+#if dimension == 1
+# define blockwidth()     bb
+# error ("not implemented");
+#elif dimension == 2
+# define blockwidth()     (bb * bb)
+# define is_node()   tree_is_allocated (i,j,level)
+# define node_print(msg)                       \
+    printf("%s : [%d %d %d]", msg, i,j,level); \
+    fflush (stdout);
+#else
+# define blockwidth()     (bb * bb * bb)
+# error ("not implemented");
 #endif
 
 #define is_leaf()   (node->flags & BAMR_NODE_LEAF)
@@ -98,6 +75,36 @@ BAMRNode * allocate_node ()
   }
 #undef dummy
 
+void tree_destroy ()
+{
+  scalar_free_all ();
+  for (int l=0; l<= G(depth); ++l)
+  {
+    Memindex m = & G(layers) [l];
+    mem_destroy (m, m->len);
+    *m = (struct _Memindex) {0};
+  }
+  G(x0) = 0.;
+  G(y0) = 0.;
+  G(z0) = 0.;
+  G(h0) = 1.;
+  G(nb) = 1;
+  G(nlb) = 1;
+  G(depth) = 1;
+  G(depthmin) = 1;
+  G(depthmax) = 1;
+  G(blockdepth) = 1;
+  r_allocator_free (alloc_node);
+  alloc_node = NULL;
+}
+
+BAMRNode * allocate_node ()
+{
+  BAMRNode * node = r_allocate (alloc_node);
+  scalar_blocks (&node->s);
+  return node;
+}
+
 static int add_children (int IJKLargs)
 {
   assert (level >= G(depthmin));
@@ -108,13 +115,13 @@ static int add_children (int IJKLargs)
   node->flags |= BAMR_NODE_HAS_CHILDREN;
   if (level == G (depth))
     G (depth)++;
-  Memindex m = & G (layers) [level + 1];
-  int len = 1 << (level+1);
+  Memindex m = & G (layers) [++level];
+  int len = 1 << level;
   children ()
   {
     assert (!node);
     node = allocate_node ();
-    mem_assign (m, i, j, len, node);
+    mem_assign (m, IJK, len, node);
   } end ();
   //fixme : depthmin is not updated
   return 1;    
@@ -143,21 +150,25 @@ static int grid_init (int depthmax, int blockdepth)
   G (nlb)        = 1;
   G (nb)         = 1;
 
-  int i = 0, j = 0, level = 0;
+  int i = 0, j = 0, k = 0, level = 0;
+  (void) j; (void) k;
+
   BAMR_NODE_ENV ();
   if (node) {
     exit (-1);
     //fixme : rather warning : reinitializing grid;
   }
+
   Memindex m = & G (layers) [level];
   m->len = 1 << level; // fixme : add ghost layer
-  alloc_node = r_allocator (sizeof (BAMRNode));
-  alloc_block = r_allocator (1); //fixme : use a large allocator
+
+  alloc_node    = r_allocator (sizeof (BAMRNode));
+  scalar_init (blockwidth());
+
   node = allocate_node ();
   node->flags |= BAMR_NODE_LEAF;
-  mem_assign (m, i, j, m->len, node);
-  divide_leaf (i, j, level);
-  //fixme 
+  mem_assign (m, IJK, m->len, node);
+  divide_leaf (IJKL);
   return 0;
 }
 
@@ -165,6 +176,7 @@ int tree (int depthmax, int blockdepth)
 {
   depthmax = depthmax > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH :
     depthmax <= 0 ? 1 : depthmax;
+  // fixme : tune better
   blockdepth = blockdepth < 4 ? 4 : blockdepth > 10 ? 10 : blockdepth;
   grid_init (depthmax, blockdepth);
   return 1;

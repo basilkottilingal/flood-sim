@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <assert.h>
 
@@ -12,6 +13,11 @@ RAllocator * r_allocator (size_t s)
   size_t headsize = (sizeof (RAllocator) + mask) & ~mask;
 
   s = (s + mask)  & ~mask;
+  if (s > MB/2)
+  {
+    fprintf (stderr, "\n%zd > .5 MB", s);
+    fflush (stderr);
+  }
   assert (s <= MB/2 ); /* cannot meet huge demands > .5MB */
   size_t blocksize = s * 1024 + headsize;
   if (blocksize > MB)

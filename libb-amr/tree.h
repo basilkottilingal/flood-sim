@@ -14,6 +14,9 @@
   #ifndef BAMR_MAX_DEPTH
   #define BAMR_MAX_DEPTH   20
   #endif
+  #ifndef GHOSTS
+    # define GHOSTS 2
+  #endif
 
   #if dimension == 1
     # define IJK           i
@@ -52,6 +55,7 @@
   {
     int flags;
     int pid;
+    void *** s;
   } BAMRNode;
 
   #if dimension == 1
@@ -87,17 +91,20 @@
     #define BAMR_NODE_ENV()                                      \
         BAMRNode * node = tree_is_allocated (i, level) ?         \
           tree_node (i, level) : NULL;                           \
-        (void) node
+        void *** sblocks = node ? node->s : NULL;                \
+        (void) sblocks;
   #elif dimension == 2
     #define BAMR_NODE_ENV()                                      \
         BAMRNode * node = tree_is_allocated (i, j, level) ?      \
           tree_node (i, j, level) : NULL;                        \
-        (void) node
+        void *** sblocks = node ? node->s : NULL;                \
+        (void) sblocks;
   #else
     #define BAMR_NODE_ENV()                                      \
         BAMRNode * node = tree_is_allocated (i, j, k, level) ?   \
           tree_node (i, j, k, level) : NULL;                     \
-        (void) node
+        void *** sblocks = node ? node->s : NULL;                \
+        (void) sblocks;
   #endif
 
   /*
