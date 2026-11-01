@@ -1,0 +1,45 @@
+BUILD  := build
+LEXER  ?= lexer
+CFLAGS ?= -g -O1
+CFLAGS += -std=gnu11 -Wall -Wextra -D_GNU_SOURCE -Isrc -I$(BUILD)
+
+OBJS := $(BUILD)/driver.o $(BUILD)/translate.o $(BUILD)/ast.o \
+        $(BUILD)/allocator.o $(BUILD)/symbol.o \
+        $(BUILD)/parser.tab.o $(BUILD)/lexer.yy.o
+
+$(BUILD)/cwrap: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(BUILD)/parser.tab.c $(BUILD)/parser.tab.h: src/parser.y | $(BUILD)
+	bison -Wall -d -o $(BUILD)/parser.tab.c $<
+
+$(BUILD)/lexer.yy.c: src/lexer.l | $(BUILD)
+	flex -o $@ $<
+
+# Table-based lexer, -d for debug. Not linked into cwrap until it implements
+# lexer.h, which needs a reentrant mode: it keeps its state in static variables.
+$(BUILD)/lexer.c: src/lexer.l | $(BUILD)
+	$(LEXER) -d -o $@ $<
+
+lexer: $(BUILD)/lexer.c
+
+# Placeholder lexer: generated code is not held to our warning flags.
+$(BUILD)/lexer.yy.o: $(BUILD)/lexer.yy.c $(BUILD)/parser.tab.h src/ast.h src/lexer.h src/symbol.h src/allocator.h
+	$(CC) $(CFLAGS) -Wno-unused-function -Wno-sign-compare -c -o $@ $<
+
+$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/symbol.h src/allocator.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/symbol.h src/allocator.h src/translate.h $(BUILD)/parser.tab.h | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD):
+	mkdir -p $@
+
+test: $(BUILD)/cwrap
+	sh tests/run.sh
+
+clean:
+	rm -rf $(BUILD)
+
+.PHONY: test clean lexer
