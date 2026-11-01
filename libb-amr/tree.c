@@ -154,13 +154,14 @@ static int grid_init (int depthmax, int blockdepth)
   (void) j; (void) k;
 
   BAMR_NODE_ENV ();
-  if (node) {
+  if (node)
+  {
+    perror ("cannot reinit grid"); 
     exit (-1);
-    //fixme : rather warning : reinitializing grid;
   }
 
   Memindex m = & G (layers) [level];
-  m->len = 1 << level; // fixme : add ghost layer
+  m->len = 1 << level;
 
   alloc_node    = r_allocator (sizeof (BAMRNode));
   scalar_init (blockwidth());

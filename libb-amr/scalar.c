@@ -94,7 +94,15 @@ scalar scalar_new ()
 
 void scalar_free (scalar s)
 {
-  /* fixme : free allocated blocks */
+  morton_start (0, 0, 0) {
+    assert (sblocks [s/w] && sblocks [s/w][s%w]);
+    r_allocate_free (alloc_block, sblocks [s/w][s%w]);
+    /*
+    .. fixme : may optimize by freeing sblocks [s/w] if possible
+    .. if (mayfree)
+    ..    r_allocate_free (alloc_scalars, sblocks [s/w]);
+    */
+  } morton_end ();
   pushbit ((int) s);
 }
 
@@ -128,6 +136,9 @@ void scalar_free_all ()
   alloc_scalars  = NULL;
 }
 
+/*
+.. scalar_blocks () are called new nodes are created [inside tree.c]
+*/
 void scalar_blocks (void **** sblocksp)
 {
   assert (alloc_block && alloc_scalars);
@@ -139,6 +150,9 @@ void scalar_blocks (void **** sblocksp)
   } end ();
 }
 
+/*
+.. scalar_blocks_free () are called nodes are destroyed [inside tree.c]
+*/
 void scalar_blocks_free (void *** sblocks)
 {
   assert (sblocks && alloc_scalars && alloc_block);
