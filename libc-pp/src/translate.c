@@ -32,14 +32,15 @@ int translate_file (const char *in_path, const char *out_path)
 {
   FILE *in, *out;
   struct ast *root;
-  int failed;
+  int failed, parsed;
 
   in = fopen (in_path, "r");
   if (!in) {
     fprintf (stderr, "cwrap: %s: %s\n", in_path, strerror (errno));
-    return 1;
+    return TRANSLATE_FAILED;
   }
   root = parse_file (in);
+  parsed = root != NULL;
   if (root) {
     transform (root);
     if (getenv ("CWRAP_DUMP_AST"))
@@ -51,7 +52,7 @@ int translate_file (const char *in_path, const char *out_path)
     fprintf (stderr, "cwrap: %s: %s\n", out_path, strerror (errno));
     fclose (in);
     free_arena ();
-    return 1;
+    return TRANSLATE_FAILED;
   }
   if (root)
     ast_emit (root, out);
@@ -61,7 +62,7 @@ int translate_file (const char *in_path, const char *out_path)
   failed |= ferror (out);
   if (fclose (out) != 0 || failed) {
     fprintf (stderr, "cwrap: %s: write failed\n", out_path);
-    return 1;
+    return TRANSLATE_FAILED;
   }
-  return 0;
+  return parsed ? TRANSLATE_OK : TRANSLATE_SKIPPED;
 }

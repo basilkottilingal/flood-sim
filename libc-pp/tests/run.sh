@@ -123,5 +123,48 @@ printf 'typedef int T;\nvoid f (void) { int T; T * 2; T = 1; }\n' > hide.c
 "$cwrap" -w -c hide.c -o hide.o
 check "an inner variable hides a typedef" $?
 
+"$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
+gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]
+check "-translate -o writes C that gcc can build" $?
+
+"$cwrap" -translate -DVALUE=42 hello.c > hello.out
+cmp -s hello.tr.c hello.out
+check "-translate writes to standard output without -o" $?
+
+rm -f flags.o flags
+printf 'int main (void) { return 0; }\n' > flags.c
+"$cwrap" -translate -c -O2 -Wall -lm missing.o flags.c > flags.out &&
+  [ -s flags.out ] && [ ! -e flags.o ] && [ ! -e flags ]
+check "-translate disregards compile and link flags" $?
+
+"$cwrap" -translate a.c b.c > both.out
+grep -q 'int twice(int x)' both.out && grep -q 'int main(void)' both.out
+check "-translate takes several files on standard output" $?
+
+"$cwrap" -translate a.c b.c -o both.c 2> both.log
+[ $? -ne 0 ] && grep -q 'multiple files' both.log
+check "-translate refuses -o with several files" $?
+
+"$cwrap" -translate -x c a.c 2> x.log
+[ $? -ne 0 ] && grep -q 'cannot be used with -x' x.log
+check "-translate refuses flags it cannot honour" $?
+
+"$cwrap" -translate stray.c > stray.out 2> stray2.log
+[ $? -eq 1 ] && grep -q 'not translated' stray2.log && grep -q '@' stray.out
+check "-translate fails on code that does not parse, and still writes it" $?
+
+printf 'int kept = 1;\n' > keep.c
+cp keep.c keep.orig
+ln -s keep.c keep.link
+for args in '-translate keep.c -o keep.c' '-translate keep.c -o ./keep.c' \
+            '-translate keep.c -o keep.link' '-c keep.c -o keep.c' \
+            '-S keep.c -o keep.c' 'keep.c -o keep.c'; do
+  "$cwrap" $args 2> keep.log
+  [ $? -ne 0 ] && grep -q 'is the same as output file' keep.log &&
+    cmp -s keep.c keep.orig
+  check "cwrap $args leaves the source alone" $?
+  cp keep.orig keep.c
+done
+
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

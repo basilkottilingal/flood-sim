@@ -5,6 +5,10 @@
  * then links as gcc would. Linemarkers survive the middle step, so diagnostics
  * and debug info point at the original source.
  *
+ * With -translate it stops after translate_file () and writes the C to -o, or to
+ * standard output. Nothing is compiled or linked, so flags for those stages have
+ * no effect. (Not -emit, which gcc reads as -e mit, an entry symbol.)
+ *
  *   CWRAP_CC       compiler to run (default gcc)
  *   CWRAP_VERBOSE  print each command
  *   CWRAP_KEEP     keep the intermediate directory
@@ -15,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -133,6 +138,16 @@ static char *stem (const char *path)
   return s;
 }
 
+/* By device and inode, so that ./foo.c and links count as foo.c. An output that
+ * does not exist yet cannot be an input. */
+static int same_file (const char *a, const char *b)
+{
+  struct stat sa, sb;
+
+  return stat (a, &sa) == 0 && stat (b, &sb) == 0
+         && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
 static int run (struct vec *cmd)
 {
   pid_t pid;
@@ -175,6 +190,24 @@ static void cleanup (void)
   run (&rm);
 }
 
+/* Standard output may be a file we must not reopen and truncate, as it gets one
+ * translation after another. So each one goes through the intermediate file. */
+static void write_to_stdout (const char *path)
+{
+  FILE *in = fopen (path, "r");
+  char buf[1 << 16];
+  size_t n;
+
+  if (!in)
+    die ("%s: %s", path, strerror (errno));
+  while ((n = fread (buf, 1, sizeof (buf), in)) > 0)
+    if (fwrite (buf, 1, n, stdout) != n)
+      die ("write failed: %s", strerror (errno));
+  if (ferror (in) || fflush (stdout) != 0)
+    die ("write failed: %s", strerror (errno));
+  fclose (in);
+}
+
 static void add_stage_flags (struct vec *cmd, const struct item *items,
                              size_t n, enum stage stage)
 {
@@ -206,7 +239,9 @@ int main (int argc, char **argv)
   struct item *items = calloc ((size_t)argc, sizeof(*items));
   size_t nitems = 0, nsrc = 0;
   const char *output = NULL, *dep_file = NULL;
+  const char *not_with_translate = NULL;
   int compile_only = 0, assemble_only = 0, passthrough = 0;
+  int translate_only = 0, untranslated = 0;
   int want_deps = 0, have_dep_target = 0;
   int other_sources = 0, nobj = 0;
 
@@ -230,6 +265,7 @@ int main (int argc, char **argv)
 
       if (strcmp (a, "-") == 0) {
         passthrough = 1;
+        not_with_translate = a;
       } else if (strcmp (ext, "c") == 0) {
         it->src = a;
         nsrc++;
@@ -240,6 +276,10 @@ int main (int argc, char **argv)
       it->stage = ST_LINK;
       it->flag = a;
       nitems++;
+      continue;
+    }
+    if (strcmp (a, "-translate") == 0) {
+      translate_only = 1;
       continue;
     }
     if (strcmp (a, "-c") == 0) {
@@ -256,8 +296,11 @@ int main (int argc, char **argv)
       output = argv[i];
       continue;
     }
-    if (IN_LIST (a, passthrough_flags))
+    if (IN_LIST (a, passthrough_flags)) {
       passthrough = 1;
+      if (strcmp (a, "-E") != 0)
+        not_with_translate = a;
+    }
     if (strcmp (a, "-MD") == 0 || strcmp (a, "-MMD") == 0)
       want_deps = 1;
 
@@ -312,11 +355,24 @@ int main (int argc, char **argv)
     }
   }
 
+  if (translate_only) {
+    if (not_with_translate)
+      die ("-translate cannot be used with %s", not_with_translate);
+    if (nsrc == 0)
+      die ("-translate needs a .c file");
+    if (output && nsrc > 1)
+      die ("-o cannot be used with -translate and multiple files");
+    passthrough = compile_only = assemble_only = 0;
+  }
   if (passthrough || nsrc == 0) {
     argv[0] = (char *)cc;
     execvp (cc, argv);
     die ("%s: %s", cc, strerror (errno));
   }
+  /* gcc would refuse this, but it only ever sees our intermediate files. */
+  for (size_t i = 0; output && i < nitems; i++)
+    if (items[i].src && same_file (items[i].src, output))
+      die ("input file '%s' is the same as output file", items[i].src);
   if ((compile_only || assemble_only) && output && nsrc > 1)
     die ("-o cannot be used with -c or -S and multiple files");
   if ((compile_only || assemble_only) && other_sources)
@@ -337,7 +393,9 @@ int main (int argc, char **argv)
     s = stem (it->src);
     pre = fmt ("%s/%d-%s.i", tmpdir, nobj, s);
     post = fmt ("%s/%d-%s.t.i", tmpdir, nobj, s);
-    if (compile_only || assemble_only)
+    if (translate_only)
+      result = output ? output : s;
+    else if (compile_only || assemble_only)
       result = output ? output
                       : fmt ("%s.%s", s, assemble_only ? "s" : "o");
     else
@@ -369,7 +427,17 @@ int main (int argc, char **argv)
     if (rc)
       return rc;
 
-    if (translate_file (pre, post))
+    if (translate_only) {
+      rc = translate_file (pre, output ? output : post);
+      if (rc == TRANSLATE_FAILED)
+        return 1;
+      untranslated |= rc == TRANSLATE_SKIPPED;
+      if (!output)
+        write_to_stdout (post);
+      continue;
+    }
+
+    if (translate_file (pre, post) == TRANSLATE_FAILED)
       return 1;
 
     push (&comp, cc);
@@ -385,6 +453,9 @@ int main (int argc, char **argv)
       return rc;
   }
 
+  /* No gcc follows to judge what did not parse, so say so here. */
+  if (translate_only)
+    return untranslated;
   if (compile_only || assemble_only)
     return 0;
 

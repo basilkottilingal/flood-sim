@@ -34,7 +34,7 @@ static const char *const builtin_types[] = {
   "__float80", "__float128", "__ibm128",
   "_Float16", "_Float32", "_Float64", "_Float128",
   "_Float32x", "_Float64x", "_Float128x",
-  "_Decimal32", "_Decimal64", "_Decimal128",
+  "_Decimal32", "_Decimal64", "_Decimal128"
 };
 
 static unsigned hash_name (const char *name)
