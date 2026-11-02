@@ -25,8 +25,8 @@
 
 struct ast;
 
-/* Returns the tree, or NULL after a syntax error. The tree is in the arena, so
- * it lasts until free_arena (). */
+/* Returns the tree, or NULL if the input does not parse, after a warning. The
+ * tree is in the arena, so it lasts until free_arena (). */
 struct ast *parse_file (FILE *in);
 }
 
@@ -35,7 +35,7 @@ struct ast *parse_file (FILE *in);
 
 #include "allocator.h"
 #include "ast.h"
-#include "symbol.h"
+#include "scope.h"
 
 #define N(KIND, ...)                                                    \
   ast_node (AST_##KIND, (struct ast *[]) { __VA_ARGS__ },               \
@@ -43,15 +43,12 @@ struct ast *parse_file (FILE *in);
 
 int yylex (YYSTYPE *lvalp, int *lineno, yyscan_t yyscanner);
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct symtab *syms, const char *msg);
+                     struct scope_table *scopes, const char *msg);
 
-static void declare (struct symtab *syms, const struct ast *declarator,
-                     int is_type)
+static void declare (struct scope_table *scopes, const struct ast *declarator,
+                     enum scope_kind kind)
 {
-  const char *name = ast_declared_name (declarator);
-
-  if (name)
-    sym_define (syms, name, is_type);
+  scope_add (scopes, ast_declared_name (declarator), kind, declarator);
 }
 }
 
@@ -60,7 +57,7 @@ static void declare (struct symtab *syms, const struct ast *declarator,
 %define api.token.prefix {T_}
 %define parse.error verbose
 %param {int *lineno} {yyscan_t yyscanner}
-%parse-param {struct ast **root} {struct symtab *syms}
+%parse-param {struct ast **root} {struct scope_table *scopes}
 
 %expect 0
 
@@ -115,20 +112,20 @@ function_definition:
 /* Markers: empty rules that run an action at that point of a rule. They reduce
  * before the next token is read, or with one that cannot be a name, so the
  * lexer sees their effect on the very next identifier. */
-specs_done:      %empty           { sym_specifiers_done (syms); $$ = NULL; } ;
-enter_function:  %empty           { scope_resume_params (syms); $$ = NULL; } ;
-leave_function:  %empty           { scope_pop (syms); $$ = NULL; } ;
-open_scope:      %empty           { scope_push (syms); $$ = NULL; } ;
-close_scope:     %empty           { scope_pop (syms); $$ = NULL; } ;
-open_params:     %empty           { scope_push_params (syms); $$ = NULL; } ;
-close_params:    %empty           { scope_pop_params (syms); $$ = NULL; } ;
+specs_done:      %empty           { scope_specifiers_done (scopes); $$ = NULL; } ;
+enter_function:  %empty           { scope_resume_params (scopes); $$ = NULL; } ;
+leave_function:  %empty           { scope_pop (scopes); $$ = NULL; } ;
+open_scope:      %empty           { scope_push (scopes); $$ = NULL; } ;
+close_scope:     %empty           { scope_pop (scopes); $$ = NULL; } ;
+open_params:     %empty           { scope_push_params (scopes); $$ = NULL; } ;
+close_params:    %empty           { scope_pop_params (scopes); $$ = NULL; } ;
 
 /* Declarations */
 
 declaration:
-    decl_specs_typed ';'          { sym_specifiers_reset (syms);
+    decl_specs_typed ';'          { scope_specifiers_reset (scopes);
                                     $$ = N (DECLARATION, $1, $2); }
-  | decl_specs_untyped ';'        { sym_specifiers_reset (syms);
+  | decl_specs_untyped ';'        { scope_specifiers_reset (scopes);
                                     $$ = N (DECLARATION, $1, $2); }
   | decl_specs_typed specs_done init_declarator_list ';'
                                   { $$ = N (DECLARATION, $1, $3, $4); }
@@ -168,7 +165,7 @@ decl_spec_other:
   ;
 
 storage_class:
-    TYPEDEF                       { sym_typedef_seen (syms); $$ = $1; }
+    TYPEDEF                       { scope_typedef_seen (scopes); $$ = $1; }
   | EXTERN
   | STATIC
   | THREAD_LOCAL
@@ -290,9 +287,9 @@ init_declarator:
 
 /* The name is in scope from here, before its initializer. */
 named_declarator:
-    declarator                    { declare (syms, $1, sym_in_typedef (syms));
+    declarator                    { declare (scopes, $1, scope_declaring (scopes));
                                     $$ = $1; }
-  | declarator declarator_attrs   { declare (syms, $1, sym_in_typedef (syms));
+  | declarator declarator_attrs   { declare (scopes, $1, scope_declaring (scopes));
                                     $$ = N (ATTRIBUTED_DECLARATOR, $1, $2); }
   ;
 
@@ -320,9 +317,9 @@ direct_declarator:
   ;
 
 decl_name:
-    IDENTIFIER                    { sym_declarator_named (syms);
+    IDENTIFIER                    { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
-  | TYPE_NAME                     { sym_declarator_named (syms);
+  | TYPE_NAME                     { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
   ;
 
@@ -386,7 +383,7 @@ parameter_declaration:
   | decl_specs_typed abstract_declarator
                                   { $$ = N (PARAMETER, $1, $2); }
   | decl_specs_typed param_declarator opt_attributes
-                                  { declare (syms, $2, 0);
+                                  { declare (scopes, $2, SCOPE_VARIABLE);
                                     $$ = N (PARAMETER, $1, $2, $3); }
   ;
 
@@ -536,7 +533,7 @@ enumerator:
   ;
 
 enumerator_name:
-    any_identifier                { sym_define (syms, ast_token ($1)->text, 0);
+    any_identifier                { scope_add (scopes, ast_token ($1)->text, SCOPE_VARIABLE, $1);
                                     $$ = $1; }
   ;
 
@@ -957,24 +954,24 @@ constant_expression:
 %%
 
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct symtab *syms, const char *msg)
+                     struct scope_table *scopes, const char *msg)
 {
   const struct token *t = lex_last (yyscanner);
 
   (void)lineno;
   (void)root;
-  (void)syms;
-  fprintf (stderr, "%s:%d: error: %s near '%s'\n",
-           t->file, t->line, msg, t->text);
+  (void)scopes;
+  fprintf (stderr, "%s:%d: warning: not translated, leaving this file to gcc: "
+           "%s near '%s'\n", t->file, t->line, msg, t->text);
 }
 
 struct ast *parse_file (FILE *in)
 {
-  struct symtab *syms = symtab_new ();
-  yyscan_t scanner = lex_open (in, syms);
+  struct scope_table *scopes = scope_table_new ();
+  yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
   int lineno = 1;
-  int failed = yyparse (&lineno, scanner, &root, syms);
+  int failed = yyparse (&lineno, scanner, &root, scopes);
 
   lex_close (scanner);
   return failed ? NULL : root;

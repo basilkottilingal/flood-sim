@@ -17,14 +17,14 @@
 #include "ast.h"
 #include "parser.tab.h"
 #include "lexer.h"
-#include "symbol.h"
+#include "scope.h"
 
 #define YY_DECL int yylex (YYSTYPE *lvalp, int *lineno, yyscan_t yyscanner)
 YY_DECL;
 
 struct lexer {
   yyscan_t scanner;
-  struct symtab *syms;
+  struct scope_table *scopes;
   char *trivia;           /* scratch: the only part outside the arena */
   size_t trivia_len, trivia_cap;
   const char *file;
@@ -176,7 +176,7 @@ PFX     (u8|u|U|L)
 "__builtin_offsetof"    { AST (T_BUILTIN_OFFSETOF); }
 "__builtin_types_compatible_p"  { AST (T_BUILTIN_TYPES_COMPATIBLE); }
 
-{ID}                    { AST (sym_is_type (yyextra->syms, yytext)
+{ID}                    { AST (scope_is_type (yyextra->scopes, yytext)
                                ? T_TYPE_NAME : T_IDENTIFIER); }
 {PPNUM}                 { AST (T_CONSTANT); }
 {PFX}?'([^'\\\n]|\\.)+' { AST (T_CONSTANT); }
@@ -225,11 +225,11 @@ PFX     (u8|u|U|L)
 
 %%
 
-yyscan_t lex_open (FILE *in, struct symtab *syms)
+yyscan_t lex_open (FILE *in, struct scope_table *scopes)
 {
   struct lexer *lx = allocate (sizeof (*lx));
 
-  lx->syms = syms;
+  lx->scopes = scopes;
   lx->file = "<input>";
   if (yylex_init_extra (lx, &lx->scanner) != 0)
     abort ();

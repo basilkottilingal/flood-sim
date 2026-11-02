@@ -1,6 +1,7 @@
 #!/bin/sh
 # End-to-end checks of the wrapper. Run from the libc-pp directory: make test
 cwrap=$(pwd)/build/cwrap
+scope_test=$(pwd)/build/scope_test
 tests=$(pwd)/tests
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
@@ -76,8 +77,27 @@ check "-E passes straight through to gcc" $?
 
 printf 'int x = 1 @ 2;\n' > stray.c
 "$cwrap" -c stray.c 2> stray.log
-[ $? -ne 0 ] && grep -q '^stray.c:1: error' stray.log
-check "translator errors point at the original file and line" $?
+[ $? -ne 0 ] && grep -q '^stray.c:1: warning: not translated' stray.log &&
+  grep -q "^stray.c:1:.*error: stray" stray.log
+check "a file that does not parse is left to gcc, which reports it" $?
+
+printf 'int f (a) int a; { return a; }\nint main (void) { return f (0); }\n' > kr.c
+"$cwrap" -w kr.c -o kr 2> kr.log && ./kr
+check "code gcc accepts still builds when the grammar does not cover it" $?
+
+printf 'foo_t x;\n' > undeclared.c
+"$cwrap" -c undeclared.c 2> undeclared.log
+[ $? -ne 0 ] && grep -q 'unknown type name' undeclared.log
+check "gcc reports an undeclared type" $?
+
+printf 'int a;\nchar a;\n' > conflict.c
+"$cwrap" -c conflict.c 2> conflict.log
+[ $? -ne 0 ] && grep -q 'conflicting types' conflict.log &&
+  ! grep -q 'not translated' conflict.log
+check "the scope table accepts a conflict, and gcc reports it" $?
+
+"$scope_test"
+check "scope table unit checks" $?
 
 cp "$tests/grammar.c" grammar.c
 CWRAP_KEEP=1 "$cwrap" -std=gnu11 -w -c grammar.c -o grammar.o 2> keep.log

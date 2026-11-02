@@ -17,7 +17,7 @@
 typedef void *yyscan_t;
 #endif
 
-struct symtab;
+struct scope_table;
 
 struct token {
   int kind;
@@ -28,7 +28,7 @@ struct token {
   int line;
 };
 
-yyscan_t lex_open (FILE *in, struct symtab *syms);
+yyscan_t lex_open (FILE *in, struct scope_table *scopes);
 void lex_close (yyscan_t scanner);
 
 /* The token most recently read, for error messages. */

@@ -4,7 +4,7 @@ CFLAGS ?= -g -O1
 CFLAGS += -std=gnu11 -Wall -Wextra -D_GNU_SOURCE -Isrc -I$(BUILD)
 
 OBJS := $(BUILD)/driver.o $(BUILD)/translate.o $(BUILD)/ast.o \
-        $(BUILD)/allocator.o $(BUILD)/symbol.o \
+        $(BUILD)/allocator.o $(BUILD)/scope.o \
         $(BUILD)/parser.tab.o $(BUILD)/lexer.yy.o
 
 $(BUILD)/cwrap: $(OBJS)
@@ -24,19 +24,23 @@ $(BUILD)/lexer.c: src/lexer.l | $(BUILD)
 lexer: $(BUILD)/lexer.c
 
 # Placeholder lexer: generated code is not held to our warning flags.
-$(BUILD)/lexer.yy.o: $(BUILD)/lexer.yy.c $(BUILD)/parser.tab.h src/ast.h src/lexer.h src/symbol.h src/allocator.h
+$(BUILD)/lexer.yy.o: $(BUILD)/lexer.yy.c $(BUILD)/parser.tab.h src/ast.h src/lexer.h src/scope.h src/allocator.h
 	$(CC) $(CFLAGS) -Wno-unused-function -Wno-sign-compare -c -o $@ $<
 
-$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/symbol.h src/allocator.h
+$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/scope.h src/allocator.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/symbol.h src/allocator.h src/translate.h $(BUILD)/parser.tab.h | $(BUILD)
+$(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h $(BUILD)/parser.tab.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD):
 	mkdir -p $@
 
-test: $(BUILD)/cwrap
+# tests/scope_test.c includes scope.c, to see its free lists.
+$(BUILD)/scope_test: tests/scope_test.c src/scope.c src/scope.h $(BUILD)/allocator.o
+	$(CC) $(CFLAGS) -o $@ tests/scope_test.c $(BUILD)/allocator.o
+
+test: $(BUILD)/cwrap $(BUILD)/scope_test
 	sh tests/run.sh
 
 clean:
