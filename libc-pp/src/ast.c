@@ -50,9 +50,43 @@ struct ast *ast_add (struct ast *parent, struct ast *kid)
   return parent;
 }
 
+struct ast *ast_replace (struct ast *old, struct ast *n)
+{
+  struct ast *parent = old->parent, **link = &parent->child;
+
+  while (*link != old)
+    link = &(*link)->next;
+  *link = n;
+  n->parent = parent;
+  n->next = old->next;
+  if (parent->last == old)
+    parent->last = n;
+  old->parent = old->next = NULL;
+  return old;
+}
+
+struct ast *ast_insert_before (struct ast *pos, struct ast *n)
+{
+  struct ast *parent = pos->parent, **link = &parent->child;
+
+  while (*link != pos)
+    link = &(*link)->next;
+  *link = n;
+  n->parent = parent;
+  n->next = pos;
+  return n;
+}
+
 const struct token *ast_token (const struct ast *n)
 {
   return &((const struct ast_leaf *)n)->tok;
+}
+
+const struct token *ast_first_token (const struct ast *n)
+{
+  while (n->kind != AST_TOKEN)
+    n = n->child;
+  return ast_token (n);
 }
 
 /* The name always comes before a declarator's suffixes, so the first DECL_NAME

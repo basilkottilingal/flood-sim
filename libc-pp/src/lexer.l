@@ -79,6 +79,11 @@ static void directive (struct lexer *lx, int *lineno, const char *s)
   }
 }
 
+static int identifier_kind (const struct lexer *lx, const char *name)
+{
+  return scope_is_type (lx->scopes, name) ? T_TYPE_NAME : T_IDENTIFIER;
+}
+
 /* The leaf for one token, which also takes the trivia gathered before it. */
 static struct ast *leaf (struct lexer *lx, int kind, const char *text, int len,
                          int line)
@@ -176,8 +181,11 @@ PFX     (u8|u|U|L)
 "__builtin_offsetof"    { AST (T_BUILTIN_OFFSETOF); }
 "__builtin_types_compatible_p"  { AST (T_BUILTIN_TYPES_COMPATIBLE); }
 
-{ID}                    { AST (scope_is_type (yyextra->scopes, yytext)
-                               ? T_TYPE_NAME : T_IDENTIFIER); }
+  /* Always a keyword, but for a typedef: the parser takes it as a name too. */
+"foreach"               { AST (scope_is_type (yyextra->scopes, yytext)
+                               ? T_TYPE_NAME : T_FOREACH); }
+
+{ID}                    { AST (identifier_kind (yyextra, yytext)); }
 {PPNUM}                 { AST (T_CONSTANT); }
 {PFX}?'([^'\\\n]|\\.)+' { AST (T_CONSTANT); }
 {PFX}?\"([^"\\\n]|\\.)*\"       { AST (T_STRING); }

@@ -27,7 +27,7 @@ lexer: $(BUILD)/lexer.c
 $(BUILD)/lexer.yy.o: $(BUILD)/lexer.yy.c $(BUILD)/parser.tab.h src/ast.h src/lexer.h src/scope.h src/allocator.h
 	$(CC) $(CFLAGS) -Wno-unused-function -Wno-sign-compare -c -o $@ $<
 
-$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/scope.h src/allocator.h
+$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h $(BUILD)/parser.tab.h | $(BUILD)

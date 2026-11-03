@@ -5,17 +5,16 @@
 
 #include "allocator.h"
 
-typedef struct Allocator
+static struct allocator
 {
   char * mem;
-  struct Allocator * next;
+  struct allocator * next;
   size_t left;
-} Allocator;
+} * alloc = NULL;
 
-static Allocator * alloc = NULL;
 #define mask (size_t) (sizeof (void *) - 1)
 
-void allocator ()
+void allocator_new ()
 {
   char * m = malloc (POOL);
   if (!m)
@@ -24,8 +23,8 @@ void allocator ()
     exit (-1);
   }
   memset (m, 0, POOL);
-  Allocator * a = (Allocator *) m;
-  size_t salloc = (sizeof (Allocator) + mask) & ~mask;
+  struct allocator * a = (struct allocator *) m;
+  size_t salloc = (sizeof (struct allocator) + mask) & ~mask;
   a->mem  = m + salloc;
   a->next = alloc;
   a->left = (size_t) POOL - salloc;
@@ -36,7 +35,7 @@ void free_arena ()
 {
   while (alloc)
   {
-    Allocator * next = alloc->next;
+    struct allocator * next = alloc->next;
     free (alloc);
     alloc = next; 
   }
@@ -51,7 +50,7 @@ void * allocate (size_t s)
       perror ("non practical memory demand");
       exit (-1);
     }
-    allocator ();
+    allocator_new ();
   }
   char * m = alloc->mem;
   alloc->left -= s;

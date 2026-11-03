@@ -40,3 +40,10 @@ Welch, T. "A technique for high-performance data compression." Computer 17.6 (19
   Open source code [Basilisk](basilisk.fr) is used for simulation. 
  
 
+# requirements (or limits) for running the code (which relies onin-built `cwrap`)
+  1. gcc [fixme : update min version requirement]
+  2. c99/c11 (not strict, `cwrap` translator can even pass forward gnu grammars which is a superset of std-c99)
+(K&R funtion definition of C99 won't be parsed)
+  3. `cwrap` : single build or static linking (with possible multiple stages of compilation). Warning : won't support creation of shared libraries
+  4. Linux only. (MacOS can't run yet. 
+  5. Cannot translate to a single native c file if there are multiple compilation stages.

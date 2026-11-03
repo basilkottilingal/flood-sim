@@ -26,16 +26,19 @@
 struct ast;
 
 /* Returns the tree, or NULL if the input does not parse, after a warning. The
- * tree is in the arena, so it lasts until free_arena (). */
-struct ast *parse_file (FILE *in);
+ * tree is in the arena, so it lasts until free_arena (). *rejected is set if the
+ * input must not go on to gcc: the error has then been reported. */
+struct ast *parse_file (FILE *in, int *rejected);
 }
 
 %code {
 #include <stdlib.h>
+#include <string.h>
 
 #include "allocator.h"
 #include "ast.h"
 #include "scope.h"
+#include "translate.h"
 
 #define N(KIND, ...)                                                    \
   ast_node (AST_##KIND, (struct ast *[]) { __VA_ARGS__ },               \
@@ -43,12 +46,32 @@ struct ast *parse_file (FILE *in);
 
 int yylex (YYSTYPE *lvalp, int *lineno, yyscan_t yyscanner);
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct scope_table *scopes, const char *msg);
+                     struct scope_table *scopes, int *rejected, const char *msg);
 
 static void declare (struct scope_table *scopes, const struct ast *declarator,
                      enum scope_kind kind)
 {
   scope_add (scopes, ast_declared_name (declarator), kind, declarator);
+}
+
+/* A file may have foreach loops or something named foreach, not both. Reports
+ * the loop, and returns whether foreach is declared here. */
+static int foreach_declared (const struct scope_table *scopes,
+                             const struct ast *loop)
+{
+  const struct var *name = scope_find (scopes, "foreach");
+  const struct token *t = ast_token (loop);
+
+  if (!name)
+    return 0;
+  fprintf (stderr, "%s:%d: error: foreach loop, but 'foreach' is already "
+           "declared\n", t->file, t->line);
+  if (name->decl) {
+    t = ast_first_token (name->decl);
+    fprintf (stderr, "%s:%d: note: 'foreach' is declared here; rename it to "
+             "use the loop\n", t->file, t->line);
+  }
+  return 1;
 }
 }
 
@@ -57,7 +80,7 @@ static void declare (struct scope_table *scopes, const struct ast *declarator,
 %define api.token.prefix {T_}
 %define parse.error verbose
 %param {int *lineno} {yyscan_t yyscanner}
-%parse-param {struct ast **root} {struct scope_table *scopes}
+%parse-param {struct ast **root} {struct scope_table *scopes} {int *rejected}
 
 %expect 0
 
@@ -67,6 +90,7 @@ static void declare (struct scope_table *scopes, const struct ast *declarator,
 %token ALIGNAS ALIGNOF ATOMIC BOOL COMPLEX GENERIC IMAGINARY NORETURN
 %token STATIC_ASSERT THREAD_LOCAL
 %token ATTRIBUTE EXTENSION ASM TYPEOF INT128 REAL IMAG LABEL AUTO_TYPE
+%token FOREACH
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -79,6 +103,8 @@ static void declare (struct scope_table *scopes, const struct ast *declarator,
 %precedence ELSE
 /* `_Atomic (int)` is a specifier, not the qualifier followed by a declarator. */
 %precedence ATOMIC_QUALIFIER
+/* `foreach (` is a loop or a call, never the name foreach in parentheses. */
+%precedence FOREACH_NAME
 %precedence '('
 
 %%
@@ -263,10 +289,12 @@ opt_attributes:
   ;
 
 /* An identifier where a typedef name means nothing special: tags, members,
- * labels, enumerators. */
+ * labels, enumerators. FOREACH is a name here, in decl_name and in
+ * primary_expression, as the lexer returns it for every use but a typedef. */
 any_identifier:
     IDENTIFIER
   | TYPE_NAME
+  | FOREACH
   ;
 
 /* Declarators */
@@ -320,6 +348,8 @@ decl_name:
     IDENTIFIER                    { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
   | TYPE_NAME                     { scope_declarator_named (scopes);
+                                    $$ = N (DECL_NAME, $1); }
+  | FOREACH                       { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
   ;
 
@@ -654,6 +684,26 @@ iteration_statement:
   | FOR '(' open_scope for_init expression_statement opt_expression ')'
     statement close_scope
                                   { $$ = N (FOR_STATEMENT, $1, $2, $4, $5, $6, $7, $8); }
+  /* The loop variable is declared after the collection, which still means the
+   * outer name in `foreach (v in v)`, and before the body is read. The scope
+   * opens after the `)`, since until `in` this may still be a call. */
+  | FOREACH '(' any_identifier foreach_in IDENTIFIER ')' open_scope
+                                  { if (foreach_declared (scopes, $1)) {
+                                      *rejected = 1;
+                                      YYABORT;
+                                    }
+                                    scope_add (scopes, ast_token ($3)->text, SCOPE_VARIABLE, $3); }
+    statement close_scope
+                                  { $$ = N (FOR_EACH_STATEMENT, $1, $2, $3, $4, $5, $6, $9); }
+  ;
+
+/* in is not a token, so that it stays an ordinary name. */
+foreach_in:
+    any_identifier                { if (strcmp (ast_token ($1)->text, "in") != 0) {
+                                      yyerror (lineno, yyscanner, root, scopes, rejected, "expected 'in'");
+                                      YYERROR;
+                                    }
+                                    $$ = $1; }
   ;
 
 for_init:
@@ -739,6 +789,7 @@ asm_labels:
 
 primary_expression:
     IDENTIFIER
+  | FOREACH %prec FOREACH_NAME
   | CONSTANT
   | string
   | '(' expression ')'            { $$ = N (PAREN_EXPRESSION, $1, $2, $3); }
@@ -788,14 +839,18 @@ postfix_expression:
   | postfix_expression '[' expression ']'
                                   { $$ = N (SUBSCRIPT, $1, $2, $3, $4); }
   | postfix_expression '(' ')'    { $$ = N (CALL, $1, $2, $3); }
+  | FOREACH '(' ')'               { $$ = N (CALL, $1, $2, $3); }
+  | FOREACH '(' argument_list ')' { $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '(' argument_list ')'
                                   { $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '.' any_identifier
                                   { $$ = N (MEMBER, $1, $2, $3); }
   | postfix_expression ARROW any_identifier
                                   { $$ = N (MEMBER, $1, $2, $3); }
-  | postfix_expression INC        { $$ = N (POSTFIX_OP, $1, $2); }
-  | postfix_expression DEC        { $$ = N (POSTFIX_OP, $1, $2); }
+  | postfix_expression INC        { check_scalar_assignment (scopes, $1, $2);
+                                    $$ = N (POSTFIX_OP, $1, $2); }
+  | postfix_expression DEC        { check_scalar_assignment (scopes, $1, $2);
+                                    $$ = N (POSTFIX_OP, $1, $2); }
   | '(' type_name ')' brace_initializer
                                   { $$ = N (COMPOUND_LITERAL, $1, $2, $3, $4); }
   ;
@@ -808,8 +863,10 @@ argument_list:
 
 unary_expression:
     postfix_expression
-  | INC unary_expression          { $$ = N (PREFIX_OP, $1, $2); }
-  | DEC unary_expression          { $$ = N (PREFIX_OP, $1, $2); }
+  | INC unary_expression          { check_scalar_assignment (scopes, $2, $1);
+                                    $$ = N (PREFIX_OP, $1, $2); }
+  | DEC unary_expression          { check_scalar_assignment (scopes, $2, $1);
+                                    $$ = N (PREFIX_OP, $1, $2); }
   | unary_operator cast_expression
                                   { $$ = N (UNARY_OP, $1, $2); }
   | LOGICAL_AND any_identifier    { $$ = N (LABEL_ADDRESS, $1, $2); }
@@ -924,7 +981,8 @@ conditional_expression:
 assignment_expression:
     conditional_expression
   | unary_expression assignment_operator assignment_expression
-                                  { $$ = N (ASSIGNMENT, $1, $2, $3); }
+                                  { check_scalar_assignment (scopes, $1, $2);
+                                    $$ = N (ASSIGNMENT, $1, $2, $3); }
   ;
 
 assignment_operator:
@@ -954,24 +1012,28 @@ constant_expression:
 %%
 
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct scope_table *scopes, const char *msg)
+                     struct scope_table *scopes, int *rejected, const char *msg)
 {
   const struct token *t = lex_last (yyscanner);
 
   (void)lineno;
   (void)root;
   (void)scopes;
+  (void)rejected;
   fprintf (stderr, "%s:%d: warning: not translated, leaving this file to gcc: "
            "%s near '%s'\n", t->file, t->line, msg, t->text);
 }
 
-struct ast *parse_file (FILE *in)
+struct ast *parse_file (FILE *in, int *rejected)
 {
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
   int lineno = 1;
-  int failed = yyparse (&lineno, scanner, &root, scopes);
+  int failed;
+
+  *rejected = 0;
+  failed = yyparse (&lineno, scanner, &root, scopes, rejected);
 
   lex_close (scanner);
   return failed ? NULL : root;

@@ -29,6 +29,7 @@
   X (LABEL_LIST) X (LABELED_STATEMENT) X (NAMED_LABEL) X (CASE_LABEL)         \
   X (DEFAULT_LABEL) X (EXPRESSION_STATEMENT) X (IF_STATEMENT)                 \
   X (SWITCH_STATEMENT) X (WHILE_STATEMENT) X (DO_STATEMENT) X (FOR_STATEMENT) \
+  X (FOR_EACH_STATEMENT)                                                      \
   X (GOTO_STATEMENT) X (CONTINUE_STATEMENT) X (BREAK_STATEMENT)               \
   X (RETURN_STATEMENT) X (ASM_STATEMENT) X (ASM_QUALIFIERS)                   \
   X (ASM_OPERANDS) X (ASM_OPERAND) X (ASM_CLOBBERS) X (ASM_LABELS)            \
@@ -74,7 +75,16 @@ struct ast *ast_node (enum ast_kind kind, struct ast **kids, size_t n);
 /* Appends kid to parent, unless kid is NULL. Returns parent. */
 struct ast *ast_add (struct ast *parent, struct ast *kid);
 
+/* Puts n where old is under its parent, and returns old, now detached. */
+struct ast *ast_replace (struct ast *old, struct ast *n);
+
+/* Puts n just before pos, under pos's parent. Returns n. */
+struct ast *ast_insert_before (struct ast *pos, struct ast *n);
+
 const struct token *ast_token (const struct ast *n);
+
+/* The first token under n, or n's own if it is a leaf. */
+const struct token *ast_first_token (const struct ast *n);
 
 /* Text of the name a declarator declares, or NULL if it has none. */
 const char *ast_declared_name (const struct ast *declarator);
