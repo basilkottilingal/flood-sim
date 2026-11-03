@@ -1,3 +1,4 @@
+CC       := cwrap
 NAME     := $(notdir $(CURDIR))
 LIB      := $(NAME).a
 SRCS     := $(wildcard *.c)
