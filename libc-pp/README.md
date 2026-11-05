@@ -38,6 +38,7 @@ On top of C11 with GNU extensions, cwrap adds:
 9. [Tests](#tests)
 10. [Limitations](#limitations)
 11. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
+12. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
 
 ---
 
@@ -384,7 +385,8 @@ updates a dirty cache once before the loop.
   `foreach` loop while something named `foreach` is visible, cwrap stops with
   an error and a note pointing at the declaration.
 - **V must be a plain name.** `foreach (x in *p)` and `foreach (x in s->list)`
-  do not parse yet.
+  do not parse yet. See
+  [the plan for any object](#future-any-object-as-the-collection-in-foreach).
 
 ---
 
@@ -475,7 +477,8 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
   expressions in `cache.h`.
 - **`longjmp` skips the frees** of local scalars and caches, as it skips any
   `cleanup`.
-- **The collection in a `foreach` must be a name.**
+- **The collection in a `foreach` must be a name.** See
+  [the plan](#future-any-object-as-the-collection-in-foreach).
 - **Cache copies are checked only for variables known by name.**
 - **The element type of a cache must be visible at file scope** where its
   struct is defined. A type defined inside a function does not work.
@@ -552,3 +555,73 @@ If cwrap sees every file at once, both can be replaced by plain C.
 The order of work: constant ids, then the fake headers, then types, then frees
 at every exit. Frees at every exit is the largest piece, mostly because of
 `goto` and jumps past declarations.
+
+---
+
+## Future: any object as the collection in foreach
+
+Today V in `foreach (v in V)` must be a plain name. The plan is to accept any
+expression that names an object, such as:
+- `foreach (x in mesh->cells)`
+- `foreach (x in grid.levels[l])`
+- `foreach (x in *pc)`
+- `foreach (x in caches[k])`
+
+It is planned, not started. It waits for the same type work as step 4 of the
+C99 plan above: types and declarations followed through the whole scope stack.
+
+### Grammar
+
+V becomes a `unary_expression`, the same nonterminal as the left side of `=`:
+
+    FOREACH '(' IDENTIFIER IN unary_expression ')' statement
+
+That covers names, `a[i]`, `a.x`, `a->b` and `*a`, and rejects `a + b` or
+`x = y` while parsing. `IN` and `)` close it off, so it should keep `%expect 0`.
+
+### Lowering: evaluate V once
+
+The current lowering repeats V for `update`, `is_dirty`, `n` on every pass, and
+`a[i]`. That is wrong for `caches[k++]` or `next_block ()->c`. V will be bound
+once to a pointer:
+
+    for (__typeof__ (V) *__c_v = &(V); __c_v; __c_v = 0)
+      for (int __i_v = (__c_v->update && __c_v->is_dirty
+                        ? (__c_v->is_dirty = 0, __c_v->update (__c_v), 0) : 0);
+           __i_v < __c_v->n; ++__i_v) {
+        __auto_type v = __c_v->a[__i_v];
+        statement
+      }
+
+- `break` leaves the inner loop, and the outer one stops because the pointer
+  is now null. `continue` is unchanged.
+- `__c_v->a` is read on every pass, so pushing to V inside the loop stays safe.
+- V must be an lvalue. Returning a cache is already an error, so that costs
+  nothing.
+- It fixes `foreach (c in c.kids)`. Today that expands to
+  `__auto_type c = c.kids.a[...]`, where `c` in the initializer is already the
+  new `c`. Binding the pointer before `v` is declared avoids it.
+
+### Knowing that V is a cache
+
+Today `is_cache` comes from looking up V's name in the scope stack. For
+`p->mesh.cells[2]`, cwrap needs the type of every step. In stages:
+
+1. **Assume a cache** when V is not a plain name. Every `struct cache_T` has
+   the same layout, so the lowering works without knowing T. If V is not a
+   cache, gcc reports a missing member `n`: unclear, but caught at compile
+   time. A plain name keeps today's lookup.
+2. **Record cache members.** cwrap already sees every `cache (T)`, including
+   inside struct definitions, so it can note "struct mesh has a cache member
+   `cells`". That checks `m.cells` and `p->cells` whenever the type of `m` or
+   `p` is known from a declaration in scope. Any step it cannot resolve falls
+   back to stage 1.
+3. **Follow every type through the scope stack:** a tag table with members,
+   pointer types of locals and parameters, and a small type checker for names,
+   `*`, `&`, `.`, `->` and `[]`. This is the same piece the C99 export needs,
+   so the two should be built together.
+
+Still open: whether a V that is not a name means "cache only", or also covers
+other structs with `n` and `a`, and arrays reached through a path, such as
+`foreach (x in s.arr)`. Arrays need their length from the type, which again
+means stage 3.
