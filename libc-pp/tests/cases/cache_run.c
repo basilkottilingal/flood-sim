@@ -28,7 +28,7 @@ int main (void)
     total += s;
   foreach (s in squares)
     total += s;
-  cache_push (pts, ((point) { 1, 2 }));
+  cache_push (pts, (point) { 1, 2 });
   cache_push (words, "hi");
   total += sum (&squares);
   printf ("%d %d %d %g %s %d\n", total, rebuilt, squares.n, pts.a[0].y, words.a[0], cache);

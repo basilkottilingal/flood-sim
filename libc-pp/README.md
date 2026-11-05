@@ -337,7 +337,7 @@ Each one takes the cache itself, not its address, and evaluates it once.
 | `cache_init (v)` | zero every field |
 | `cache_clear (v)` | `n = 0`, keeping the memory |
 | `cache_reserve (v, m)` | room for at least `m` elements |
-| `cache_push (v, x)` | append `x`. `x` is read after the array grows, so it may be an element of `v`. |
+| `cache_push (v, x)` | append `x`. `x` is read after the array grows, so it may be an element of `v`. It may contain commas, as in `cache_push (pts, (point) { 1, 2 })`. |
 | `cache_free (v)` | free the array, and set `n` and `cap` to 0 |
 
 The capacity starts at `CACHE_MIN` (8) and doubles. Running out of memory, or

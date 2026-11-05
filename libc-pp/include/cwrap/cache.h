@@ -53,15 +53,17 @@
                                            __cwrap_m, sizeof *__cwrap_v->a); \
       (void) 0;                                                              \
     })
-  /* x is read after the array grows, so it may be an element of V */
-  #define cache_push(V, x)                                                   \
+  /* The value is read after the array grows, so it may be an element of V.
+  .. It is the rest of the arguments, so that a compound literal with commas,
+  .. as in cache_push (c, (point) { 1, 2 }), is still one value. */
+  #define cache_push(V, ...)                                                 \
     ({                                                                       \
       __typeof__ (V) * __cwrap_v = &(V);                                     \
       if (__cwrap_v->n == __cwrap_v->cap)                                    \
         __cwrap_v->a = __cwrap_cache_grow (__cwrap_v->a, &__cwrap_v->cap,    \
                                            __cwrap_v->n + 1L,                \
                                            sizeof *__cwrap_v->a);            \
-      __cwrap_v->a [__cwrap_v->n++] = (x);                                   \
+      __cwrap_v->a [__cwrap_v->n++] = (__VA_ARGS__);                         \
       (void) 0;                                                              \
     })
   #define cache_free(V)                                                      \
