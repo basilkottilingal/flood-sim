@@ -9,8 +9,10 @@
  * standard output. Nothing is compiled or linked, so flags for those stages have
  * no effect. (Not -emit, which gcc reads as -e mit, an entry symbol.)
  *
- * Every translated file also gets scalar.h, as if by #include on its first
- * line, and a program gets scalar.o: see scalar.h. The headers cwrap brings,
+ * With -dimension=1, 2 or 3, the euclidean dimension, every translated file
+ * also gets scalar.h, as if by #include on its first line, with
+ * CWRAP_DIMENSION defined: scalar, and for 2 and 3 vector and tensor, are then
+ * types that cwrap numbers. A program always gets scalar.o: see scalar.h. The headers cwrap brings,
  * such as <cwrap/cache.h>, are on the include path, after the user's own.
  *
  *   CWRAP_CC       compiler to run (default gcc)
@@ -261,6 +263,7 @@ int main (int argc, char **argv)
   int want_deps = 0, have_dep_target = 0;
   int other_sources = 0, nobj = 0, ninputs = 0;
   const char *color = NULL;
+  int dimension = 0;
 
   if (!items)
     die ("out of memory");
@@ -279,6 +282,14 @@ int main (int argc, char **argv)
     const char *a = argv[i];
     struct item *it = &items[nitems];
     size_t j;
+
+    /* Ours alone: gcc never sees it. */
+    if (strncmp (a, "-dimension=", 11) == 0) {
+      if (strlen (a) != 12 || a[11] < '1' || a[11] > '3')
+        die ("-dimension must be 1, 2 or 3, not '%s'", a + 11);
+      dimension = a[11] - '0';
+      continue;
+    }
 
     if (a[0] != '-' || a[1] == '\0') {
       const char *ext = extension (a);
@@ -388,12 +399,14 @@ int main (int argc, char **argv)
       die ("-o cannot be used with -translate and multiple files");
     passthrough = compile_only = assemble_only = 0;
   }
+  translate_set_dimension (dimension);
   if (passthrough || nsrc == 0) {
     struct vec all = { 0 };
 
     push (&all, cc);
     for (int i = 1; i < argc; i++)
-      push (&all, argv[i]);
+      if (strncmp (argv[i], "-dimension=", 11) != 0)
+        push (&all, argv[i]);
     push (&all, "-I");
     push (&all, CWRAP_HEADER_DIR);
     /* Linking objects alone still needs the runtime. */
@@ -439,8 +452,11 @@ int main (int argc, char **argv)
     push (&pp, "-E");
     add_stage_flags (&pp, items, nitems, ST_ALL);
     add_stage_flags (&pp, items, nitems, ST_PP);
-    push (&pp, "-include");
-    push (&pp, CWRAP_INCLUDE_DIR "/scalar.h");
+    if (dimension) {
+      push (&pp, fmt ("-DCWRAP_DIMENSION=%d", dimension));
+      push (&pp, "-include");
+      push (&pp, CWRAP_INCLUDE_DIR "/scalar.h");
+    }
     push (&pp, "-I");
     push (&pp, CWRAP_HEADER_DIR);
     if (want_deps && !dep_file) {

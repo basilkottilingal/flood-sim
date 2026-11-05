@@ -16,8 +16,9 @@ gcc's errors, warnings and debug info still point at your source.
 
 On top of C11 with GNU extensions, cwrap adds:
 
-- **`scalar`**: integer ids that cwrap hands out, at file scope and in
-  functions, freed automatically as their scope ends
+- **`scalar`, `vector` and `tensor`**, with `-dimension=1`, `2` or `3`:
+  integer ids that cwrap hands out, at file scope and in functions, freed
+  automatically as their scope ends
 - **`cache (T)`**: growable arrays that rebuild themselves on demand
 - **`foreach (v in V)`**: a loop over a cache, or over any struct with fields
   `n` and `a`
@@ -96,10 +97,20 @@ These run gcc unchanged:
 
 cwrap still adds its include directory, and its runtime when linking.
 
+### -dimension=N
+
+`-dimension=1`, `-dimension=2` or `-dimension=3` gives the euclidean dimension,
+and turns on `scalar`, and for 2 and 3 also `vector` and `tensor`; see
+[Scalars](#scalars).
+- **Without it,** these are ordinary names that your program may define itself.
+- **It is cwrap's alone:** gcc never sees it.
+- **Any other value is an error.**
+- **Every file of a program must use the same dimension.**
+
 ### What cwrap adds to every command
 
-- **`-include src/scalar.h`** in each preprocessing run, so `scalar` and its API
-  are always declared.
+- **`-DCWRAP_DIMENSION=N -include src/scalar.h`** in each preprocessing run,
+  with `-dimension=N` only.
 - **`-I include/`**, placed after your own `-I` directories, so
   `#include <cwrap/cache.h>` resolves.
 - **`build/scalar.o`** in each link.
@@ -154,10 +165,20 @@ cwrap's messages look like gcc's:
 
 ## Scalars
 
-`scalar` is `typedef int scalar;`, declared in `src/scalar.h`. cwrap
-force-includes that header in every file, and links `scalar.o` into every
-program. A scalar is an id, from 0 to `NSCALAR_MAX - 1` (64), taken from one
-pool shared by the whole program.
+With `-dimension=N`, cwrap force-includes `src/scalar.h` into every file, with
+`CWRAP_DIMENSION` defined as N. It declares these types:
+
+| `-dimension=` | Types |
+|---|---|
+| 1 | `typedef int scalar;` |
+| 2 | that, and `typedef struct { scalar x, y; } vector;` and `typedef struct { vector x, y; } tensor;` |
+| 3 | that, and `typedef struct { scalar x, y, z; } vector;` and `typedef struct { vector x, y, z; } tensor;` |
+
+A scalar is an id, from 0 to `NSCALAR_MAX - 1` (64), taken from one pool
+shared by the whole program. A vector or tensor is a set of scalars, and
+everything below about scalars applies to each of them, in the order
+`x, y (, z)`, and for a tensor `x.x, x.y, ..., y.x, ...`. `scalar.o` is linked
+into every program, whatever the dimension.
 
 ### File-scope scalars
 
@@ -167,6 +188,14 @@ pool shared by the whole program.
 
       scalar h; static scalar *const __cwrap_scalar_slot_0
         __attribute__ ((section ("scalars"), used)) = &h;
+
+  A vector or tensor gets one slot for each of its scalars. In 2 dimensions,
+  `tensor t;` gets four, all on its line:
+
+      static scalar *const __cwrap_scalar_slot_0 __attribute__ ((section ("scalars"), used)) = &t.x.x;
+      static scalar *const __cwrap_scalar_slot_1 __attribute__ ((section ("scalars"), used)) = &t.x.y;
+      static scalar *const __cwrap_scalar_slot_2 __attribute__ ((section ("scalars"), used)) = &t.y.x;
+      static scalar *const __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = &t.y.y;
 
 - **The linker joins the slots of every file** between `__start_scalars` and
   `__stop_scalars`.
@@ -195,16 +224,25 @@ pool shared by the whole program.
 
   so `scalar_free (x)` runs however the scope ends: the end of the block,
   `return`, `break`, `continue` or `goto`. Scalars are freed in reverse order.
-- **`static scalar s;`** gets a slot in the section, and is numbered with the
-  globals.
+- **A vector or tensor gets an id for each scalar,** and a cleanup that frees
+  them, last first:
+
+      tensor w __attribute__ ((cleanup (__cwrap_tensor_free)))
+        = { { scalar_new (), scalar_new () }, { scalar_new (), scalar_new () } };
+
+- **`static scalar s;`** becomes `static scalar s;` followed by one slot for each
+  of its scalars, as declarations of their own on the same line. They are
+  numbered with the globals.
 - **Left alone:** pointers, arrays, names with an initializer, and `extern`,
   `register` and thread-local scalars.
 
 ### Changing a scalar
 
 Assigning to a scalar is a **warning**, because cwrap gives scalars their
-values. This covers `=`, the compound assignments, and `++` and `--`. The
-warning names the operator, and a note shows the declaration.
+values. This covers `=`, the compound assignments, and `++` and `--`. It also
+covers a whole vector or tensor, or part of one, as in `v = w`, `t.y = v` and
+`t.x.y = 1`. The warning names the operator and what it changes, and a note
+shows the declaration.
 
 ### Runtime API (`src/scalar.h`)
 
@@ -410,6 +448,8 @@ on it. The tests cover:
 - every `foreach` case
 - numbering scalars across files
 - local scalars and their cleanup
+- vectors and tensors in 2 and 3 dimensions, and scalars off without
+  `-dimension`
 - caches: running them, their translation, the errors and warnings, and
   having them off without the header
 - colored diagnostics
@@ -420,6 +460,8 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
 
 ## Limitations
 
+- **`-E` with `-dimension`** goes straight to gcc without `scalar.h`, so
+  `scalar`, `vector` and `tensor` are unknown there.
 - **Linux only:** global scalars rely on GNU ld's `__start_`/`__stop_` symbols
   for an ELF section.
 - **Not portable source:** the output of `-translate` is preprocessed, so it

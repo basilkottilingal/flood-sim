@@ -62,12 +62,10 @@ struct parse_status {
       YYABORT;                                                          \
   } while (0)
 
-/* A declaration in a block: its scalars and caches get what cwrap gives them. */
+/* A declaration in a block, whose scalars and caches get what cwrap gives
+ * them: decl, or decl followed by more items. */
 #define LOCAL_DECLARATION(decl)                                         \
-  do {                                                                  \
-    local_scalars (decl);                                               \
-    status->rejected += local_caches (decl);                            \
-  } while (0)
+  (status->rejected += local_caches (decl), local_scalars (decl))
 
 #define N(KIND, ...)                                                    \
   ast_node (AST_##KIND, (struct ast *[]) { __VA_ARGS__ },               \
@@ -673,8 +671,7 @@ statement:
 
 labeled_statement:
     label statement               { $$ = N (LABELED_STATEMENT, $1, $2); }
-  | label declaration             { LOCAL_DECLARATION ($2);
-                                    $$ = N (LABELED_STATEMENT, $1, $2); }
+  | label declaration             { $$ = N (LABELED_STATEMENT, $1, LOCAL_DECLARATION ($2)); }
   ;
 
 label:
@@ -709,7 +706,7 @@ block_items:
 /* Scalars declared in a block get their ids from scalar_new (), and caches
  * a cleanup: LOCAL_DECLARATION (). */
 block_item:
-    declaration                   { LOCAL_DECLARATION ($1); $$ = $1; }
+    declaration                   { $$ = LOCAL_DECLARATION ($1); }
   | statement
   | label_declaration
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -777,7 +774,7 @@ foreach_in:
 
 for_init:
     expression_statement
-  | declaration                   { LOCAL_DECLARATION ($1); $$ = $1; }
+  | declaration                   { $$ = LOCAL_DECLARATION ($1); }
   ;
 
 opt_expression:

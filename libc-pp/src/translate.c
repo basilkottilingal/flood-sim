@@ -47,9 +47,67 @@ static int plain_name (const struct ast *d)
   return d->kind == AST_DECL_NAME;
 }
 
+/* The euclidean dimension from -dimension=, or 0: then scalar, vector and
+ * tensor are ordinary names, and nothing here changes them. */
+static int dimension;
+
+void translate_set_dimension (int d)
+{
+  dimension = d;
+}
+
+/* The scalars in a tensor, at most */
+#define MAX_PARTS 9
+
+/* The type of cwrap's that specs name: scalar, vector or tensor, or NULL. */
+static const char *scalar_type (const struct ast *specs)
+{
+  static const char *const types[] = { "scalar", "vector", "tensor" };
+
+  for (int i = 0; i < (dimension >= 2 ? 3 : dimension); i++)
+    if (has_token (specs, T_TYPE_NAME, types[i]))
+      return types[i];
+  return NULL;
+}
+
+/* The scalars in a variable of the type that specs name, as the members to
+ * append to its name: "" for a scalar, ".x" ".y" for a vector, ".x.x" ".x.y"
+ * ".y.x" ".y.y" for a tensor in two dimensions. Returns how many: 0 if the
+ * type is not one of cwrap's. */
+static int scalar_parts (const struct ast *specs, const char *parts[MAX_PARTS])
+{
+  static const char *const axes[] = { "x", "y", "z" };
+  const char *type = scalar_type (specs);
+  int n = 0;
+
+  if (!type)
+    return 0;
+  if (strcmp (type, "scalar") == 0)
+    parts[n++] = "";
+  else if (strcmp (type, "vector") == 0)
+    for (int i = 0; i < dimension; i++)
+      parts[n++] = arena_printf (".%s", axes[i]);
+  else
+    for (int i = 0; i < dimension; i++)
+      for (int j = 0; j < dimension; j++)
+        parts[n++] = arena_printf (".%s.%s", axes[i], axes[j]);
+  return n;
+}
+
 static int is_scalar_specs (const struct ast *specs)
 {
-  return has_token (specs, T_TYPE_NAME, "scalar");
+  return scalar_type (specs) != NULL;
+}
+
+/* The tokens under n, with no space between them, as in `v.x`. */
+static const char *expression_text (const struct ast *n)
+{
+  if (n->kind == AST_TOKEN)
+    return ast_token (n)->text;
+  const char *s = "";
+  for (n = n->child; n; n = n->next)
+    s = arena_printf ("%s%s", s, expression_text (n));
+  return s;
 }
 
 /* The specifiers of the declaration or parameter where d, a declarator, is a
@@ -68,39 +126,54 @@ static const struct ast *declaring_specs (const struct ast *d)
   return NULL;
 }
 
+/* target may also be a member of a vector or tensor, as in t.x or t.x.y. */
 void check_scalar_assignment (const struct scope_table *scopes,
                               const struct ast *target, const struct ast *op)
 {
+  static const char *const by_depth[] = { "scalar", "vector", "tensor" };
   const struct token *name, *at = ast_token (op);
+  const struct ast *root = target, *specs;
   const struct var *v;
-  const struct ast *specs;
+  const char *type;
+  int members = 0, depth;
 
-  while (target->kind == AST_PAREN_EXPRESSION)
-    target = target->child->next;
-  if (target->kind != AST_TOKEN)
+  /* (t.x).y: down to t, counting the members */
+  for (;;) {
+    while (root->kind == AST_PAREN_EXPRESSION)
+      root = root->child->next;
+    if (root->kind != AST_MEMBER || strcmp (ast_token (root->child->next)->text, ".") != 0)
+      break;
+    root = root->child;
+    members++;
+  }
+  if (root->kind != AST_TOKEN)
     return;
-  name = ast_token (target);
-  if (name->kind != T_IDENTIFIER && name->kind != T_FOREACH)
+  name = ast_token (root);
+  if (name->kind != T_IDENTIFIER && name->kind != T_FOREACH && name->kind != T_CACHE)
     return;
   v = scope_find (scopes, name->text);
   if (!v || v->kind != SCOPE_VARIABLE || !v->decl)
     return;
   specs = declaring_specs (v->decl);
-  if (!specs || !is_scalar_specs (specs))
+  if (!specs || !(type = scalar_type (specs)))
     return;
-  diag (at->file, at->line, DIAG_WARNING, "'%s' changes scalar '%s', whose "
-        "value cwrap gives it", at->text, name->text);
+  depth = strcmp (type, "scalar") == 0 ? 0 : strcmp (type, "vector") == 0 ? 1 : 2;
+  if (members > depth)
+    return;
+  diag (at->file, at->line, DIAG_WARNING, "'%s' changes %s '%s', whose value "
+        "cwrap gives it", at->text, by_depth[depth - members],
+        expression_text (target));
   at = ast_first_token (v->decl);
   diag (at->file, at->line, DIAG_NOTE, "'%s' is declared here", name->text);
 }
 
-static void warn_scalar_initializer (const struct ast *init)
+static void warn_scalar_initializer (const struct ast *init, const char *type)
 {
   const struct token *t = ast_first_token (init);
   const char *name = ast_declared_name (init->child);
 
-  diag (t->file, t->line, DIAG_WARNING, "scalar '%s' has a value of its own, "
-        "so cwrap does not number it", name);
+  diag (t->file, t->line, DIAG_WARNING, "%s '%s' has a value of its own, so "
+        "cwrap does not number it", type, name);
 }
 
 /* Parses text, external declarations that may use the type scalar, for code
@@ -108,7 +181,8 @@ static void warn_scalar_initializer (const struct ast *init)
  * by next. */
 static struct ast *parse_snippet (const char *text)
 {
-  static const char prelude[] = "typedef int scalar;";
+  static const char prelude[] = "typedef int scalar; typedef int vector; "
+                                 "typedef int tensor;";
   size_t n = strlen (prelude) + strlen (text) + 1;
   char *source = allocate (n);
   struct ast *root, *first, *d;
@@ -123,9 +197,11 @@ static struct ast *parse_snippet (const char *text)
   }
   root = parse_file (in, &rejected);
   fclose (in);
-  if (!root || root->child->next->kind == AST_TOKEN)
+  if (!root)
     abort ();
-  first = root->child->next;              /* past the prelude */
+  first = root->child->next->next->next;  /* past the three typedefs */
+  if (first->kind == AST_TOKEN)
+    abort ();
   for (d = first; d->next->kind != AST_TOKEN; d = d->next)
     d->parent = NULL;
   d->parent = d->next = NULL;             /* without the end of input */
@@ -239,32 +315,42 @@ static struct ast *parse_block_item (const char *text)
   return item;
 }
 
-/* Puts n just after d, among the children of d's parent. */
-static void insert_after (struct ast *d, struct ast *n)
+/* The initializer that gives each scalar of a variable of type, one of
+ * cwrap's, an id: { { scalar_new (), ... }, ... } for a tensor. */
+static const char *scalar_new_initializer (const char *type)
 {
-  if (d->next) {
-    ast_insert_before (d->next, n);
-    return;
-  }
-  n->next = NULL;
-  ast_add (d->parent, n);
+  const char *vector = "scalar_new ()", *tensor;
+
+  if (strcmp (type, "scalar") == 0)
+    return vector;
+  for (int i = 1; i < dimension; i++)
+    vector = arena_printf ("%s, scalar_new ()", vector);
+  vector = arena_printf ("{ %s }", vector);
+  if (strcmp (type, "vector") == 0)
+    return vector;
+  tensor = vector;
+  for (int i = 1; i < dimension; i++)
+    tensor = arena_printf ("%s, %s", tensor, vector);
+  return arena_printf ("{ %s }", tensor);
 }
 
-void local_scalars (struct ast *decl)
+struct ast *local_scalars (struct ast *decl)
 {
-  struct ast *specs, *list;
-  int is_static;
+  struct ast *item = decl, *specs, *list, *with_slots;
+  const char *parts[MAX_PARTS], *type, *slots = "";
+  int nparts, is_static;
 
   if (decl->kind == AST_EXTENSION_DECLARATION)
     decl = decl->child->next;
   if (decl->kind != AST_DECLARATION)
-    return;
+    return item;
   specs = decl->child;
   list = specs->next;
-  if (list->kind != AST_INIT_DECLARATOR_LIST || !is_scalar_specs (specs)
+  if (list->kind != AST_INIT_DECLARATOR_LIST || !(type = scalar_type (specs))
       || has_token (specs, T_TYPEDEF, NULL) || has_token (specs, T_EXTERN, NULL)
       || has_token (specs, T_REGISTER, NULL) || has_token (specs, T_THREAD_LOCAL, NULL))
-    return;
+    return item;
+  nparts = scalar_parts (specs, parts);
   is_static = has_token (specs, T_STATIC, NULL);
   for (struct ast *d = list->child, *next; d; d = next) {
     const char *name = ast_declared_name (d);
@@ -273,19 +359,17 @@ void local_scalars (struct ast *decl)
     if (!plain_name (d))
       continue;
     if (is_static) {
-      /* static scalar s, *const slot ... = &s; */
-      struct ast *more = parse_snippet (arena_printf (
-        "static scalar __v, *const __cwrap_local_slot_%d "
-        "__attribute__ ((section (\"scalars\"), used)) = &%s;", local_slot++, name));
-      struct ast *comma = more->child->next->child->next, *slot = comma->next;
-
-      insert_after (d, comma);
-      insert_after (comma, slot);
+      /* static vector s; static scalar *const slot ... = &s.x; ... */
+      for (int k = 0; k < nparts; k++)
+        slots = arena_printf ("%s static scalar *const __cwrap_local_slot_%d "
+                              "__attribute__ ((section (\"scalars\"), used)) = &%s%s;",
+                              slots, local_slot++, name, parts[k]);
     } else {
-      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); */
+      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); and for a
+       * vector or tensor, one scalar_new () for each of its scalars */
       struct ast *item = parse_block_item (arena_printf (
-        "scalar __v __attribute__ ((cleanup (%s))) = scalar_new ();",
-        SCALAR_CLEANUP));
+        "%s __v __attribute__ ((cleanup (__cwrap_%s_free))) = %s;",
+        type, type, scalar_new_initializer (type)));
       struct ast *init = item->child->next->child;
       struct ast *placeholder = init->child->child;
 
@@ -293,12 +377,25 @@ void local_scalars (struct ast *decl)
       ast_replace (placeholder, d);
     }
   }
+  if (!*slots)
+    return item;
+  /* The slots follow the declaration, on its line, as items of their own. */
+  with_slots = ast_new (AST_BLOCK_ITEMS);
+  ast_add (with_slots, item);
+  for (struct ast *n = parse_snippet (slots), *next; n; n = next) {
+    next = n->next;
+    n->next = NULL;
+    ast_add (with_slots, n);
+  }
+  return with_slots;
 }
 
 /* Each `scalar a;` at file scope, headers included, gets a slot in the section
  * scalars, on the same line so that no line moves:
  *
  *   scalar a; static scalar *const __cwrap_scalar_slot_0 ... = &a;
+ *
+ * A vector or tensor gets a slot for each of its scalars, &t.x.x, &t.x.y, ...
  *
  * The linker joins the slots of every file into one array, which scalar.c
  * numbers at startup. extern and typedef
@@ -323,17 +420,19 @@ static void register_scalars (struct ast *root)
         || has_token (specs, T_TYPEDEF, NULL) || has_token (specs, T_EXTERN, NULL))
       continue;
     for (struct ast *d = list->child; d; d = d->next) {
-      struct ast *reg;
+      const char *parts[MAX_PARTS], *slots = "";
+      int nparts = scalar_parts (specs, parts);
 
       if (d->kind == AST_INIT_DECLARATOR && plain_name (d->child))
-        warn_scalar_initializer (d);
+        warn_scalar_initializer (d, scalar_type (specs));
       if (!plain_name (d))
         continue;
-      reg = parse_snippet (arena_printf ("static scalar *const __cwrap_scalar_slot_%d "
-                                         "__attribute__ ((section (\"scalars\"), used)) = &%s;",
-                                         slot++, ast_declared_name (d)));
-      first_token (reg)->trivia = " ";
-      insert_all_before (next, reg);
+      /* one slot for each scalar: &t.x.x, &t.x.y, ... for a tensor */
+      for (int k = 0; k < nparts; k++)
+        slots = arena_printf ("%s static scalar *const __cwrap_scalar_slot_%d "
+                              "__attribute__ ((section (\"scalars\"), used)) = &%s%s;",
+                              slots, slot++, ast_declared_name (d), parts[k]);
+      insert_all_before (next, parse_snippet (slots));
     }
   }
 }

@@ -211,7 +211,32 @@ check "a cache passed by value is a warning" $?
   [ ! -s cache_off.log ]
 check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
 
-"$cwrap" -translate scalar.c -o scalar.out 2> scalar.log
+"$cwrap" -dimension=2 -Wall tensor.c -o tensor2 2> tensor2.log &&
+  [ "$(./tensor2 | tr '\n' ' ')" = "0 1 2 3 4 5 6 9 9 24 9 " ] &&
+  [ "$(grep -o '^tensor.c:[0-9]*: warning' tensor2.log | cut -d: -f2 | tr '\n' ' ')" = "19 20 21 " ] &&
+  grep -q "^tensor.c:19: warning: '=' changes scalar 't.x.y'" tensor2.log &&
+  grep -q "^tensor.c:21: warning: '=' changes vector 't.y'" tensor2.log
+check "-dimension=2: a vector has 2 scalars and a tensor 4, numbered or freed each" $?
+
+"$cwrap" -dimension=2 -translate tensor.c -o tensor.out 2> /dev/null &&
+  grep -q '^tensor t; static scalar \*const __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = &t.x.x; .*_slot_4 .* = &t.x.y; .*_slot_5 .* = &t.y.x; .*_slot_6 .* = &t.y.y;$' tensor.out &&
+  grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = { { scalar_new (), scalar_new () }, { scalar_new (), scalar_new () } };$' tensor.out &&
+  grep -q '^  static vector kept; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.x; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.y;$' tensor.out
+check "a tensor gets a slot for each scalar, t.x.x to t.y.y, on its line" $?
+
+"$cwrap" -dimension=3 -Wall tensor.c -o tensor3 2> /dev/null &&
+  [ "$(./tensor3 | tr '\n' ' ')" = "0 1 2 4 5 7 8 16 16 40 16 " ]
+check "-dimension=3: a vector has 3 scalars and a tensor 9" $?
+
+"$cwrap" -Wall own_scalar.c -o own_scalar 2> own_scalar.log && [ "$(./own_scalar)" = 1.5 ] &&
+  [ ! -s own_scalar.log ]
+check "without -dimension, scalar and vector are the program's own names" $?
+
+"$cwrap" -dimension=4 -c own_scalar.c 2> dimension.log
+[ $? -ne 0 ] && grep -q "error: -dimension must be 1, 2 or 3, not '4'" dimension.log
+check "-dimension takes only 1, 2 or 3" $?
+
+"$cwrap" -dimension=1 -translate scalar.c -o scalar.out 2> scalar.log
 [ "$(grep -o '__attribute__ ((section ("scalars"), used)) = &[a-z]*;' scalar.out |
      sed 's/.*&//' | tr '\n' ' ')" = "a; b; d; s; last; " ] &&
   grep -q '^scalar a; static scalar \*const __cwrap_scalar_slot_0 ' scalar.out &&
@@ -219,30 +244,30 @@ check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
   grep -q '^int g (void) { scalar local = 0; return local; }$' scalar.out
 check "each global scalar gets a slot in the section scalars" $?
 
-"$cwrap" -w scalar.c -o scalar 2> scalar.log; ./scalar
+"$cwrap" -dimension=1 -w scalar.c -o scalar 2> scalar.log; ./scalar
 [ $? = 10 ]
 check "the constructor numbers the global scalars 0 to 4" $?
 
-"$cwrap" -translate scalar_local.c -o scalar_local.out &&
+"$cwrap" -dimension=1 -translate scalar_local.c -o scalar_local.out &&
   grep -q '^  scalar a __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new ();$' scalar_local.out &&
-  grep -q '^  static scalar s, \*const __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = &s;$' scalar_local.out &&
+  grep -q '^  static scalar s; static scalar \*const __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = &s;$' scalar_local.out &&
   grep -q '^  scalar kept = scalar_new ();$' scalar_local.out
 check "local scalars get an id from scalar_new (), and a cleanup that frees it" $?
 
-"$cwrap" -Wall scalar_local.c -o scalar_local 2> scalar_local.log &&
+"$cwrap" -dimension=1 -Wall scalar_local.c -o scalar_local 2> scalar_local.log &&
   [ "$(./scalar_local | tr '\n' ' ')" = "16 in use 3 kept 2 gs 1 globals 2 " ] &&
   grep -q '^scalar_local.c:22:7: warning: unused variable' scalar_local.log &&
   [ "$(grep -c 'warning:' scalar_local.log)" = 1 ]
 check "local scalars are freed however their scope ends, in reverse order" $?
 
-"$cwrap" -c scalar_other.c -o scalar_other.o && "$cwrap" -c scalar_main.c -o scalar_main.o &&
-  "$cwrap" scalar_main.o scalar_other.o -o scalars && [ "$(./scalars)" = "6 3f" ]
+"$cwrap" -dimension=1 -c scalar_other.c -o scalar_other.o && "$cwrap" -dimension=1 -c scalar_main.c -o scalar_main.o &&
+  "$cwrap" -dimension=1 scalar_main.o scalar_other.o -o scalars && [ "$(./scalars)" = "6 3f" ]
 check "scalars of separately compiled files are numbered 0 to n-1 together" $?
 
-"$cwrap" -O2 scalar_main.c scalar_other.c -o scalars2 && [ "$(./scalars2)" = "6 3f" ]
+"$cwrap" -dimension=1 -O2 scalar_main.c scalar_other.c -o scalars2 && [ "$(./scalars2)" = "6 3f" ]
 check "and at -O2 in a single command" $?
 
-"$cwrap" -c assign.c -o assign.o 2> assign.log
+"$cwrap" -dimension=1 -c assign.c -o assign.o 2> assign.log
 rc=$?
 [ "$rc" = 0 ] && [ -e assign.o ] &&
   [ "$(grep -o '^assign.c:[0-9]*: warning' assign.log | cut -d: -f2 | tr '\n' ' ')" = "7 8 9 10 16 3 " ] &&
@@ -252,7 +277,7 @@ rc=$?
   grep -q "^assign.c:3: warning: scalar 'c' has a value of its own" assign.log
 check "changing a scalar is a warning, and the file still compiles" $?
 
-"$cwrap" -Wall scalar_runtime.c -o scalar_runtime 2> scalar_runtime.log &&
+"$cwrap" -dimension=1 -Wall scalar_runtime.c -o scalar_runtime 2> scalar_runtime.log &&
   [ ! -s scalar_runtime.log ] &&
   [ "$(./scalar_runtime | tr '\n' ' ')" = "0 1 0 1 0 64 1 " ]
 check "scalar.h comes with every file: ids reused lowest first, all 64 usable" $?
@@ -261,7 +286,7 @@ check "scalar.h comes with every file: ids reused lowest first, all 64 usable" $
 [ $? -ne 0 ] && grep -q 'scalar_new: all 64 scalars are in use' scalar_runtime.log
 check "scalar_new () stops the program when no id is left" $?
 
-"$cwrap" -c scalar_runtime.c -o scalar_runtime.o && "$cwrap" scalar_runtime.o -o scalar_runtime2 &&
+"$cwrap" -dimension=1 -c scalar_runtime.c -o scalar_runtime.o && "$cwrap" -dimension=1 scalar_runtime.o -o scalar_runtime2 &&
   ./scalar_runtime2 > /dev/null
 check "linking objects alone also brings in the runtime" $?
 

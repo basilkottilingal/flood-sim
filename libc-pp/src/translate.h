@@ -19,17 +19,21 @@ struct scope_table;
 void check_scalar_assignment (const struct scope_table *scopes,
                               const struct ast *target, const struct ast *op);
 
+/* The euclidean dimension, 1 to 3, from -dimension=; 0 turns scalars off. */
+void translate_set_dimension (int dimension);
+
 /* Rewrites the scalars that decl, a declaration in a function, declares:
  *
  *   scalar x;          becomes  scalar x __attribute__ ((cleanup (...))) = scalar_new ();
- *   static scalar s;   becomes  static scalar s, *const slot ... = &s;
+ *   static scalar s;   becomes  static scalar s; static scalar *const slot ... = &s;
  *
  * so that x gets an id from scalar_new (), and scalar_free (x) runs however
- * its scope ends, while s is numbered at startup like a global scalar.
- * Pointers, arrays, names with an initializer, and extern, register and
- * thread-local scalars are left alone. The parser calls this as it reduces a
- * declaration in a block. */
-void local_scalars (struct ast *decl);
+ * its scope ends, while s is numbered at startup like a global scalar. A
+ * vector or tensor gets the same for each of its scalars. Pointers, arrays,
+ * names with an initializer, and extern, register and thread-local scalars are
+ * left alone. The parser calls this as it reduces a declaration in a block,
+ * and uses what it returns: decl, or decl with its slots after it. */
+struct ast *local_scalars (struct ast *decl);
 
 /* The loop `foreach (v in V) body`, given its tokens and body, rewritten as
  *
