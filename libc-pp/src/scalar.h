@@ -38,30 +38,84 @@
   int    scalar_in_use (scalar);
   int    scalar_count  (void);         /* ids in use */
 
+  /* In 2 and 3 dimensions, also (below):
+  ..   vector vector_new (void);    void vector_free (vector);
+  ..   tensor tensor_new (void);    void tensor_free (tensor);
+  */
+
   /* For cwrap: __attribute__ ((cleanup)) passes the scalar's address. */
   static inline void __cwrap_scalar_free (scalar * s)
   {
     scalar_free (*s);
   }
 
-  /* The same for vectors and tensors: the last scalar first. */
+  /*
+  .. Vectors and tensors: each scalar gets its id in the order x, y (, z), and
+  .. for a tensor x.x, x.y, ... y.x, ... They are freed in the reverse order.
+  .. The locals here have initializers, so cwrap leaves them alone.
+  */
+  #if CWRAP_DIMENSION == 2
+  static inline vector vector_new (void)
+  {
+    scalar x = scalar_new (), y = scalar_new ();
+    return (vector) { x, y };
+  }
+
+  static inline void vector_free (vector v)
+  {
+    scalar_free (v.y);
+    scalar_free (v.x);
+  }
+
+  static inline tensor tensor_new (void)
+  {
+    vector x = vector_new (), y = vector_new ();
+    return (tensor) { x, y };
+  }
+
+  static inline void tensor_free (tensor t)
+  {
+    vector_free (t.y);
+    vector_free (t.x);
+  }
+  #elif CWRAP_DIMENSION == 3
+  static inline vector vector_new (void)
+  {
+    scalar x = scalar_new (), y = scalar_new (), z = scalar_new ();
+    return (vector) { x, y, z };
+  }
+
+  static inline void vector_free (vector v)
+  {
+    scalar_free (v.z);
+    scalar_free (v.y);
+    scalar_free (v.x);
+  }
+
+  static inline tensor tensor_new (void)
+  {
+    vector x = vector_new (), y = vector_new (), z = vector_new ();
+    return (tensor) { x, y, z };
+  }
+
+  static inline void tensor_free (tensor t)
+  {
+    vector_free (t.z);
+    vector_free (t.y);
+    vector_free (t.x);
+  }
+  #endif
+
+  /* For cwrap: the cleanups of local vectors and tensors. */
   #if CWRAP_DIMENSION >= 2
   static inline void __cwrap_vector_free (vector * v)
   {
-  #if CWRAP_DIMENSION == 3
-    scalar_free (v->z);
-  #endif
-    scalar_free (v->y);
-    scalar_free (v->x);
+    vector_free (*v);
   }
 
   static inline void __cwrap_tensor_free (tensor * t)
   {
-  #if CWRAP_DIMENSION == 3
-    __cwrap_vector_free (&t->z);
-  #endif
-    __cwrap_vector_free (&t->y);
-    __cwrap_vector_free (&t->x);
+    tensor_free (*t);
   }
   #endif
 

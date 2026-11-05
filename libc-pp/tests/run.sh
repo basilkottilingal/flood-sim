@@ -212,7 +212,7 @@ check "a cache passed by value is a warning" $?
 check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
 
 "$cwrap" -dimension=2 -Wall tensor.c -o tensor2 2> tensor2.log &&
-  [ "$(./tensor2 | tr '\n' ' ')" = "0 1 2 3 4 5 6 9 9 24 9 " ] &&
+  [ "$(./tensor2 | tr '\n' ' ')" = "0 1 2 3 4 5 6 9 9 24 9 1406 " ] &&
   [ "$(grep -o '^tensor.c:[0-9]*: warning' tensor2.log | cut -d: -f2 | tr '\n' ' ')" = "19 20 21 " ] &&
   grep -q "^tensor.c:19: warning: '=' changes scalar 't.x.y'" tensor2.log &&
   grep -q "^tensor.c:21: warning: '=' changes vector 't.y'" tensor2.log
@@ -220,12 +220,12 @@ check "-dimension=2: a vector has 2 scalars and a tensor 4, numbered or freed ea
 
 "$cwrap" -dimension=2 -translate tensor.c -o tensor.out 2> /dev/null &&
   grep -q '^tensor t; static scalar \*const __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = &t.x.x; .*_slot_4 .* = &t.x.y; .*_slot_5 .* = &t.y.x; .*_slot_6 .* = &t.y.y;$' tensor.out &&
-  grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = { { scalar_new (), scalar_new () }, { scalar_new (), scalar_new () } };$' tensor.out &&
+  grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = tensor_new ();$' tensor.out &&
   grep -q '^  static vector kept; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.x; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.y;$' tensor.out
 check "a tensor gets a slot for each scalar, t.x.x to t.y.y, on its line" $?
 
 "$cwrap" -dimension=3 -Wall tensor.c -o tensor3 2> /dev/null &&
-  [ "$(./tensor3 | tr '\n' ' ')" = "0 1 2 4 5 7 8 16 16 40 16 " ]
+  [ "$(./tensor3 | tr '\n' ' ')" = "0 1 2 4 5 7 8 16 16 40 16 2312 " ]
 check "-dimension=3: a vector has 3 scalars and a tensor 9" $?
 
 "$cwrap" -Wall own_scalar.c -o own_scalar 2> own_scalar.log && [ "$(./own_scalar)" = 1.5 ] &&

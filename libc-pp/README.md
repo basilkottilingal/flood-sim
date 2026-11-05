@@ -216,6 +216,7 @@ into every program, whatever the dimension.
       scalar x;                 // x = scalar_new (), freed as the scope ends
       static scalar s;          // numbered at startup, like a global
       scalar k = scalar_new (); // yours: freed only when you call scalar_free
+      vector u = vector_new (); // the same: vector_free (u) when done
     }
 
 - **`scalar x;` becomes**
@@ -227,8 +228,7 @@ into every program, whatever the dimension.
 - **A vector or tensor gets an id for each scalar,** and a cleanup that frees
   them, last first:
 
-      tensor w __attribute__ ((cleanup (__cwrap_tensor_free)))
-        = { { scalar_new (), scalar_new () }, { scalar_new (), scalar_new () } };
+      tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = tensor_new ();
 
 - **`static scalar s;`** becomes `static scalar s;` followed by one slot for each
   of its scalars, as declarations of their own on the same line. They are
@@ -253,6 +253,10 @@ shows the declaration.
 | `int scalar_in_use (scalar)` | whether an id is taken |
 | `int scalar_count (void)` | the number of ids in use |
 | `int n_global_scalars` | the number of file-scope and static scalars |
+| `vector vector_new (void)` | in 2 and 3 dimensions: a vector with a new id for each scalar, `x` first |
+| `void vector_free (vector)` | frees its scalars, the last first |
+| `tensor tensor_new (void)` | a tensor of new vectors, `x` first |
+| `void tensor_free (tensor)` | frees its vectors, the last first |
 
 The pool is a bit array in which a set bit means a free id. The lowest free id
 is found with `ctz`: `__builtin_ctz` where it exists, otherwise a de Bruijn

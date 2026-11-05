@@ -315,25 +315,6 @@ static struct ast *parse_block_item (const char *text)
   return item;
 }
 
-/* The initializer that gives each scalar of a variable of type, one of
- * cwrap's, an id: { { scalar_new (), ... }, ... } for a tensor. */
-static const char *scalar_new_initializer (const char *type)
-{
-  const char *vector = "scalar_new ()", *tensor;
-
-  if (strcmp (type, "scalar") == 0)
-    return vector;
-  for (int i = 1; i < dimension; i++)
-    vector = arena_printf ("%s, scalar_new ()", vector);
-  vector = arena_printf ("{ %s }", vector);
-  if (strcmp (type, "vector") == 0)
-    return vector;
-  tensor = vector;
-  for (int i = 1; i < dimension; i++)
-    tensor = arena_printf ("%s, %s", tensor, vector);
-  return arena_printf ("{ %s }", tensor);
-}
-
 struct ast *local_scalars (struct ast *decl)
 {
   struct ast *item = decl, *specs, *list, *with_slots;
@@ -365,11 +346,11 @@ struct ast *local_scalars (struct ast *decl)
                               "__attribute__ ((section (\"scalars\"), used)) = &%s%s;",
                               slots, local_slot++, name, parts[k]);
     } else {
-      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); and for a
-       * vector or tensor, one scalar_new () for each of its scalars */
+      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); and the
+       * same with vector_new () or tensor_new () */
       struct ast *item = parse_block_item (arena_printf (
-        "%s __v __attribute__ ((cleanup (__cwrap_%s_free))) = %s;",
-        type, type, scalar_new_initializer (type)));
+        "%s __v __attribute__ ((cleanup (__cwrap_%s_free))) = %s_new ();",
+        type, type, type));
       struct ast *init = item->child->next->child;
       struct ast *placeholder = init->child->child;
 
