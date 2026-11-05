@@ -9,7 +9,8 @@
  * Every rule of more than one symbol needs an action that keeps all of its
  * symbols. Bison's default is $$ = $1, which silently loses the rest and shows
  * up as a mismatch in the byte-identical test. Pass NULL-valued optional
- * symbols to N () as they are: they are skipped.
+ * symbols to N () as they are: they are skipped. That includes the scope
+ * markers, whose %destructor makes bison warn of a value left unused.
  *
  * %expect 0 turns any grammar conflict into a build error.
  *
@@ -24,10 +25,12 @@
 #include "lexer.h"
 
 struct ast;
+struct parse_status;
 
-/* Returns the tree, or NULL if the input does not parse, after a warning. The
- * tree is in the arena, so it lasts until free_arena (). *rejected is set if the
- * input must not go on to gcc: the error has then been reported. */
+/* Returns the tree, or NULL if the input does not parse, after a warning for
+ * each error found. The tree is in the arena, so it lasts until free_arena ().
+ * *rejected is set if the input must not go on to gcc: the errors have then
+ * been reported. */
 struct ast *parse_file (FILE *in, int *rejected);
 }
 
@@ -40,13 +43,32 @@ struct ast *parse_file (FILE *in, int *rejected);
 #include "scope.h"
 #include "translate.h"
 
+/* Syntax errors to report before giving up on a file. */
+#define MAX_PARSE_ERRORS 20
+
+struct parse_status {
+  int errors;             /* syntax errors reported */
+  int rejected;           /* errors that must keep the file from gcc */
+};
+
+/* The action of an error rule, where the parse has found its feet again.
+ * Bison reports no new error until three more tokens have parsed, which keeps
+ * the leftovers of the part skipped from being reported as errors of their own. */
+#define RECOVERED()                                                     \
+  do {                                                                  \
+    scope_error_recovered (scopes);                                     \
+    if (status->errors >= MAX_PARSE_ERRORS)                             \
+      YYABORT;                                                          \
+  } while (0)
+
 #define N(KIND, ...)                                                    \
   ast_node (AST_##KIND, (struct ast *[]) { __VA_ARGS__ },               \
             sizeof ((struct ast *[]) { __VA_ARGS__ }) / sizeof (struct ast *))
 
 int yylex (YYSTYPE *lvalp, int *lineno, yyscan_t yyscanner);
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct scope_table *scopes, int *rejected, const char *msg);
+                     struct scope_table *scopes, struct parse_status *status,
+                     const char *msg);
 
 static void declare (struct scope_table *scopes, const struct ast *declarator,
                      enum scope_kind kind)
@@ -80,9 +102,15 @@ static int foreach_declared (const struct scope_table *scopes,
 %define api.token.prefix {T_}
 %define parse.error verbose
 %param {int *lineno} {yyscan_t yyscanner}
-%parse-param {struct ast **root} {struct scope_table *scopes} {int *rejected}
+%parse-param {struct ast **root} {struct scope_table *scopes}
+%parse-param {struct parse_status *status}
 
 %expect 0
+
+/* Error recovery pops these markers without the rule that would undo them, so
+ * their scopes are undone here instead. */
+%destructor { scope_pop (scopes); } open_scope enter_function
+%destructor { scope_abandon_params (scopes); } open_params
 
 %token AUTO BREAK CASE CHAR CONST CONTINUE DEFAULT DO DOUBLE ELSE ENUM EXTERN
 %token FLOAT FOR GOTO IF INLINE INT LONG REGISTER RESTRICT RETURN SHORT SIGNED
@@ -127,12 +155,16 @@ external_declaration:
   | declaration
   | ASM '(' string ')' ';'        { $$ = N (ASM_DEFINITION, $1, $2, $3, $4, $5); }
   | ';'                           { $$ = N (EMPTY_DECLARATION, $1); }
+  /* Error recovery: skip to the end of the declaration, and go on to find more
+   * errors. A file with errors is not translated, so these build nothing. */
+  | error ';'                     { RECOVERED (); $$ = NULL; }
+  | error '}'                     { RECOVERED (); $$ = NULL; }
   ;
 
 function_definition:
     decl_specs_typed specs_done declarator enter_function compound_statement
     leave_function
-                                  { $$ = N (FUNCTION_DEFINITION, $1, $3, $5); }
+                                  { $$ = N (FUNCTION_DEFINITION, $1, $3, $4, $5); }
   ;
 
 /* Markers: empty rules that run an action at that point of a rule. They reduce
@@ -377,7 +409,7 @@ array_suffix:
 function_suffix:
     '(' ')'                       { $$ = N (FUNCTION_SUFFIX, $1, $2); }
   | '(' open_params parameter_type_list close_params ')'
-                                  { $$ = N (FUNCTION_SUFFIX, $1, $3, $5); }
+                                  { $$ = N (FUNCTION_SUFFIX, $1, $2, $3, $5); }
   ;
 
 pointer:
@@ -481,7 +513,7 @@ direct_abstract_declarator:
   | array_suffix
   | '(' ')'                       { $$ = N (FUNCTION_SUFFIX, $1, $2); }
   | '(' open_params parameter_type_list close_params ')'
-                                  { $$ = N (FUNCTION_SUFFIX, $1, $3, $5); }
+                                  { $$ = N (FUNCTION_SUFFIX, $1, $2, $3, $5); }
   | direct_abstract_declarator declarator_suffix
                                   { $$ = N (SUFFIXED_DECLARATOR, $1, $2); }
   ;
@@ -619,7 +651,8 @@ statement:
 
 labeled_statement:
     label statement               { $$ = N (LABELED_STATEMENT, $1, $2); }
-  | label declaration             { $$ = N (LABELED_STATEMENT, $1, $2); }
+  | label declaration             { local_scalars ($2);
+                                    $$ = N (LABELED_STATEMENT, $1, $2); }
   ;
 
 label:
@@ -633,13 +666,17 @@ label:
 /* A label may also end a block, as in `default: }`. */
 compound_statement:
     '{' open_scope '}' close_scope
-                                  { $$ = N (COMPOUND_STATEMENT, $1, $3); }
+                                  { $$ = N (COMPOUND_STATEMENT, $1, $2, $3); }
   | '{' open_scope block_items '}' close_scope
-                                  { $$ = N (COMPOUND_STATEMENT, $1, $3, $4); }
+                                  { $$ = N (COMPOUND_STATEMENT, $1, $2, $3, $4); }
   | '{' open_scope label '}' close_scope
-                                  { $$ = N (COMPOUND_STATEMENT, $1, $3, $4); }
+                                  { $$ = N (COMPOUND_STATEMENT, $1, $2, $3, $4); }
   | '{' open_scope block_items label '}' close_scope
-                                  { $$ = N (COMPOUND_STATEMENT, $1, $3, $4, $5); }
+                                  { $$ = N (COMPOUND_STATEMENT, $1, $2, $3, $4, $5); }
+  | '{' open_scope error '}' close_scope
+                                  { RECOVERED (); $$ = N (COMPOUND_STATEMENT, $1, $2, $4); }
+  | '{' open_scope block_items error '}' close_scope
+                                  { RECOVERED (); $$ = N (COMPOUND_STATEMENT, $1, $2, $3, $5); }
   ;
 
 block_items:
@@ -647,10 +684,12 @@ block_items:
   | block_items block_item        { $$ = ast_add ($1, $2); }
   ;
 
+/* Scalars declared in a block get their ids from scalar_new (): local_scalars (). */
 block_item:
-    declaration
+    declaration                   { local_scalars ($1); $$ = $1; }
   | statement
   | label_declaration
+  | error ';'                     { RECOVERED (); $$ = NULL; }
   ;
 
 label_declaration:
@@ -683,24 +722,27 @@ iteration_statement:
                                   { $$ = N (DO_STATEMENT, $1, $2, $3, $4, $5, $6, $7); }
   | FOR '(' open_scope for_init expression_statement opt_expression ')'
     statement close_scope
-                                  { $$ = N (FOR_STATEMENT, $1, $2, $4, $5, $6, $7, $8); }
+                                  { $$ = N (FOR_STATEMENT, $1, $2, $3, $4, $5, $6, $7, $8); }
   /* The loop variable is declared after the collection, which still means the
    * outer name in `foreach (v in v)`, and before the body is read. The scope
    * opens after the `)`, since until `in` this may still be a call. */
   | FOREACH '(' any_identifier foreach_in IDENTIFIER ')' open_scope
-                                  { if (foreach_declared (scopes, $1)) {
-                                      *rejected = 1;
-                                      YYABORT;
-                                    }
+                                  { if (foreach_declared (scopes, $1))
+                                      status->rejected++;
                                     scope_add (scopes, ast_token ($3)->text, SCOPE_VARIABLE, $3); }
-    statement close_scope
-                                  { $$ = N (FOR_EACH_STATEMENT, $1, $2, $3, $4, $5, $6, $9); }
+    statement
+                                  /* The loop's scope, with v in it, is still
+                                   * open here: the place to check the names
+                                   * that the translation brings in. */
+                                  { $$ = foreach_to_for ($1, $2, $3, $4, $5, $6, $9); }
+    close_scope
+                                  { $$ = N (FOR_EACH_STATEMENT, $10, $7, $11); }
   ;
 
 /* in is not a token, so that it stays an ordinary name. */
 foreach_in:
     any_identifier                { if (strcmp (ast_token ($1)->text, "in") != 0) {
-                                      yyerror (lineno, yyscanner, root, scopes, rejected, "expected 'in'");
+                                      yyerror (lineno, yyscanner, root, scopes, status, "expected 'in'");
                                       YYERROR;
                                     }
                                     $$ = $1; }
@@ -708,7 +750,7 @@ foreach_in:
 
 for_init:
     expression_statement
-  | declaration
+  | declaration                   { local_scalars ($1); $$ = $1; }
   ;
 
 opt_expression:
@@ -1011,17 +1053,24 @@ constant_expression:
 
 %%
 
+/* The first error says what becomes of the file; the rest follow it. */
 static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
-                     struct scope_table *scopes, int *rejected, const char *msg)
+                     struct scope_table *scopes, struct parse_status *status,
+                     const char *msg)
 {
   const struct token *t = lex_last (yyscanner);
 
   (void)lineno;
   (void)root;
   (void)scopes;
-  (void)rejected;
-  fprintf (stderr, "%s:%d: warning: not translated, leaving this file to gcc: "
-           "%s near '%s'\n", t->file, t->line, msg, t->text);
+  if (++status->errors > MAX_PARSE_ERRORS)
+    return;
+  fprintf (stderr, "%s:%d: warning: %s%s near '%s'\n", t->file, t->line,
+           status->errors == 1 ? "not translated, leaving this file to gcc: " : "",
+           msg, t->text);
+  if (status->errors == MAX_PARSE_ERRORS)
+    fprintf (stderr, "%s:%d: note: %d errors, not looking for more\n", t->file,
+             t->line, MAX_PARSE_ERRORS);
 }
 
 struct ast *parse_file (FILE *in, int *rejected)
@@ -1029,12 +1078,11 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
+  struct parse_status status = { 0, 0 };
   int lineno = 1;
-  int failed;
-
-  *rejected = 0;
-  failed = yyparse (&lineno, scanner, &root, scopes, rejected);
+  int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 
   lex_close (scanner);
-  return failed ? NULL : root;
+  *rejected = status.rejected > 0;
+  return failed || status.errors || status.rejected ? NULL : root;
 }

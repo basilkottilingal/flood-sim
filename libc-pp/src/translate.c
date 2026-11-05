@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,24 @@
 #include "scope.h"
 #include "translate.h"
 
+/* printf into the arena, so that the string lasts as long as the tree. */
+static char *arena_printf (const char *format, ...)
+{
+  va_list ap;
+  char *s;
+  int n;
+
+  va_start (ap, format);
+  n = vsnprintf (NULL, 0, format, ap);
+  va_end (ap);
+  s = allocate ((size_t)n + 1);
+  va_start (ap, format);
+  vsnprintf (s, (size_t)n + 1, format, ap);
+  va_end (ap);
+  return s;
+}
+
+/* see if a token of kind 'kind' is a child of the subtree 'specs'. */
 static int has_token (const struct ast *specs, int kind, const char *text)
 {
   for (const struct ast *n = specs->child; n; n = n->next)
@@ -132,13 +151,152 @@ static struct token *first_token (struct ast *n)
   return &((struct ast_leaf *)n)->tok;
 }
 
+/* The name of the index of a foreach loop over the variable %s. */
+#define FOREACH_INDEX "__i_%s"
+
+/* Gives every token under n the place of `at`, for the AST dump. */
+static void set_location (struct ast *n, const struct token *at)
+{
+  if (n->kind == AST_TOKEN) {
+    struct token *t = &((struct ast_leaf *)n)->tok;
+
+    t->file = at->file;
+    t->line = at->line;
+    return;
+  }
+  for (n = n->child; n; n = n->next)
+    set_location (n, at);
+}
+
+/* The trivia of the tokens from first to last, in order. */
+static const char *joined_trivia (struct ast *const *tokens, int n)
+{
+  size_t len = 1;
+  char *s;
+
+  for (int i = 0; i < n; i++)
+    len += strlen (ast_token (tokens[i])->trivia);
+  s = allocate (len);
+  for (int i = 0; i < n; i++)
+    strcat (s, ast_token (tokens[i])->trivia);
+  return s;
+}
+
+struct ast *foreach_to_for (struct ast *kw, struct ast *lparen, struct ast *var,
+                            struct ast *in, struct ast *coll, struct ast *rparen,
+                            struct ast *body)
+{
+  const char *v = ast_token (var)->text, *c = ast_token (coll)->text;
+  struct ast *header[] = { var, in, coll, rparen };
+  const char *index = arena_printf (FOREACH_INDEX, v);
+  struct ast *fn, *loop, *block, *n;
+  const char *trivia;
+
+  fn = parse_snippet (arena_printf ("void f (void) { for (int %s = 0; %s < %s.n; "
+                                    "++%s) { __auto_type %s = %s.a[%s]; } }",
+                                    index, index, c, index, v, c, index));
+  /* void f (void) { for ... } : the for statement is in the body's items. */
+  loop = fn->child->next->next->child->next->child;
+  loop->parent = loop->next = NULL;
+  set_location (loop, ast_token (kw));
+
+  /* The header keeps its lines: `for` and `(` take the trivia of `foreach` and
+   * `(`, and the `)` takes all of the trivia of `v in V)` if it spans lines. */
+  first_token (loop)->trivia = ast_token (kw)->trivia;
+  first_token (loop->child->next)->trivia = ast_token (lparen)->trivia;
+  trivia = joined_trivia (header, 4);
+  for (n = loop->child; n; n = n->next)
+    if (n->kind == AST_TOKEN && strcmp (ast_token (n)->text, ")") == 0)
+      first_token (n)->trivia = strchr (trivia, '\n') ? trivia
+                                                       : ast_token (rparen)->trivia;
+
+  /* { __auto_type v = V.a[i]; } gets the body after its declaration. */
+  block = loop->last;
+  if (body)
+    ast_add (block->child->next, body);
+  return loop;
+}
+
+/* Frees a local scalar when its scope ends, as scalar.h defines it: cleanup
+ * passes the variable's address. */
+#define SCALAR_CLEANUP "__cwrap_scalar_free"
+
+/* For the names of the slots of static scalars in functions. */
+static int local_slot;
+
+/* The first item of the block in `void f (void) { text }`. */
+static struct ast *parse_block_item (const char *text)
+{
+  struct ast *fn = parse_snippet (arena_printf ("void f (void) { %s }", text));
+  struct ast *item = fn->child->next->next->child->next->child;
+
+  item->parent = item->next = NULL;
+  return item;
+}
+
+/* Puts n just after d, among the children of d's parent. */
+static void insert_after (struct ast *d, struct ast *n)
+{
+  if (d->next) {
+    ast_insert_before (d->next, n);
+    return;
+  }
+  n->next = NULL;
+  ast_add (d->parent, n);
+}
+
+void local_scalars (struct ast *decl)
+{
+  struct ast *specs, *list;
+  int is_static;
+
+  if (decl->kind == AST_EXTENSION_DECLARATION)
+    decl = decl->child->next;
+  if (decl->kind != AST_DECLARATION)
+    return;
+  specs = decl->child;
+  list = specs->next;
+  if (list->kind != AST_INIT_DECLARATOR_LIST || !is_scalar_specs (specs)
+      || has_token (specs, T_TYPEDEF, NULL) || has_token (specs, T_EXTERN, NULL)
+      || has_token (specs, T_REGISTER, NULL) || has_token (specs, T_THREAD_LOCAL, NULL))
+    return;
+  is_static = has_token (specs, T_STATIC, NULL);
+  for (struct ast *d = list->child, *next; d; d = next) {
+    const char *name = ast_declared_name (d);
+
+    next = d->next;
+    if (!plain_name (d))
+      continue;
+    if (is_static) {
+      /* static scalar s, *const slot ... = &s; */
+      struct ast *more = parse_snippet (arena_printf (
+        "static scalar __v, *const __cwrap_local_slot_%d "
+        "__attribute__ ((section (\"scalars\"), used)) = &%s;", local_slot++, name));
+      struct ast *comma = more->child->next->child->next, *slot = comma->next;
+
+      insert_after (d, comma);
+      insert_after (comma, slot);
+    } else {
+      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); */
+      struct ast *item = parse_block_item (arena_printf (
+        "scalar __v __attribute__ ((cleanup (%s))) = scalar_new ();",
+        SCALAR_CLEANUP));
+      struct ast *init = item->child->next->child;
+      struct ast *placeholder = init->child->child;
+
+      ast_replace (d, init);
+      ast_replace (placeholder, d);
+    }
+  }
+}
+
 /* Each `scalar a;` at file scope, headers included, gets a slot in the section
  * scalars, on the same line so that no line moves:
  *
  *   scalar a; static scalar *const __cwrap_scalar_slot_0 ... = &a;
  *
- * The linker joins the slots of every file into one array, which the function
- * from add_scalar_constructor () numbers at startup. extern and typedef
+ * The linker joins the slots of every file into one array, which scalar.c
+ * numbers at startup. extern and typedef
  * declarations, pointers, arrays and functions get no slot, and neither do
  * names with an initializer of their own, which get a warning. */
 static void register_scalars (struct ast *root)
@@ -161,105 +319,24 @@ static void register_scalars (struct ast *root)
       continue;
     for (struct ast *d = list->child; d; d = d->next) {
       struct ast *reg;
-      char text[512];
 
       if (d->kind == AST_INIT_DECLARATOR && plain_name (d->child))
         warn_scalar_initializer (d);
       if (!plain_name (d))
         continue;
-      snprintf (text, sizeof (text), "static scalar *const __cwrap_scalar_slot_%d "
-                "__attribute__ ((section (\"scalars\"), used)) = &%s;",
-                slot++, ast_declared_name (d));
-      reg = parse_snippet (text);
+      reg = parse_snippet (arena_printf ("static scalar *const __cwrap_scalar_slot_%d "
+                                         "__attribute__ ((section (\"scalars\"), used)) = &%s;",
+                                         slot++, ast_declared_name (d)));
       first_token (reg)->trivia = " ";
       insert_all_before (next, reg);
     }
   }
 }
 
-/* The definition of main at file scope, or NULL. */
-static struct ast *find_main (struct ast *root)
-{
-  for (struct ast *n = root->child; n; n = n->next) {
-    struct ast *def = n->kind == AST_EXTENSION_DEFINITION ? n->child->next : n;
-    const char *name;
-
-    if (def->kind != AST_FUNCTION_DEFINITION)
-      continue;
-    name = ast_declared_name (def->child->next);
-    if (name && strcmp (name, "main") == 0)
-      return n;
-  }
-  return NULL;
-}
-
-/* Is n `typedef ... scalar;`? */
-static int declares_scalar_type (const struct ast *n)
-{
-  const struct ast *list;
-
-  if (n->kind == AST_EXTENSION_DECLARATION)
-    n = n->child->next;
-  if (n->kind != AST_DECLARATION || !has_token (n->child, T_TYPEDEF, NULL))
-    return 0;
-  list = n->child->next;
-  if (list->kind != AST_INIT_DECLARATOR_LIST)
-    return 0;
-  for (const struct ast *d = list->child; d; d = d->next) {
-    const char *name = ast_declared_name (d);
-
-    if (name && strcmp (name, "scalar") == 0)
-      return 1;
-  }
-  return 0;
-}
-
-/* Numbers the slots of register_scalars (), from every file of the program, in
- * the order the linker puts them. __start_scalars and __stop_scalars come from
- * the linker, and are weak for a program with no slot at all. n_global_scalars
- * is where scalars numbered at run time may start. */
-static const char scalar_constructor[] =
-  "extern scalar *const __start_scalars[] __attribute__ ((weak)); "
-  "extern scalar *const __stop_scalars[] __attribute__ ((weak)); "
-  "int n_global_scalars; "
-  "__attribute__ ((constructor (101))) static void number_global_scalars (void) "
-  "{ for (scalar *const *p = __start_scalars; p < __stop_scalars; p++) "
-  "**p = p - __start_scalars; "
-  "n_global_scalars = __stop_scalars - __start_scalars; }";
-
-/* In the file that defines main, so in one file of the program, adds
- * scalar_constructor on a line of its own just before main. It needs the type
- * scalar, so it is added only if a typedef of scalar comes before main. main
- * gets a linemarker for its own line, so that gcc's line numbers do not move. */
-static void add_scalar_constructor (struct ast *root)
-{
-  struct ast *main_def = find_main (root), *n, *decls;
-  struct token *ours, *theirs;
-  char *marker;
-  int len;
-
-  if (!main_def)
-    return;
-  for (n = root->child; n != main_def && !declares_scalar_type (n); n = n->next)
-    ;
-  if (n == main_def)
-    return;
-  decls = parse_snippet (scalar_constructor);
-  ours = first_token (decls);
-  theirs = first_token (main_def);
-  ours->trivia = theirs->trivia;
-  len = snprintf (NULL, 0, "\n# %d \"%s\"\n", theirs->line, theirs->file);
-  marker = allocate (len + 1);
-  snprintf (marker, len + 1, "\n# %d \"%s\"\n", theirs->line, theirs->file);
-  theirs->trivia = marker;
-  insert_all_before (main_def, decls);
-}
-
 /* The translation itself: rewrite the tree here. */
 static void transform (struct ast *root)
 {
   register_scalars (root);
-  add_scalar_constructor (root);
 }
 
 /* gcc gets the input as it came. It either accepts code our grammar does not

@@ -94,6 +94,10 @@ scalar scalar_new ()
 
 void scalar_free (scalar s)
 {
+  /* this is unexpected, but can happen in case of goto  jumps */
+  if (!bits [s/32][(uint32_t) 1 << (s&31)])
+    return;
+
   morton_start (0, 0, 0) {
     assert (sblocks [s/w] && sblocks [s/w][s%w]);
     r_allocate_free (alloc_block, sblocks [s/w][s%w]);

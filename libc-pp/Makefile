@@ -7,8 +7,17 @@ OBJS := $(BUILD)/driver.o $(BUILD)/translate.o $(BUILD)/ast.o \
         $(BUILD)/allocator.o $(BUILD)/scope.o \
         $(BUILD)/parser.tab.o $(BUILD)/lexer.yy.o
 
+all: $(BUILD)/cwrap $(BUILD)/scalar.o
+
 $(BUILD)/cwrap: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
+
+# The runtime that cwrap adds to what it compiles: see src/scalar.h.
+$(BUILD)/driver.o: CFLAGS += -DCWRAP_INCLUDE_DIR='"$(abspath src)"' \
+                             -DCWRAP_LIB_DIR='"$(abspath $(BUILD))"'
+
+$(BUILD)/scalar.o: src/scalar.c src/scalar.h | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/parser.tab.c $(BUILD)/parser.tab.h: src/parser.y | $(BUILD)
 	bison -Wall -d -o $(BUILD)/parser.tab.c $<
@@ -40,10 +49,10 @@ $(BUILD):
 $(BUILD)/scope_test: tests/scope_test.c src/scope.c src/scope.h $(BUILD)/allocator.o
 	$(CC) $(CFLAGS) -o $@ tests/scope_test.c $(BUILD)/allocator.o
 
-test: $(BUILD)/cwrap $(BUILD)/scope_test
+test: $(BUILD)/cwrap $(BUILD)/scalar.o $(BUILD)/scope_test
 	sh tests/run.sh
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: test clean lexer
+.PHONY: all test clean lexer

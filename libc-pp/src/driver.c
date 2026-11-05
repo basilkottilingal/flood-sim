@@ -9,6 +9,9 @@
  * standard output. Nothing is compiled or linked, so flags for those stages have
  * no effect. (Not -emit, which gcc reads as -e mit, an entry symbol.)
  *
+ * Every translated file also gets scalar.h, as if by #include on its first
+ * line, and a program gets scalar.o: see scalar.h.
+ *
  *   CWRAP_CC       compiler to run (default gcc)
  *   CWRAP_VERBOSE  print each command
  *   CWRAP_KEEP     keep the intermediate directory
@@ -67,6 +70,14 @@ static const char *const pp_flags[] = {
 static const char *const passthrough_flags[] = {
   "-E", "-M", "-MM", "-x",
 };
+
+/* Where the runtime is: set by the Makefile. */
+#ifndef CWRAP_INCLUDE_DIR
+#define CWRAP_INCLUDE_DIR "."
+#endif
+#ifndef CWRAP_LIB_DIR
+#define CWRAP_LIB_DIR "."
+#endif
 
 static const char *cc;
 static char tmpdir[4096];
@@ -243,7 +254,7 @@ int main (int argc, char **argv)
   int compile_only = 0, assemble_only = 0, passthrough = 0;
   int translate_only = 0, untranslated = 0;
   int want_deps = 0, have_dep_target = 0;
-  int other_sources = 0, nobj = 0;
+  int other_sources = 0, nobj = 0, ninputs = 0;
 
   if (!items)
     die ("out of memory");
@@ -273,6 +284,7 @@ int main (int argc, char **argv)
         continue;
       }
       other_sources |= IN_LIST (ext, sources);
+      ninputs++;
       it->stage = ST_LINK;
       it->flag = a;
       nitems++;
@@ -365,8 +377,15 @@ int main (int argc, char **argv)
     passthrough = compile_only = assemble_only = 0;
   }
   if (passthrough || nsrc == 0) {
-    argv[0] = (char *)cc;
-    execvp (cc, argv);
+    struct vec all = { 0 };
+
+    push (&all, cc);
+    for (int i = 1; i < argc; i++)
+      push (&all, argv[i]);
+    /* Linking objects alone still needs the runtime. */
+    if (!passthrough && ninputs && !compile_only && !assemble_only)
+      push (&all, CWRAP_LIB_DIR "/scalar.o");
+    execvp (cc, (char *const *)all.v);
     die ("%s: %s", cc, strerror (errno));
   }
   /* gcc would refuse this, but it only ever sees our intermediate files. */
@@ -406,6 +425,8 @@ int main (int argc, char **argv)
     push (&pp, "-E");
     add_stage_flags (&pp, items, nitems, ST_ALL);
     add_stage_flags (&pp, items, nitems, ST_PP);
+    push (&pp, "-include");
+    push (&pp, CWRAP_INCLUDE_DIR "/scalar.h");
     if (want_deps && !dep_file) {
       char *base = strdup (result);
       char *dot = strrchr (base, '.');
@@ -473,6 +494,7 @@ int main (int argc, char **argv)
           push (&link, items[i].value);
       }
     }
+    push (&link, CWRAP_LIB_DIR "/scalar.o");
     if (output) {
       push (&link, "-o");
       push (&link, output);

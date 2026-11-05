@@ -50,6 +50,11 @@ void scope_pop (struct scope_table *st);
 void scope_push_params (struct scope_table *st);
 void scope_pop_params (struct scope_table *st);
 void scope_resume_params (struct scope_table *st);
+
+/* For the parser's error recovery: closes a parameter scope whose function
+ * will not be parsed, and clears what a declaration left half done. */
+void scope_abandon_params (struct scope_table *st);
+void scope_error_recovered (struct scope_table *st);
 void scope_declarator_named (struct scope_table *st);
 
 /* Is the declaration being parsed a typedef? The parser reports the keyword as

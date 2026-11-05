@@ -19,20 +19,14 @@ check() {
   fi
 }
 
-# A translation without the constructor that cwrap adds before main, nor the
-# linemarker after it: the rest must be the input, byte for byte.
-without_constructor() {
-  sed '/^extern scalar \*const __start_scalars\[\] /{N;d;}' "$1"
-}
-
 "$cwrap" -Wall -DVALUE=42 hello.c -o hello -lm
 [ "$(./hello)" = '5.0 42 a"b' ]
 check "compile, link and run with stdio, math and -l" $?
 
 CWRAP_KEEP=1 "$cwrap" -c hello.c -o hello.o 2> keep.log
 kept=$(sed -n 's/^cwrap: kept //p' keep.log)
-without_constructor "$kept/0-hello.t.i" | cmp -s "$kept/0-hello.i" -
-check "translator output is byte-identical to its input, but for the constructor" $?
+cmp -s "$kept/0-hello.i" "$kept/0-hello.t.i"
+check "translator output is byte-identical to its input" $?
 rm -rf "$kept"
 
 "$cwrap" -c bad.c -o bad.o 2> bad.log
@@ -60,6 +54,22 @@ check "-E passes straight through to gcc" $?
   grep -q "^stray.c:1:.*error: stray" stray.log
 check "a file that does not parse is left to gcc, which reports it" $?
 
+"$cwrap" -c errors.c -o errors.o 2> errors.log
+[ $? -ne 0 ] &&
+  [ "$(grep -o '^errors.c:[0-9]*: warning' errors.log | cut -d: -f2 | tr '\n' ' ')" = "2 4 6 9 11 " ] &&
+  [ "$(grep -c 'not translated' errors.log)" = 1 ] && grep -q '^errors.c:9:19: error: stray' errors.log
+check "cwrap lists each syntax error, and none of its own making, before gcc" $?
+
+"$cwrap" -c errors_cap.c -o errors_cap.o 2> errors_cap.log
+[ "$(grep -c '^errors_cap.c:[0-9]*: warning' errors_cap.log)" = 20 ] &&
+  grep -q '^errors_cap.c:20: note: 20 errors, not looking for more' errors_cap.log
+check "cwrap stops listing syntax errors after 20" $?
+
+"$cwrap" -c foreach_twice.c -o foreach_twice.o 2> foreach_twice.log
+[ $? -ne 0 ] && [ "$(grep -c ': error: foreach loop' foreach_twice.log)" = 2 ] &&
+  [ ! -e foreach_twice.o ]
+check "every foreach that clashes with a declared foreach is reported" $?
+
 "$cwrap" -w kr.c -o kr 2> kr.log && ./kr
 check "code gcc accepts still builds when the grammar does not cover it" $?
 
@@ -79,7 +89,7 @@ cp "$tests/grammar.c" grammar.c
 CWRAP_KEEP=1 "$cwrap" -std=gnu11 -w -c grammar.c -o grammar.o 2> keep.log
 rc=$?
 kept=$(sed -n 's/^cwrap: kept //p' keep.log)
-[ "$rc" = 0 ] && without_constructor "$kept/0-grammar.t.i" | cmp -s "$kept/0-grammar.i" -
+[ "$rc" = 0 ] && cmp -s "$kept/0-grammar.i" "$kept/0-grammar.t.i"
 check "the full grammar accepts tests/grammar.c, byte for byte" $?
 rm -rf "$kept"
 
@@ -98,8 +108,14 @@ check "an inner variable hides a typedef" $?
 CWRAP_DUMP_AST=1 "$cwrap" -translate foreach.c -o foreach.out 2> foreach.log
 [ $? -eq 0 ] && grep -q FOR_EACH_STATEMENT foreach.log &&
   ! grep -q 'not translated' foreach.log &&
-  grep -q '^  foreach (v$' foreach.out && grep -q '^           in V) { g (v); }$' foreach.out
-check "foreach (v in V) parses, and is kept as written" $?
+  grep -q '^  for (int __i_v = 0; __i_v < V.n; ++__i_v$' foreach.out &&
+  grep -q '^            ) { __auto_type v = V.a\[__i_v\]; { g (v); } }$' foreach.out
+check "foreach (v in V) becomes a for loop, on as many lines" $?
+
+"$cwrap" -Wall foreach_run.c -o foreach_run 2> foreach_run.log &&
+  [ "$(./foreach_run)" = 150 ] &&
+  grep -q '^foreach_run.c:17:7: warning: unused variable' foreach_run.log
+check "translated foreach loops run, nested too, and later lines keep their numbers" $?
 
 CWRAP_DUMP_AST=1 "$cwrap" -translate foreach_gap.c -o foreach_gap.out 2> foreach_gap.log
 [ $? -eq 0 ] && grep -q FOR_EACH_STATEMENT foreach_gap.log
@@ -162,12 +178,24 @@ done
      sed 's/.*&//' | tr '\n' ' ')" = "a; b; d; s; last; " ] &&
   grep -q '^scalar a; static scalar \*const __cwrap_scalar_slot_0 ' scalar.out &&
   grep -q '^extern scalar e;$' scalar.out && grep -q '^typedef scalar t;$' scalar.out &&
-  grep -q '^int g (void) { scalar local; local = 0; return local; }$' scalar.out
+  grep -q '^int g (void) { scalar local = 0; return local; }$' scalar.out
 check "each global scalar gets a slot in the section scalars" $?
 
 "$cwrap" -w scalar.c -o scalar 2> scalar.log; ./scalar
 [ $? = 10 ]
 check "the constructor numbers the global scalars 0 to 4" $?
+
+"$cwrap" -translate scalar_local.c -o scalar_local.out &&
+  grep -q '^  scalar a __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new ();$' scalar_local.out &&
+  grep -q '^  static scalar s, \*const __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = &s;$' scalar_local.out &&
+  grep -q '^  scalar kept = scalar_new ();$' scalar_local.out
+check "local scalars get an id from scalar_new (), and a cleanup that frees it" $?
+
+"$cwrap" -Wall scalar_local.c -o scalar_local 2> scalar_local.log &&
+  [ "$(./scalar_local | tr '\n' ' ')" = "16 in use 3 kept 2 gs 1 globals 2 " ] &&
+  grep -q '^scalar_local.c:22:7: warning: unused variable' scalar_local.log &&
+  [ "$(grep -c 'warning:' scalar_local.log)" = 1 ]
+check "local scalars are freed however their scope ends, in reverse order" $?
 
 "$cwrap" -c scalar_other.c -o scalar_other.o && "$cwrap" -c scalar_main.c -o scalar_main.o &&
   "$cwrap" scalar_main.o scalar_other.o -o scalars && [ "$(./scalars)" = "6 3f" ]
@@ -186,29 +214,18 @@ rc=$?
   grep -q "^assign.c:3: warning: scalar 'c' has a value of its own" assign.log
 check "changing a scalar is a warning, and the file still compiles" $?
 
-"$cwrap" -translate ctor.c -o ctor.out
-[ "$(grep -c number_global_scalars ctor.out)" = 1 ] &&
-  grep -A1 '^extern scalar \*const __start_scalars\[\] ' ctor.out |
-    tail -n 1 | grep -q '^# 4 "ctor.c"$'
-check "the file with main gets the scalar constructor, just before main" $?
+"$cwrap" -Wall scalar_runtime.c -o scalar_runtime 2> scalar_runtime.log &&
+  [ ! -s scalar_runtime.log ] &&
+  [ "$(./scalar_runtime | tr '\n' ' ')" = "0 1 0 1 0 0,1,2, 0,2, 64 1 64 63 " ]
+check "scalar.h comes with every file: ids reused lowest first, all 64 usable, foreach_scalar" $?
 
-"$cwrap" -translate hello.c > hello_noscalar.out
-! grep -q number_global_scalars hello_noscalar.out
-check "no constructor where main comes with no scalar type" $?
+./scalar_runtime more > /dev/null 2> scalar_runtime.log
+[ $? -ne 0 ] && grep -q 'scalar_new: all 64 scalars are in use' scalar_runtime.log
+check "scalar_new () stops the program when no id is left" $?
 
-"$cwrap" -translate a.c > nomain.out
-! grep -q number_global_scalars nomain.out
-check "a file without main gets no constructor" $?
-
-"$cwrap" -Wall -c ctor.c -o ctor.o 2> ctor.log
-grep -q '^ctor.c:6:7: warning: unused variable' ctor.log &&
-  [ "$(grep -c 'warning:' ctor.log)" = 1 ] && nm ctor.o | grep -q ' t number_global_scalars$'
-check "gcc's lines after the constructor are unchanged, and it warns of nothing" $?
-
-"$cwrap" -Wall -include scalar.h ctor_first.c -o ctor_first 2> ctor_first.log && ./ctor_first &&
-  grep -q '^ctor_first.c:3:7: warning: unused variable' ctor_first.log &&
-  [ "$(grep -c 'warning:' ctor_first.log)" = 1 ] && nm ctor_first | grep -q number_global_scalars
-check "the constructor also fits before a main that starts the file" $?
+"$cwrap" -c scalar_runtime.c -o scalar_runtime.o && "$cwrap" scalar_runtime.o -o scalar_runtime2 &&
+  ./scalar_runtime2 > /dev/null
+check "linking objects alone also brings in the runtime" $?
 
 "$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
 gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]

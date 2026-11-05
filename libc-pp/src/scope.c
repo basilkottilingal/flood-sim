@@ -233,6 +233,23 @@ void scope_resume_params (struct scope_table *st)
   st->top = sc;
 }
 
+void scope_abandon_params (struct scope_table *st)
+{
+  if (st->param_depth > 0)
+    st->param_depth--;
+  scope_pop (st);
+}
+
+void scope_error_recovered (struct scope_table *st)
+{
+  st->typedef_seen = 0;
+  st->declaring = SCOPE_VARIABLE;
+  if (st->param_depth == 0 && st->fn_params) {
+    drop_scope_table (st, st->fn_params);
+    st->fn_params = NULL;
+  }
+}
+
 void scope_declarator_named (struct scope_table *st)
 {
   /* The kept parameters belonged to a prototype: no body is coming for them. */

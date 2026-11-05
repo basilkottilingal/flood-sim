@@ -1,4 +1,4 @@
-CC        = gcc
+CC        = cwrap
 LIBS     ?= flow-network geotiff view geojson b-amr alloc # Order in the dependency order
 CPPFLAGS += -I. -I../
           #$(addprefix -I../lib,$(LIBS))
