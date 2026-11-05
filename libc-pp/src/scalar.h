@@ -24,18 +24,6 @@
   void   scalar_free   (scalar);       /* an id not in use is left alone */
   int    scalar_in_use (scalar);
   int    scalar_count  (void);         /* ids in use */
-  scalar scalar_next   (scalar after); /* the next id in use, or -1 */
-
-  /*
-  .. For each scalar in use, in increasing order:
-  ..   foreach_scalar (s)
-  ..     printf ("%d\n", s);
-  .. s is an int, not a scalar, for cwrap's warning on assigning to a scalar.
-  .. Freeing s inside the loop is safe. An id taken inside the loop is visited
-  .. only if it is above s.
-  */
-  #define foreach_scalar(s) \
-    for (int s = scalar_next (-1); s >= 0; s = scalar_next (s))
 
   /* For cwrap: __attribute__ ((cleanup)) passes the scalar's address. */
   static inline void __cwrap_scalar_free (scalar * s)

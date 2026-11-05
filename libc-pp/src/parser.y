@@ -40,6 +40,7 @@ struct ast *parse_file (FILE *in, int *rejected);
 
 #include "allocator.h"
 #include "ast.h"
+#include "diag.h"
 #include "scope.h"
 #include "translate.h"
 
@@ -59,6 +60,13 @@ struct parse_status {
     scope_error_recovered (scopes);                                     \
     if (status->errors >= MAX_PARSE_ERRORS)                             \
       YYABORT;                                                          \
+  } while (0)
+
+/* A declaration in a block: its scalars and caches get what cwrap gives them. */
+#define LOCAL_DECLARATION(decl)                                         \
+  do {                                                                  \
+    local_scalars (decl);                                               \
+    status->rejected += local_caches (decl);                            \
   } while (0)
 
 #define N(KIND, ...)                                                    \
@@ -86,12 +94,12 @@ static int foreach_declared (const struct scope_table *scopes,
 
   if (!name)
     return 0;
-  fprintf (stderr, "%s:%d: error: foreach loop, but 'foreach' is already "
-           "declared\n", t->file, t->line);
+  diag (t->file, t->line, DIAG_ERROR, "foreach loop, but 'foreach' is already "
+        "declared");
   if (name->decl) {
     t = ast_first_token (name->decl);
-    fprintf (stderr, "%s:%d: note: 'foreach' is declared here; rename it to "
-             "use the loop\n", t->file, t->line);
+    diag (t->file, t->line, DIAG_NOTE, "'foreach' is declared here; rename it "
+          "to use the loop");
   }
   return 1;
 }
@@ -118,7 +126,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token ALIGNAS ALIGNOF ATOMIC BOOL COMPLEX GENERIC IMAGINARY NORETURN
 %token STATIC_ASSERT THREAD_LOCAL
 %token ATTRIBUTE EXTENSION ASM TYPEOF INT128 REAL IMAG LABEL AUTO_TYPE
-%token FOREACH
+%token FOREACH CACHE
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -131,8 +139,9 @@ static int foreach_declared (const struct scope_table *scopes,
 %precedence ELSE
 /* `_Atomic (int)` is a specifier, not the qualifier followed by a declarator. */
 %precedence ATOMIC_QUALIFIER
-/* `foreach (` is a loop or a call, never the name foreach in parentheses. */
-%precedence FOREACH_NAME
+/* `foreach (` is a loop or a call, and `cache (` a type or a call, never the
+ * name in parentheses. */
+%precedence KEYWORD_NAME
 %precedence '('
 
 %%
@@ -186,7 +195,8 @@ declaration:
   | decl_specs_untyped ';'        { scope_specifiers_reset (scopes);
                                     $$ = N (DECLARATION, $1, $2); }
   | decl_specs_typed specs_done init_declarator_list ';'
-                                  { $$ = N (DECLARATION, $1, $3, $4); }
+                                  { $$ = N (DECLARATION, $1, $3, $4);
+                                    status->rejected += check_cache_declaration ($$); }
   | EXTENSION declaration         { $$ = N (EXTENSION_DECLARATION, $1, $2); }
   | static_assert_declaration
   ;
@@ -245,6 +255,14 @@ alignment_specifier:
 type_specifier:
     type_specifier_keyword
   | TYPE_NAME
+  | cache_specifier
+  ;
+
+/* cache (T): struct cache_T, which the translation defines. A complete type,
+ * like a typedef name, so no other type specifier goes with it. */
+cache_specifier:
+    CACHE '(' type_name ')'       { $$ = cache_specifier ($1, $2, $3, $4,
+                                                          &status->rejected); }
   ;
 
 type_specifier_keyword:
@@ -321,12 +339,14 @@ opt_attributes:
   ;
 
 /* An identifier where a typedef name means nothing special: tags, members,
- * labels, enumerators. FOREACH is a name here, in decl_name and in
- * primary_expression, as the lexer returns it for every use but a typedef. */
+ * labels, enumerators. FOREACH and CACHE are names here, in decl_name and in
+ * primary_expression, as the lexer returns them for every use but a typedef
+ * once <cwrap/cache.h> is in. */
 any_identifier:
     IDENTIFIER
   | TYPE_NAME
   | FOREACH
+  | CACHE
   ;
 
 /* Declarators */
@@ -382,6 +402,8 @@ decl_name:
   | TYPE_NAME                     { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
   | FOREACH                       { scope_declarator_named (scopes);
+                                    $$ = N (DECL_NAME, $1); }
+  | CACHE                         { scope_declarator_named (scopes);
                                     $$ = N (DECL_NAME, $1); }
   ;
 
@@ -651,7 +673,7 @@ statement:
 
 labeled_statement:
     label statement               { $$ = N (LABELED_STATEMENT, $1, $2); }
-  | label declaration             { local_scalars ($2);
+  | label declaration             { LOCAL_DECLARATION ($2);
                                     $$ = N (LABELED_STATEMENT, $1, $2); }
   ;
 
@@ -684,9 +706,10 @@ block_items:
   | block_items block_item        { $$ = ast_add ($1, $2); }
   ;
 
-/* Scalars declared in a block get their ids from scalar_new (): local_scalars (). */
+/* Scalars declared in a block get their ids from scalar_new (), and caches
+ * a cleanup: LOCAL_DECLARATION (). */
 block_item:
-    declaration                   { local_scalars ($1); $$ = $1; }
+    declaration                   { LOCAL_DECLARATION ($1); $$ = $1; }
   | statement
   | label_declaration
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -725,16 +748,20 @@ iteration_statement:
                                   { $$ = N (FOR_STATEMENT, $1, $2, $3, $4, $5, $6, $7, $8); }
   /* The loop variable is declared after the collection, which still means the
    * outer name in `foreach (v in v)`, and before the body is read. The scope
-   * opens after the `)`, since until `in` this may still be a call. */
+   * opens after the `)`, since until `in` this may still be a call. The value
+   * of the first action is the declaration of V if it is a cache, looked up
+   * before v can hide it. */
   | FOREACH '(' any_identifier foreach_in IDENTIFIER ')' open_scope
                                   { if (foreach_declared (scopes, $1))
                                       status->rejected++;
+                                    $$ = (struct ast *)cache_variable (scopes, $5);
                                     scope_add (scopes, ast_token ($3)->text, SCOPE_VARIABLE, $3); }
     statement
                                   /* The loop's scope, with v in it, is still
                                    * open here: the place to check the names
                                    * that the translation brings in. */
-                                  { $$ = foreach_to_for ($1, $2, $3, $4, $5, $6, $9); }
+                                  { $$ = foreach_to_for ($1, $2, $3, $4, $5, $6, $9,
+                                                         $8 != NULL); }
     close_scope
                                   { $$ = N (FOR_EACH_STATEMENT, $10, $7, $11); }
   ;
@@ -750,7 +777,7 @@ foreach_in:
 
 for_init:
     expression_statement
-  | declaration                   { local_scalars ($1); $$ = $1; }
+  | declaration                   { LOCAL_DECLARATION ($1); $$ = $1; }
   ;
 
 opt_expression:
@@ -764,7 +791,8 @@ jump_statement:
   | CONTINUE ';'                  { $$ = N (CONTINUE_STATEMENT, $1, $2); }
   | BREAK ';'                     { $$ = N (BREAK_STATEMENT, $1, $2); }
   | RETURN ';'                    { $$ = N (RETURN_STATEMENT, $1, $2); }
-  | RETURN expression ';'         { $$ = N (RETURN_STATEMENT, $1, $2, $3); }
+  | RETURN expression ';'         { status->rejected += check_cache_copy (scopes, $2, $1);
+                                    $$ = N (RETURN_STATEMENT, $1, $2, $3); }
   ;
 
 asm_statement:
@@ -831,7 +859,8 @@ asm_labels:
 
 primary_expression:
     IDENTIFIER
-  | FOREACH %prec FOREACH_NAME
+  | FOREACH %prec KEYWORD_NAME
+  | CACHE %prec KEYWORD_NAME
   | CONSTANT
   | string
   | '(' expression ')'            { $$ = N (PAREN_EXPRESSION, $1, $2, $3); }
@@ -883,8 +912,11 @@ postfix_expression:
   | postfix_expression '(' ')'    { $$ = N (CALL, $1, $2, $3); }
   | FOREACH '(' ')'               { $$ = N (CALL, $1, $2, $3); }
   | FOREACH '(' argument_list ')' { $$ = N (CALL, $1, $2, $3, $4); }
+  | CACHE '(' ')'                 { $$ = N (CALL, $1, $2, $3); }
+  | CACHE '(' argument_list ')'   { $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '(' argument_list ')'
-                                  { $$ = N (CALL, $1, $2, $3, $4); }
+                                  { check_cache_arguments (scopes, $3);
+                                    $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '.' any_identifier
                                   { $$ = N (MEMBER, $1, $2, $3); }
   | postfix_expression ARROW any_identifier
@@ -1024,6 +1056,9 @@ assignment_expression:
     conditional_expression
   | unary_expression assignment_operator assignment_expression
                                   { check_scalar_assignment (scopes, $1, $2);
+                                    /* one error for w = v */
+                                    status->rejected += check_cache_copy (scopes, $1, $2)
+                                                        || check_cache_copy (scopes, $3, $2);
                                     $$ = N (ASSIGNMENT, $1, $2, $3); }
   ;
 
@@ -1065,12 +1100,12 @@ static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
   (void)scopes;
   if (++status->errors > MAX_PARSE_ERRORS)
     return;
-  fprintf (stderr, "%s:%d: warning: %s%s near '%s'\n", t->file, t->line,
-           status->errors == 1 ? "not translated, leaving this file to gcc: " : "",
-           msg, t->text);
+  diag (t->file, t->line, DIAG_WARNING, "%s%s near '%s'",
+        status->errors == 1 ? "not translated, leaving this file to gcc: " : "",
+        msg, t->text);
   if (status->errors == MAX_PARSE_ERRORS)
-    fprintf (stderr, "%s:%d: note: %d errors, not looking for more\n", t->file,
-             t->line, MAX_PARSE_ERRORS);
+    diag (t->file, t->line, DIAG_NOTE, "%d errors, not looking for more",
+          MAX_PARSE_ERRORS);
 }
 
 struct ast *parse_file (FILE *in, int *rejected)

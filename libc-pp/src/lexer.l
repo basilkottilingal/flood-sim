@@ -30,7 +30,12 @@ struct lexer {
   const char *file;
   struct token last;
   int eof_seen;
+  int cache_on;           /* <cwrap/cache.h> seen: cache and foreach are keywords */
 };
+
+/* The header that turns on cache (T) and foreach, as a linemarker names it. */
+#define CACHE_HEADER "/cwrap/cache.h"
+
 
 /* Placeholders: punctuators share these strings instead of the arena. */
 static const char *const punctuators[256] = {
@@ -76,12 +81,25 @@ static void directive (struct lexer *lx, int *lineno, const char *s)
     n = (int)(q - s);
     if (strncmp (lx->file, s, n) != 0 || lx->file[n])
       lx->file = allocate_str (s, n);
+    if (n >= (int)strlen (CACHE_HEADER)
+        && strncmp (s + n - strlen (CACHE_HEADER), CACHE_HEADER,
+                    strlen (CACHE_HEADER)) == 0)
+      lx->cache_on = 1;
   }
 }
 
 static int identifier_kind (const struct lexer *lx, const char *name)
 {
   return scope_is_type (lx->scopes, name) ? T_TYPE_NAME : T_IDENTIFIER;
+}
+
+/* cache and foreach, once <cwrap/cache.h> is in: a keyword, but for a typedef.
+ * The parser takes the keyword as a name too. */
+static int cache_word (const struct lexer *lx, const char *name, int keyword)
+{
+  if (!lx->cache_on || scope_is_type (lx->scopes, name))
+    return identifier_kind (lx, name);
+  return keyword;
 }
 
 /* The leaf for one token, which also takes the trivia gathered before it. */
@@ -181,9 +199,9 @@ PFX     (u8|u|U|L)
 "__builtin_offsetof"    { AST (T_BUILTIN_OFFSETOF); }
 "__builtin_types_compatible_p"  { AST (T_BUILTIN_TYPES_COMPATIBLE); }
 
-  /* Always a keyword, but for a typedef: the parser takes it as a name too. */
-"foreach"               { AST (scope_is_type (yyextra->scopes, yytext)
-                               ? T_TYPE_NAME : T_FOREACH); }
+  /* Ordinary names until <cwrap/cache.h> comes in. */
+"foreach"               { AST (cache_word (yyextra, yytext, T_FOREACH)); }
+"cache"                 { AST (cache_word (yyextra, yytext, T_CACHE)); }
 
 {ID}                    { AST (identifier_kind (yyextra, yytext)); }
 {PPNUM}                 { AST (T_CONSTANT); }

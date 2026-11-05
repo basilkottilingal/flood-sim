@@ -4,7 +4,7 @@ CFLAGS ?= -g -O1
 CFLAGS += -std=gnu11 -Wall -Wextra -D_GNU_SOURCE -Isrc -I$(BUILD)
 
 OBJS := $(BUILD)/driver.o $(BUILD)/translate.o $(BUILD)/ast.o \
-        $(BUILD)/allocator.o $(BUILD)/scope.o \
+        $(BUILD)/allocator.o $(BUILD)/scope.o $(BUILD)/diag.o \
         $(BUILD)/parser.tab.o $(BUILD)/lexer.yy.o
 
 all: $(BUILD)/cwrap $(BUILD)/scalar.o
@@ -14,7 +14,8 @@ $(BUILD)/cwrap: $(OBJS)
 
 # The runtime that cwrap adds to what it compiles: see src/scalar.h.
 $(BUILD)/driver.o: CFLAGS += -DCWRAP_INCLUDE_DIR='"$(abspath src)"' \
-                             -DCWRAP_LIB_DIR='"$(abspath $(BUILD))"'
+                             -DCWRAP_LIB_DIR='"$(abspath $(BUILD))"' \
+                             -DCWRAP_HEADER_DIR='"$(abspath include)"'
 
 $(BUILD)/scalar.o: src/scalar.c src/scalar.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -36,10 +37,10 @@ lexer: $(BUILD)/lexer.c
 $(BUILD)/lexer.yy.o: $(BUILD)/lexer.yy.c $(BUILD)/parser.tab.h src/ast.h src/lexer.h src/scope.h src/allocator.h
 	$(CC) $(CFLAGS) -Wno-unused-function -Wno-sign-compare -c -o $@ $<
 
-$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h
+$(BUILD)/parser.tab.o: $(BUILD)/parser.tab.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h src/diag.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h $(BUILD)/parser.tab.h | $(BUILD)
+$(BUILD)/%.o: src/%.c src/ast.h src/lexer.h src/scope.h src/allocator.h src/translate.h src/diag.h $(BUILD)/parser.tab.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD):

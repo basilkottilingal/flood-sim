@@ -12,7 +12,6 @@
 .. the end of the last word stay clear: those ids are never handed out.
 */
 static uint32_t bits [nn];
-static int ready = 0;
 
 # if (defined(__GNUC__) || defined(__clang__)) && (UINT_MAX == 0xFFFFFFFF)
 #   if defined(__has_builtin)
@@ -40,14 +39,6 @@ static inline unsigned ctz32 (uint32_t v)
 # endif
 }
 
-/* all ids free */
-static void init ()
-{
-  for (int s = 0; s < NSCALAR_MAX; s++)
-    bits [s/32] |= (uint32_t) 1 << (s & 31);
-  ready = 1;
-}
-
 /* the lowest free id, now taken, or -1 */
 static inline int popbit ()
 {
@@ -70,8 +61,6 @@ static inline void pushbit (int b)
 
 scalar scalar_new ()
 {
-  if (!ready)
-    init ();
   int s = popbit ();
   if (s < 0)
   {
@@ -84,7 +73,7 @@ scalar scalar_new ()
 
 int scalar_in_use (scalar s)
 {
-  return ready && s >= 0 && s < NSCALAR_MAX
+  return s >= 0 && s < NSCALAR_MAX
          && !((bits [s/32] >> (s & 31)) & 1);
 }
 
@@ -101,37 +90,18 @@ void scalar_free (scalar s)
 int scalar_count ()
 {
   int nfree = 0;
-  if (!ready)
-    return 0;
   for (unsigned i = 0; i < nn; i++)
     for (uint32_t v = bits [i]; v; v &= v - 1)
       nfree++;
   return NSCALAR_MAX - nfree;
 }
 
-scalar scalar_next (scalar after)
-{
-  int from = after < 0 ? 0 : (int) after + 1;
-  if (!ready || from >= NSCALAR_MAX)
-    return -1;
-  for (unsigned i = (unsigned) from / 32; i < nn; i++)
-  {
-    uint32_t v = ~bits [i];                     /* the ids in use */
-    if (i == (unsigned) from / 32)
-      v &= ~(uint32_t) 0 << (from & 31);        /* from 'from' on */
-    if (i == nn - 1 && NSCALAR_MAX % 32)
-      v &= ((uint32_t) 1 << (NSCALAR_MAX % 32)) - 1;
-    if (v)
-      return (scalar) (i * 32 + ctz32 (v));
-  }
-  return -1;
-}
-
 /*
 .. cwrap puts a slot for each scalar at file scope (and each static scalar in
 .. a function) in the section "scalars". The linker joins the slots of every
 .. file between __start_scalars and __stop_scalars, which are weak for a
-.. program with none. Priority 101 runs this before other constructors.
+.. program with none. Priority 101 runs this before other constructors, so
+.. every id is free before any code can ask for one.
 */
 extern scalar * const __start_scalars [] __attribute__ ((weak));
 extern scalar * const __stop_scalars [] __attribute__ ((weak));
@@ -139,6 +109,8 @@ int n_global_scalars = 0;
 
 __attribute__ ((constructor (101))) static void number_global_scalars ()
 {
+  for (int s = 0; s < NSCALAR_MAX; s++)       /* all ids free */
+    pushbit (s);
   for (scalar * const * p = __start_scalars; p < __stop_scalars; p++)
     **p = scalar_new ();
   n_global_scalars = (int) (__stop_scalars - __start_scalars);

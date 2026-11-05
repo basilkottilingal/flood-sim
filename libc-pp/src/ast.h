@@ -22,6 +22,7 @@
   X (STRUCT_DECLARATOR_LIST) X (STRUCT_DECLARATOR)                            \
   X (ENUM_SPECIFIER) X (ENUMERATOR_LIST) X (ENUMERATOR)                       \
   X (TYPEOF_SPECIFIER) X (ATOMIC_SPECIFIER) X (ALIGNMENT_SPECIFIER)           \
+  X (CACHE_SPECIFIER)                                                         \
   X (ATTRIBUTE) X (ATTRIBUTE_LIST) X (ATTRIBUTE_ITEM) X (ATTRIBUTES)          \
   X (INITIALIZER_LIST_EXPR) X (INITIALIZER_LIST) X (INITIALIZER_ITEM)         \
   X (DESIGNATION) X (DESIGNATOR) X (OLD_DESIGNATOR)                           \

@@ -10,7 +10,8 @@
  * no effect. (Not -emit, which gcc reads as -e mit, an entry symbol.)
  *
  * Every translated file also gets scalar.h, as if by #include on its first
- * line, and a program gets scalar.o: see scalar.h.
+ * line, and a program gets scalar.o: see scalar.h. The headers cwrap brings,
+ * such as <cwrap/cache.h>, are on the include path, after the user's own.
  *
  *   CWRAP_CC       compiler to run (default gcc)
  *   CWRAP_VERBOSE  print each command
@@ -26,6 +27,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "diag.h"
 #include "translate.h"
 
 enum stage {
@@ -78,6 +80,9 @@ static const char *const passthrough_flags[] = {
 #ifndef CWRAP_LIB_DIR
 #define CWRAP_LIB_DIR "."
 #endif
+#ifndef CWRAP_HEADER_DIR
+#define CWRAP_HEADER_DIR "include"
+#endif
 
 static const char *cc;
 static char tmpdir[4096];
@@ -85,13 +90,13 @@ static int verbose;
 
 static void die (const char *fmt, ...)
 {
+  char msg[1024];
   va_list ap;
 
-  fputs ("cwrap: ", stderr);
   va_start (ap, fmt);
-  vfprintf (stderr, fmt, ap);
+  vsnprintf (msg, sizeof (msg), fmt, ap);
   va_end (ap);
-  fputc ('\n', stderr);
+  diag_tool (DIAG_ERROR, "%s", msg);
   exit (1);
 }
 
@@ -174,7 +179,7 @@ static int run (struct vec *cmd)
     die ("fork: %s", strerror (errno));
   if (pid == 0) {
     execvp (cmd->v[0], (char *const *)cmd->v);
-    fprintf (stderr, "cwrap: %s: %s\n", cmd->v[0], strerror (errno));
+    diag_tool (DIAG_ERROR, "%s: %s", cmd->v[0], strerror (errno));
     _exit (127);
   }
   if (waitpid (pid, &status, 0) < 0)
@@ -255,6 +260,7 @@ int main (int argc, char **argv)
   int translate_only = 0, untranslated = 0;
   int want_deps = 0, have_dep_target = 0;
   int other_sources = 0, nobj = 0, ninputs = 0;
+  const char *color = NULL;
 
   if (!items)
     die ("out of memory");
@@ -262,6 +268,12 @@ int main (int argc, char **argv)
   if (!cc || !*cc)
     cc = "gcc";
   verbose = getenv ("CWRAP_VERBOSE") != NULL;
+  /* gcc's color option, for our own diagnostics too: the last one counts. */
+  for (int i = 1; i < argc; i++)
+    if (strncmp (argv[i], "-fdiagnostics-color", 19) == 0
+        || strcmp (argv[i], "-fno-diagnostics-color") == 0)
+      color = argv[i];
+  diag_init (color);
 
   for (int i = 1; i < argc; i++) {
     const char *a = argv[i];
@@ -382,6 +394,8 @@ int main (int argc, char **argv)
     push (&all, cc);
     for (int i = 1; i < argc; i++)
       push (&all, argv[i]);
+    push (&all, "-I");
+    push (&all, CWRAP_HEADER_DIR);
     /* Linking objects alone still needs the runtime. */
     if (!passthrough && ninputs && !compile_only && !assemble_only)
       push (&all, CWRAP_LIB_DIR "/scalar.o");
@@ -427,6 +441,8 @@ int main (int argc, char **argv)
     add_stage_flags (&pp, items, nitems, ST_PP);
     push (&pp, "-include");
     push (&pp, CWRAP_INCLUDE_DIR "/scalar.h");
+    push (&pp, "-I");
+    push (&pp, CWRAP_HEADER_DIR);
     if (want_deps && !dep_file) {
       char *base = strdup (result);
       char *dot = strrchr (base, '.');

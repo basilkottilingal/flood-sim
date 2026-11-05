@@ -65,7 +65,7 @@ check "cwrap lists each syntax error, and none of its own making, before gcc" $?
   grep -q '^errors_cap.c:20: note: 20 errors, not looking for more' errors_cap.log
 check "cwrap stops listing syntax errors after 20" $?
 
-"$cwrap" -c foreach_twice.c -o foreach_twice.o 2> foreach_twice.log
+"$cwrap" -include cwrap/cache.h -c foreach_twice.c -o foreach_twice.o 2> foreach_twice.log
 [ $? -ne 0 ] && [ "$(grep -c ': error: foreach loop' foreach_twice.log)" = 2 ] &&
   [ ! -e foreach_twice.o ]
 check "every foreach that clashes with a declared foreach is reported" $?
@@ -105,73 +105,111 @@ check "operators nest by precedence" $?
 "$cwrap" -w -c hide.c -o hide.o
 check "an inner variable hides a typedef" $?
 
-CWRAP_DUMP_AST=1 "$cwrap" -translate foreach.c -o foreach.out 2> foreach.log
+CWRAP_DUMP_AST=1 "$cwrap" -include cwrap/cache.h -translate foreach.c -o foreach.out 2> foreach.log
 [ $? -eq 0 ] && grep -q FOR_EACH_STATEMENT foreach.log &&
   ! grep -q 'not translated' foreach.log &&
   grep -q '^  for (int __i_v = 0; __i_v < V.n; ++__i_v$' foreach.out &&
   grep -q '^            ) { __auto_type v = V.a\[__i_v\]; { g (v); } }$' foreach.out
 check "foreach (v in V) becomes a for loop, on as many lines" $?
 
-"$cwrap" -Wall foreach_run.c -o foreach_run 2> foreach_run.log &&
+"$cwrap" -include cwrap/cache.h -Wall foreach_run.c -o foreach_run 2> foreach_run.log &&
   [ "$(./foreach_run)" = 150 ] &&
   grep -q '^foreach_run.c:17:7: warning: unused variable' foreach_run.log
 check "translated foreach loops run, nested too, and later lines keep their numbers" $?
 
-CWRAP_DUMP_AST=1 "$cwrap" -translate foreach_gap.c -o foreach_gap.out 2> foreach_gap.log
+CWRAP_DUMP_AST=1 "$cwrap" -include cwrap/cache.h -translate foreach_gap.c -o foreach_gap.out 2> foreach_gap.log
 [ $? -eq 0 ] && grep -q FOR_EACH_STATEMENT foreach_gap.log
 check "a foreach header may span linemarkers" $?
 
-CWRAP_DUMP_AST=1 "$cwrap" -translate foreach_scope.c -o foreach_scope.out 2> foreach_scope.log
-[ $? -eq 0 ] && [ "$(grep -c MULTIPLICATIVE foreach_scope.log)" = 1 ]
+CWRAP_DUMP_AST=1 "$cwrap" -include cwrap/cache.h -translate foreach_scope.c -o foreach_scope.out 2> foreach_scope.log
+[ $? -eq 0 ] && [ "$(grep -A1 MULTIPLICATIVE foreach_scope.log | grep -c "foreach_scope.c:")" = 1 ]
 check "the foreach variable hides a typedef until the loop ends" $?
 
-"$cwrap" -translate foreach_names.c -o foreach_names.out 2> foreach_names.log
+"$cwrap" -include cwrap/cache.h -translate foreach_names.c -o foreach_names.out 2> foreach_names.log
 [ $? -eq 0 ] && ! grep -q 'not translated' foreach_names.log
 check "in may also be the names in a foreach" $?
 
-CWRAP_DUMP_AST=1 "$cwrap" -translate foreach_types.c -o foreach_types.out 2> foreach_types.log
+CWRAP_DUMP_AST=1 "$cwrap" -include cwrap/cache.h -translate foreach_types.c -o foreach_types.out 2> foreach_types.log
 [ $? -eq 0 ] && [ "$(grep -c FOR_EACH_STATEMENT foreach_types.log)" = 1 ]
 check "a foreach works while in is a type name" $?
 
-"$cwrap" -translate foreach_scoped.c -o foreach_scoped.out 2> foreach_scoped.log
+"$cwrap" -include cwrap/cache.h -translate foreach_scoped.c -o foreach_scoped.out 2> foreach_scoped.log
 [ $? -eq 0 ] && ! grep -q 'not translated' foreach_scoped.log
 check "a member or parameter named foreach leaves the keyword alone" $?
 
-"$cwrap" -c foreach_declared.c -o foreach_declared.o 2> foreach_declared.log
+"$cwrap" -include cwrap/cache.h -c foreach_declared.c -o foreach_declared.o 2> foreach_declared.log
 [ $? -ne 0 ] && grep -q '^foreach_declared.c:4: error: ' foreach_declared.log &&
   grep -q '^foreach_declared.c:1: note: ' foreach_declared.log &&
   ! grep -q 'not translated' foreach_declared.log &&
   [ "$(wc -l < foreach_declared.log)" = 2 ] && [ ! -e foreach_declared.o ]
 check "foreach (v in V) stops in cwrap if foreach is declared, and says where" $?
 
-"$cwrap" -translate foreach_declared.c -o foreach_declared.out 2> foreach_declared.log
+"$cwrap" -include cwrap/cache.h -translate foreach_declared.c -o foreach_declared.out 2> foreach_declared.log
 [ $? -eq 1 ] && grep -q ': error: ' foreach_declared.log && [ ! -e foreach_declared.out ]
 check "-translate stops there too, and writes nothing" $?
 
-"$cwrap" -c foreach_header.c -o foreach_header.o 2> foreach_header.log
+"$cwrap" -include cwrap/cache.h -c foreach_header.c -o foreach_header.o 2> foreach_header.log
 [ $? -ne 0 ] && grep -q '^foreach_taken.h:1: note: ' foreach_header.log
 check "the note points into the header that declares foreach" $?
 
-"$cwrap" -c foreach_typedef.c -o foreach_typedef.o 2> foreach_typedef.log
+"$cwrap" -include cwrap/cache.h -c foreach_typedef.c -o foreach_typedef.o 2> foreach_typedef.log
 [ $? -ne 0 ] && grep -q '^foreach_typedef.c:2: warning: not translated' foreach_typedef.log
 check "a foreach while foreach is a typedef is left to gcc" $?
 
-"$cwrap" -c foreach_gap2.c -o foreach_gap2.o 2> foreach_gap2.log
+"$cwrap" -include cwrap/cache.h -c foreach_gap2.c -o foreach_gap2.o 2> foreach_gap2.log
 [ $? -ne 0 ] && grep -q '^foreach_gap2.c:4: error: ' foreach_gap2.log
 check "a foreach split by linemarkers still stops if foreach is declared" $?
 
-"$cwrap" -translate foreach_closed.c -o foreach_closed.out 2> foreach_closed.log
+"$cwrap" -include cwrap/cache.h -translate foreach_closed.c -o foreach_closed.out 2> foreach_closed.log
 [ $? -eq 0 ] && [ ! -s foreach_closed.log ]
 check "a foreach whose scope has closed does not stop a foreach" $?
 
-"$cwrap" -w -c foreach_lookalike.c -o foreach_lookalike.o
+"$cwrap" -include cwrap/cache.h -w -c foreach_lookalike.c -o foreach_lookalike.o
 check "a declaration that looks like a foreach still compiles" $?
 
 for f in foreach_bad*.c; do
-  "$cwrap" -translate "$f" > /dev/null 2> foreach_bad.log
+  "$cwrap" -include cwrap/cache.h -translate "$f" > /dev/null 2> foreach_bad.log
   [ $? -eq 1 ] && grep -q 'not translated' foreach_bad.log
   check "$(sed 's/.*{ //; s/ ; }//' "$f") is rejected" $?
 done
+
+"$cwrap" -Wall -Wextra cache_run.c -o cache_run 2> cache_run.log &&
+  [ ! -s cache_run.log ] && [ "$(./cache_run)" = "7410 1 20 2 hi 3" ]
+check "caches of any type grow, update once when dirty, and cache stays a name" $?
+
+"$cwrap" -translate cache_run.c -o cache_run.out &&
+  grep -q '^struct cache_int { __typeof__ (int) \*a; int n, cap, is_dirty; void (\*update) (struct cache_int \*self); }; struct cache_int squares = ' cache_run.out &&
+  grep -q '^struct cache_point { .* }; struct cache_char_p { __typeof__ (char \*) \*a; .* }; int main (void)$' cache_run.out &&
+  grep -q '^  struct cache_point pts __attribute__ ((cleanup (__cwrap_cache_free))) = { 0 };$' cache_run.out &&
+  grep -q '^  struct cache_char_p words __attribute__ ((cleanup (__cwrap_cache_free))) = { .update = ' cache_run.out &&
+  grep -q '^  for (int __i_s = squares.update && squares.is_dirty ? (squares.is_dirty = 0, squares.update (&squares), 0) : 0; __i_s < squares.n; ++__i_s) { __auto_type s = squares.a\[__i_s\];$' cache_run.out
+check "cache (T) becomes a struct defined on the line of its first use" $?
+
+"$cwrap" -c cache_errors.c -o cache_errors.o 2> cache_errors.log
+[ $? -ne 0 ] && [ ! -e cache_errors.o ] &&
+  [ "$(grep -o '^cache_errors.c:[0-9]*: error' cache_errors.log | cut -d: -f2 | tr '\n' ' ')" = "4 8 9 11 12 15 " ] &&
+  grep -q "^cache_errors.c:8: error: '=' copies cache 'w'" cache_errors.log &&
+  grep -q "^cache_errors.c:7: note: 'w' is declared here" cache_errors.log &&
+  grep -q "^cache_errors.c:15: error: cache (int_p) and cache (int \*) would both be struct cache_int_p" cache_errors.log &&
+  ! grep -q 'not translated' cache_errors.log
+check "copying a cache, or a typedef of one, stops in cwrap" $?
+
+esc=$(printf '\033')
+"$cwrap" -fdiagnostics-color=always -c cache_errors.c -o cache_errors.o 2> color.log
+grep -q "^${esc}\[01m${esc}\[Kcache_errors.c:4:${esc}\[m${esc}\[K ${esc}\[01;31m${esc}\[Kerror:${esc}\[m${esc}\[K a typedef" color.log &&
+  grep -q "${esc}\[01;36m${esc}\[Knote:" color.log &&
+  ! grep -q "$esc" cache_errors.log &&
+  "$cwrap" -fdiagnostics-color=always -fno-diagnostics-color -c cache_errors.c -o cache_errors.o 2> color.log
+[ $? -ne 0 ] && ! grep -q "$esc" color.log
+check "diagnostics are colored as gcc colors them, and only when asked or on a terminal" $?
+
+"$cwrap" -Wall cache_warn.c -o cache_warn 2> cache_warn.log && ./cache_warn &&
+  [ "$(grep -c "^cache_warn.c:7: warning: cache 'v' is passed by value" cache_warn.log)" = 2 ]
+check "a cache passed by value is a warning" $?
+
+"$cwrap" -Wall cache_off.c -o cache_off 2> cache_off.log && [ "$(./cache_off)" = 15 ] &&
+  [ ! -s cache_off.log ]
+check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
 
 "$cwrap" -translate scalar.c -o scalar.out 2> scalar.log
 [ "$(grep -o '__attribute__ ((section ("scalars"), used)) = &[a-z]*;' scalar.out |
@@ -216,8 +254,8 @@ check "changing a scalar is a warning, and the file still compiles" $?
 
 "$cwrap" -Wall scalar_runtime.c -o scalar_runtime 2> scalar_runtime.log &&
   [ ! -s scalar_runtime.log ] &&
-  [ "$(./scalar_runtime | tr '\n' ' ')" = "0 1 0 1 0 0,1,2, 0,2, 64 1 64 63 " ]
-check "scalar.h comes with every file: ids reused lowest first, all 64 usable, foreach_scalar" $?
+  [ "$(./scalar_runtime | tr '\n' ' ')" = "0 1 0 1 0 64 1 " ]
+check "scalar.h comes with every file: ids reused lowest first, all 64 usable" $?
 
 ./scalar_runtime more > /dev/null 2> scalar_runtime.log
 [ $? -ne 0 ] && grep -q 'scalar_new: all 64 scalars are in use' scalar_runtime.log
