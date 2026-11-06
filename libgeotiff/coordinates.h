@@ -4,6 +4,12 @@
   #include <math.h>
   #include "tiff.h"
 
+  /* M_PI is POSIX, not ISO C99/C11 */
+  #ifndef M_PI
+  # define M_PI 3.14159265358979323846
+  #endif
+ 
+
   typedef enum
   {
     GeoKeyDirectoryTag            = 34735,

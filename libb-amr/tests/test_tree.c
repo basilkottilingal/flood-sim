@@ -24,7 +24,7 @@ int main (void)
   int depth = 0, cur = 0, stack = 0, m = 0, c = 0;   /* names the loops use too */
   for (int round = 0; round < 2; round++) {
     tree (4, 4);
-    CHECK (tree_depth () == 1 && tree_nblocks () == 1 + nc && tree_nleaves () == nc);
+    CHECK (tree_get_depth () == 1 && tree_get_nblocks () == 1 + nc && tree_get_nleaves () == nc);
     CHECK (nblocks (a) == 1 + nc && nblocks (b) == 1 + nc && grid_scalar_check ());
 
     /* the scalar hooks: blocks for a local scalar, and back when it ends */
@@ -70,9 +70,9 @@ int main (void)
       p = index_child (p, 0);
     }
     { INDEX_UNPACK (p); CHECK (!divide_leaf (IJKL)); }    /* depthmax */
-    CHECK (tree_depth () == 4 && tree_nblocks () == 1 + 4 * nc);
-    CHECK (tree_nleaves () == 1 + 4 * (nc - 1) && G (depthmin) == 1);
-    CHECK (nblocks (a) == tree_nblocks () && grid_scalar_check ());
+    CHECK (tree_get_depth () == 4 && tree_get_nblocks () == 1 + 4 * nc);
+    CHECK (tree_get_nleaves () == 1 + 4 * (nc - 1) && G (depthmin) == 1);
+    CHECK (nblocks (a) == tree_get_nblocks () && grid_scalar_check ());
 
     /* children_of, neighborhood_of, neighbors_of */
     int n = 0;

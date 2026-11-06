@@ -93,14 +93,14 @@ int main (void)
   }
   /* the leaf loops, on stored blocks: no ghosts */
   tree (3, 4);
-  BlockShape store = block_shape (tree_block_m (), 0);
+  BlockShape store = block_shape (tree_get_block_m (), 0);
   int leaves = 0, par = 0;
   foreach_leaf () {
     Real * u = block_data (sblocks, s);
     block_cells_simd (store, 0) u [c] = level;
     leaves++;
   }
-  CHECK (leaves == tree_nleaves ());
+  CHECK (leaves == tree_get_nleaves ());
   foreach_leaf_parallel () {
     Real * u = block_data (sblocks, s);
     RealSum sum = 0;
@@ -108,9 +108,9 @@ int main (void)
     BLOCK_PRAGMA (omp atomic)
     par += sum == ipow (store.m, dimension) * level;
   }
-  CHECK (par == tree_nleaves ());
+  CHECK (par == tree_get_nleaves ());
   Real * table [64];
-  CHECK (block_table (s, table, NULL) == tree_nleaves ());
+  CHECK (block_table (s, table, NULL) == tree_get_nleaves ());
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);
   return fails != 0;

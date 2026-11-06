@@ -228,13 +228,14 @@
   int  tree (int depthmax, int blockdepth);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
   void tree_destroy (void);
-  int  tree_depth (void);       /* deepest level with a node */
-  int  tree_depth_max (void);   /* the depth tree () was given */
-  int  tree_depth_min (void);   /* the coarsest level of a leaf */
-  int  tree_nblocks (void);     /* nodes, leaves or not      */
-  int  tree_nleaves (void);     /* leaf nodes                */
-  int  tree_block_m (void);     /* cells per block side: 2^blockdepth; a
-                                   block stores m^dimension, no ghosts */
+  int  tree_get_depth (void);       /* deepest level with a node       */
+  int  tree_get_depth_max (void);   /* the depth tree () was given     */
+  int  tree_get_depth_min (void);   /* the coarsest level of a leaf    */
+  int  tree_get_nblocks (void);     /* nodes, leaves or not            */
+  int  tree_get_nleaves (void);     /* leaf nodes                      */
+  int  tree_get_block_m (void);     /* cells per block side: 2^blockdepth;
+                                       a block stores m^dimension, no
+                                       ghosts */
 
   /*
   .. Refining and coarsening, keeping the tree 2:1 balanced: two leaves that

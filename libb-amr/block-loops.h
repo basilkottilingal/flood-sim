@@ -599,7 +599,7 @@
   @loop foreach_leaf_parallel () : IJKL, node, sblocks
   {
     cache (Index) leaves;
-    cache_reserve (leaves, tree_nleaves ());
+    cache_reserve (leaves, tree_get_nleaves ());
     morton (TREE_ROOT_INDEX)
       if (node->flags & BAMR_NODE_LEAF)
         cache_push (leaves, (Index) {IJKL});
@@ -617,7 +617,7 @@
   /*
   .. block_table (s, table, where): the blocks of scalar s in the leaves, in
   .. Morton order, into table [0..], and their indices into where [0..] if
-  .. not NULL. Returns how many: tree_nleaves (). For gpu_cells (): with
+  .. not NULL. Returns how many: tree_get_nleaves (). For gpu_cells (): with
   .. table on the device, u [blk][c] is cell c of leaf blk.
   */
   static inline int block_table (int s, Real ** table, Index * where)

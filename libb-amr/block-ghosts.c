@@ -43,7 +43,7 @@ static inline int source_cell (int x, int d, int mirror, int m, int off, int sh)
 */
 void block_gather (Real * w, BlockShape shape, Index p, int s)
 {
-  int m = tree_block_m (), l = p.level, g = shape.g, nb = 1 << l;
+  int m = tree_get_block_m (), l = p.level, g = shape.g, nb = 1 << l;
   assert (shape.m == m && g <= m && index_is_allocated (p));
   const Real * own = block_data (index_node (p)->s, s);
 
@@ -129,7 +129,7 @@ void block_gather (Real * w, BlockShape shape, Index p, int s)
 
 void block_scatter (Index p, int s, const Real * w, BlockShape shape)
 {
-  assert (shape.m == tree_block_m () && index_is_allocated (p));
+  assert (shape.m == tree_get_block_m () && index_is_allocated (p));
   Real * own = block_data (index_node (p)->s, s);
   block_interior (shape)
     own [o] = w [c];
@@ -160,7 +160,7 @@ static inline long scratch_stride (BlockShape b, int a)
 */
 void block_prolong (Index p, int s)
 {
-  int m = tree_block_m ();
+  int m = tree_get_block_m ();
   assert (index_is_allocated (p) && tree_has_children (index_node (p)));
   BlockShape sh = tree_scratch_shape (1);
   Real * u = block_scratch_new (sh);
@@ -200,7 +200,7 @@ void block_prolong (Index p, int s)
 /* the parent p: the mean of its children's cells */
 void block_restrict (Index p, int s)
 {
-  int m = tree_block_m (), h = m / 2;
+  int m = tree_get_block_m (), h = m / 2;
   assert (index_is_allocated (p) && tree_has_children (index_node (p)));
   Real * parent = block_data (index_node (p)->s, s);
   const Real * child [TREE_NCHILDREN];

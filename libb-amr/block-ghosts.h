@@ -4,7 +4,7 @@
   /*
   .. Ghost cells, for blocks stored without them.
   ..
-  .. A block stores m^dimension cells (tree_block_m ()). A stencil that reads
+  .. A block stores m^dimension cells (tree_get_block_m ()). A stencil that reads
   .. neighbours runs on a scratch block with g ghost layers, of
   .. block_shape (m, g) or any layout block-loops.h knows:
   ..
@@ -41,13 +41,13 @@
   /* a stored block: no ghosts */
   static inline BlockShape tree_block_shape (void)
   {
-    return block_shape (tree_block_m (), 0);
+    return block_shape (tree_get_block_m (), 0);
   }
 
   /* a scratch block with g ghost layers, compact */
   static inline BlockShape tree_scratch_shape (int g)
   {
-    return block_shape (tree_block_m (), g);
+    return block_shape (tree_get_block_m (), g);
   }
 
   /* api */
@@ -119,7 +119,7 @@
   {
     BlockShape shape = tree_scratch_shape (ghosts);
     cache (Index) leaves;
-    cache_reserve (leaves, tree_nleaves ());
+    cache_reserve (leaves, tree_get_nleaves ());
     morton (TREE_ROOT_INDEX)
       if (node->flags & BAMR_NODE_LEAF)
         cache_push (leaves, (Index) {IJKL});

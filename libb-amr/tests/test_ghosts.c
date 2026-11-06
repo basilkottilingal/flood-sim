@@ -10,7 +10,7 @@ scalar u, v;
 /* f at the centre of cell (x, y, z) of level l, in cells of the domain */
 static double f (int l, int x, int y, int z)
 {
-  double n = (double) (tree_block_m () << l);
+  double n = (double) (tree_get_block_m () << l);
   return 1 + 2 * (x + 0.5) / n + 3 * (dimension > 1) * (y + 0.5) / n
            + 5 * (dimension > 2) * (z + 0.5) / n;
 }
@@ -19,7 +19,7 @@ static int refl (int x, int n) { return x < 0 ? -1 - x : x >= n ? 2 * n - 1 - x 
 /* the expected value of a ghost: f at the finest existing cell covering it */
 static double expected (int l, int x, int y, int z)
 {
-  int m = tree_block_m (), n = m << l;
+  int m = tree_get_block_m (), n = m << l;
   x = refl (x, n); y = refl (y, n); z = refl (z, n);
   for (int L = l; L >= 0; L--) {
     int X = x >> (l - L), Y = y >> (l - L), Z = z >> (l - L);
@@ -41,7 +41,7 @@ int main (void)
 {
   int m;
   tree (4, 4);
-  m = tree_block_m ();
+  m = tree_get_block_m ();
   CHECK (m == 16 && tree_block_shape ().cells == (long) pow (16, dimension));
   /* refine: corner chain to level 3, and one more level-1 leaf to level 2 */
   Index a1 = index_child (TREE_ROOT_INDEX, 0), a2 = index_child (a1, TREE_NCHILDREN - 1);
@@ -111,7 +111,7 @@ int main (void)
       }
     }
     CHECK (gerr < 1e-5);
-    CHECK (ghosts == tree_nleaves () * ((long) pow (m + 2 * g, dimension) - (long) pow (m, dimension)));
+    CHECK (ghosts == tree_get_nleaves () * ((long) pow (m + 2 * g, dimension) - (long) pow (m, dimension)));
     free (w);
   }
 
@@ -238,8 +238,8 @@ int main (void)
     }
     CHECK (d == 0);
     /* a stored block needs no padding to be aligned: g = 0, m a multiple of V */
-    BlockShape al = block_shape_aligned (tree_block_m (), 0, 8);
-    CHECK (al.cells == store.cells && al.ox == 0 && al.nx == tree_block_m ());
+    BlockShape al = block_shape_aligned (tree_get_block_m (), 0, 8);
+    CHECK (al.cells == store.cells && al.ox == 0 && al.nx == tree_get_block_m ());
   }
 
   /* blocks freed and reused: the hot list, with the same accounting */

@@ -308,32 +308,32 @@ void tree_shift_resize (double x0, double y0, double z0, double h0)
   G(x0) = x0, G(y0) = y0, G(z0) = z0, G (h0) = h0;
 }
 
-int tree_depth (void)
+int tree_get_depth (void)
 {
   return G(depth);
 }
 
-int tree_depth_max (void)
+int tree_get_depth_max (void)
 {
   return G(depthmax);
 }
 
-int tree_depth_min (void)
+int tree_get_depth_min (void)
 {
   return G(depthmin);
 }
 
-int tree_nblocks (void)
+int tree_get_nblocks (void)
 {
   return G(nb);
 }
 
-int tree_block_m (void)
+int tree_get_block_m (void)
 {
   return bm;
 }
 
-int tree_nleaves (void)
+int tree_get_nleaves (void)
 {
   return G(nlb);
 }

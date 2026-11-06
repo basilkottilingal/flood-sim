@@ -7,7 +7,7 @@
 
 double block_wavelet (Index p, int s)
 {
-  int m = tree_block_m (), h = m / 2, nc = h + 2;
+  int m = tree_get_block_m (), h = m / 2, nc = h + 2;
   assert (GHOSTS >= 2 && m >= 4);
   BlockShape sh = tree_scratch_shape (2);
   Real * u = block_scratch_new (sh);
@@ -81,8 +81,8 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
                           int minlevel, int maxlevel)
 {
   AdaptStats st = { 0, 0 };
-  if (maxlevel > tree_depth_max ())
-    maxlevel = tree_depth_max ();
+  if (maxlevel > tree_get_depth_max ())
+    maxlevel = tree_get_depth_max ();
   if (minlevel < 0)
     minlevel = 0;
 
