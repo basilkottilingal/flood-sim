@@ -2,6 +2,7 @@
 #define _BAMR_H_
 
   #include "memindex.h"
+  #include "real.h"
 
   /*
   .. 2:1 balanced, [block based] Adaptive Mesh Refinement (AMR), for

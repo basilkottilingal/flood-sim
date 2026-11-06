@@ -6,12 +6,15 @@
 #include "morton-curve.h"
 #include "pool.h"
 
+/* the precision this library is built with: see real.h */
+const int BAMR_REAL_TAG = 1;
+
 #define w        SCALAR_ARRAY_WIDTH
 #define NGROUPS  ((NSCALAR_MAX + w - 1) / w)
 
 static Pool * pool_table = NULL;   /* a node's NGROUPS group pointers */
 static Pool * pool_group = NULL;   /* w block pointers                */
-static Pool * pool_block = NULL;   /* one block of doubles            */
+static Pool * pool_block = NULL;   /* one block of Reals              */
 
 /*
 .. used as the constructor for creating blocks for scalar 's'. It will be
@@ -40,7 +43,7 @@ void grid_scalar_init (size_t blocksize)
   assert (!pool_block);
   pool_table = pool_new (NGROUPS * sizeof (void **));
   pool_group = pool_new (w * sizeof (void *));
-  pool_block = pool_new (blocksize * sizeof (double));
+  pool_block = pool_new (blocksize * sizeof (Real));
   scalar_new_hook  = grid_scalar_new;
   scalar_free_hook = grid_scalar_free;
 }

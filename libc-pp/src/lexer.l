@@ -202,6 +202,10 @@ PFX     (u8|u|U|L)
 "asm"|"__asm"|"__asm__"                         { AST (T_ASM); }
 "typeof"|"__typeof"|"__typeof__"                { AST (T_TYPEOF); }
 "__int128"              { AST (T_INT128); }
+  /* Floating types that gcc knows as keywords, as in `_Complex _Float32`,
+   * where a typedef name could not follow another type. */
+"_Float16"|"_Float32"|"_Float64"|"_Float128"|"_Float32x"|"_Float64x"|"_Float128x"  { AST (T_FLOATN); }
+"_Decimal32"|"_Decimal64"|"_Decimal128"|"__float80"|"__float128"|"__ibm128"        { AST (T_FLOATN); }
 "__real"|"__real__"     { AST (T_REAL); }
 "__imag"|"__imag__"     { AST (T_IMAG); }
 "__label__"             { AST (T_LABEL); }

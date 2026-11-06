@@ -343,6 +343,10 @@ check "@loop nested: errors keep their lines, in the block, in a body, and after
   [ "$(grep -c '^#pragma GCC ivdep' loop_pragma.out)" = 2 ]
 check "@loop: a pragma in a body goes with each use, and lines stay right" $?
 
+"$cwrap" -D_GNU_SOURCE -Wall floatn.c -o floatn -lm 2> floatn.log && ./floatn &&
+  ! grep -q 'not translated' floatn.log
+check "_Float32, _Complex _Float64 and the like parse, as <complex.h> declares them" $?
+
 "$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
 gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]
 check "-translate -o writes C that gcc can build" $?

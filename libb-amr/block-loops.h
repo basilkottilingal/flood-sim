@@ -11,7 +11,8 @@
   ..  1. Layout
   ..  ---------
   ..
-  ..  A block is a plain array of doubles, i fastest:
+  ..  A block is a plain array of Reals (real.h: double, or float with
+  ..  -DBAMR_SINGLE), i fastest:
   ..
   ..      cell (ci, cj, ck)  =  block [ci + cj * sy + ck * sz]
   ..
@@ -24,14 +25,15 @@
   ..              grid_scalar_init (blockwidth ()). Rows start anywhere, so
   ..              vector loads are unaligned.
   ..
-  ..    aligned   ox and the row length are rounded up to the vector width V
-  ..              (in doubles): every interior row starts on a V boundary, and
-  ..              as m is a power of 2, m / V vectors cover it with no
-  ..              remainder. It costs some padding, (ox - g) cells before each
-  ..              row and the rest after, and the block must then be allocated
-  ..              with shape.cells doubles: grid_scalar_init (shape.cells). The
-  ..              pool aligns blocks of 64 bytes or more to 64 bytes (a page,
-  ..              from 16 KiB), so V up to 8 doubles stays aligned.
+  ..    aligned   ox and the row length are rounded up to the vector width V,
+  ..              in Reals: 4 doubles or 8 floats fill a 32-byte AVX vector.
+  ..              Every interior row starts on a V boundary, and as m is a
+  ..              power of 2, m / V vectors cover it with no remainder. It
+  ..              costs some padding, (ox - g) cells before each row and the
+  ..              rest after, and the block must then be allocated with
+  ..              shape.cells Reals: grid_scalar_init (shape.cells). The pool
+  ..              aligns blocks of 64 bytes or more to 64 bytes (a page, from
+  ..              16 KiB), so vectors up to 64 bytes stay aligned.
   ..
   ..  Every loop here reads the layout from a BlockShape, so code written with
   ..  them works with either, and with any other that keeps i fastest.
@@ -76,9 +78,11 @@
   ..  CPU, explicit SIMD. block_rows gives a row at a time, to be handled with
   ..  GCC vector extensions or intrinsics:
   ..
-  ..      typedef double v4 __attribute__ ((vector_size (32)));
+  ..      typedef Real v4 __attribute__ ((vector_size (32)));  // 4 doubles
+  ..                                                           // or 8 floats
   ..      block_rows (shape, 0)
-  ..        for (int x = 0; x < n; x += 4) {      // n = m: no remainder
+  ..        for (int x = 0; x < n; x += 32 / sizeof (Real)) {  // n = m: no
+  ..                                                           // remainder
   ..          v4 a; memcpy (&a, &u [row + x], sizeof a);
   ..          ...
   ..        }
@@ -91,7 +95,7 @@
   ..  runs blocks on all threads, with block_cells_simd inside each:
   ..
   ..      foreach_leaf_parallel () {
-  ..        double * u = block_data (sblocks, s), * v = block_data (sblocks, t);
+  ..        Real * u = block_data (sblocks, s), * v = block_data (sblocks, t);
   ..        block_cells_simd (shape, 0)
   ..          v [c] = cell_at (u, 1, 0) + cell_at (u, -1, 0) + ... ;
   ..      }
@@ -99,23 +103,24 @@
   ..  block_cells_threads, threads inside one block, only pays when there are
   ..  fewer blocks than cores and the blocks are large (3D, m >= 32).
   ..
-  ..  Cache. A block of m = 16 in 3D is 20^3 doubles, 62 KiB: one or two fit
-  ..  in L2, and a 7-point stencil streams well. From m = 64 (68^3 doubles,
-  ..  2.4 MiB) planes of k stop fitting, and block_cells_tiled, which walks
-  ..  (j, k) in tiles, keeps the k-1, k, k+1 planes of a tile in cache.
+  ..  Cache. A block of m = 16 in 3D is 20^3 doubles, 62 KiB (31 KiB in
+  ..  float): one or two fit in L2, and a 7-point stencil streams well. From
+  ..  m = 64 (68^3 doubles, 2.4 MiB) planes of k stop fitting, and
+  ..  block_cells_tiled, which walks (j, k) in tiles, keeps the k-1, k, k+1
+  ..  planes of a tile in cache.
   ..
   ..  GPU. Launch once for all blocks, not once per block: a launch costs
   ..  microseconds, a block of 16^3 cells is a few microseconds of work.
   ..  gpu_cells offloads blocks x cells as one OpenMP target region, one
   ..  thread per cell; with i fastest, neighbouring threads read neighbouring
-  ..  doubles, and loads coalesce. The block's data must be on the device:
+  ..  values, and loads coalesce. The block's data must be on the device:
   ..
   ..    - gather the blocks of each scalar into a table, block_table (), and
   ..      index them as u [blk][c]; with unified shared memory
   ..      (#pragma omp requires unified_shared_memory, on recent NVIDIA and
   ..      AMD GPUs) host pool memory is usable as it is;
   ..    - otherwise copy the blocks of a scalar into one device array of
-  ..      nblocks * shape.cells doubles, index it u [blk * shape.cells + c],
+  ..      nblocks * shape.cells Reals, index it u [blk * shape.cells + c],
   ..      and map it with #pragma omp target data map (...) around the loops.
   ..
   ..  CUDA or HIP, which cwrap cannot compile (its output goes to gcc), map
@@ -155,7 +160,7 @@
     int ox;       /* storage ci of the first interior cell: g, or more */
     int nx;       /* storage cells along i, padding included           */
     int sy, sz;   /* strides of cj and ck: 0 where the dimension has none */
-    long cells;   /* doubles in a block, to allocate                   */
+    long cells;   /* Reals in a block, to allocate                     */
   } BlockShape;
 
   static inline int block_round_up (int n, int a)
@@ -163,7 +168,7 @@
     return (n + a - 1) / a * a;
   }
 
-  /* vector the width of v doubles: 1 gives the compact layout */
+  /* vectors of v Reals: 1 gives the compact layout */
   static inline BlockShape block_shape_aligned (int m, int g, int v)
   {
     assert (m > 0 && (m & (m - 1)) == 0 && g >= 0 && v > 0);
@@ -186,9 +191,9 @@
   }
 
   /* a scalar's block in a node, as BAMR_NODE_ENV () gives sblocks */
-  static inline double * block_data (void *** sblocks, int s)
+  static inline Real * block_data (void *** sblocks, int s)
   {
-    return (double *) sblocks [s / SCALAR_ARRAY_WIDTH][s % SCALAR_ARRAY_WIDTH];
+    return (Real *) sblocks [s / SCALAR_ARRAY_WIDTH][s % SCALAR_ARRAY_WIDTH];
   }
 
   /* the storage indices a cell loop gives its block, and a row loop */
@@ -544,7 +549,7 @@
   .. not NULL. Returns how many: tree_nleaves (). For gpu_cells (): with
   .. table on the device, u [blk][c] is cell c of leaf blk.
   */
-  static inline int block_table (int s, double ** table, Index * where)
+  static inline int block_table (int s, Real ** table, Index * where)
   {
     int n = 0;
     foreach_leaf () {

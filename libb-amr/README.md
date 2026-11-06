@@ -135,8 +135,16 @@ per-thread free lists, or a lock around `pool_alloc` and `pool_free`.
 
 ### 8. Further options
 
-- **Mixed precision.** Storing some fields as `float` halves their memory and
-  bandwidth. It is a numerical decision, not only an allocation one.
+- **Mixed precision.** Done in part: `real.h` gives `Real`, a double, or a
+  float with `-DBAMR_SINGLE`, and blocks store `Real`. Geometry stays double.
+  What remains:
+  - **Store in float, compute in double.** Blocks hold float, and kernels
+    convert each value to double, compute, and convert back. Stencils are
+    limited by bandwidth, so this is nearly as fast as float, with double
+    arithmetic. It needs a computation type beside `Real`.
+  - **Precision per field.** Pressure in double and a tracer in float, in one
+    run. It needs a size per scalar, a block pool per size, and a typed
+    accessor.
 - **Reserving ahead.** Before a regrid the tree knows how many blocks it will
   create, so `pool_reserve (n)` could map them in one call.
 
@@ -154,3 +162,134 @@ per-thread free lists, or a lock around `pool_alloc` and `pool_free`.
 **Measure before changing anything:** time a stencil sweep, and a refine and
 coarsen cycle. Use `grid_scalar_check ()` and `pool_used ()` to make sure no
 change leaks blocks.
+
+# Comparison of AMR implementations
+
+How to store the tree itself: its nodes, and the way to find a node or its
+neighbours. This is about the tree's structure, not the blocks of field data.
+
+## The starting idea: dense tiles of N levels
+
+One idea is to store the tree densely, N levels at a time:
+- a complete tree of depth N is laid out contiguously, as a dense array;
+- the same is done again for each subtree whose root is at a depth that is a
+  multiple of N.
+
+OpenVDB, NanoVDB and other sparse-voxel trees are built this way.
+
+**The risk is sparseness.** In 3D, a tile of N = 4 levels has
+1 + 8 + 64 + 512 + 4096 = 4681 slots. A tile holding just one refined corner
+path uses about 33 of them, under 1%.
+
+## Keep the tree's structure separate from its data
+
+A node's structure is a few bytes: flags, an index, a pointer to its scalar
+table. A block of field data is about 62 KiB per scalar in 3D with m = 16.
+So:
+- the structure is roughly 0.01% of memory;
+- walking it costs a few nanoseconds per block, against about 4 µs of stencil
+  work on the block's 4096 cells.
+
+What follows from that:
+- **Sparse structure is cheap.** 37 KiB of mostly empty slots in a tile costs
+  about what one block costs.
+- **Sparse data storage would be ruinous.** Laying out blocks densely in
+  tiles would reserve 62 KiB per empty slot, per scalar.
+- **Contiguity matters most for the blocks.** Items 2 and 5 of
+  [Block allocation](#block-allocation), sibling groups and Morton-ordered
+  slabs, address that. The structure can be organised for fast lookups
+  instead.
+
+## Alternatives for the tree's structure
+
+### A. Per-level sparse arrays (what libb-amr has now)
+
+`memindex` gives each level a virtual `[i][j][k]` array, and the operating
+system only commits the pages that are actually written.
+
+- **Good:** finding a node or a neighbour is pure index arithmetic, O(1),
+  with no pointer chasing. Basilisk uses this scheme.
+- **Cost:** sparseness becomes virtual address space, plus one 4 KiB page per
+  isolated row of nodes, as a page holds 512 pointers. Refined regions are
+  usually clustered, so pages fill well in practice.
+- **Verdict:** this is already a version of the dense-tile idea in which the
+  operating system handles the sparseness. Measure before replacing it.
+
+### B. Dense tiles, with occupancy bitmasks and rank indexing (NanoVDB-style)
+
+Each tile stores:
+- a bitmask of its occupied slots: 8 bits per family in 3D, or 4096 bits
+  (512 bytes) for a whole tile's bottom level;
+- an array of only the occupied nodes, in Morton order.
+
+To find slot `s`, count the set bits of the mask below `s` (`popcount`). With
+a small table of running counts, one per 64-bit word, that is O(1). This
+removes the sparseness completely, while keeping the tiles contiguous.
+
+libb-amr allows a simplification. In a 2:1 tree whose families are always
+created whole, a family's mask is all ones or all zeros. The per-family mask
+is then a single bit, and a tile is just a record of which families exist.
+
+- **Good:** contiguous and compact, with O(1) lookup. A tile copies to a GPU
+  in one piece.
+- **Cost:** refining inserts into a tile's compact array, so tiles should be
+  rebuilt in a batch at each regrid, rather than edited one node at a time.
+
+### C. Linear octree: a sorted array of Morton keys (p4est, Dendro)
+
+Store only the leaves, as keys made of the level and the interleaved
+coordinates, in sorted order.
+
+- **Good:** fully contiguous, and never sparse. A traversal is a scan.
+  Splitting the work across MPI ranks means cutting the array into pieces. It
+  goes to a GPU as it is.
+- **Cost:** finding a neighbour needs a binary search, O(log n), or a hash on
+  the side. Each regrid rebuilds the array, an O(n) merge, which is fine when
+  regrids are batched.
+- **Verdict:** the standard choice once MPI is needed.
+
+### D. Hashed octree (Warren–Salmon): Morton key → node, in a hash table
+
+- **Good:** O(1) lookup at any level. Memory is proportional to the number of
+  nodes, and never sparse.
+- **Cost:** a traversal in hash order jumps around memory. It needs a sorted
+  list of the leaves beside it for traversals.
+
+### E. Child families plus compaction, keeping a pointer tree
+
+Each node points to one group of 2^d children, allocated together. Whole
+families are always created, so nothing is wasted. After each regrid, the
+families are copied into Morton order.
+
+- **Good:** the smallest change from the code as it is.
+- **Cost:** finding a neighbour goes back to walking up and down the tree, so
+  the arithmetic lookups of A are lost.
+
+## Comparison
+
+| | Lookup / neighbour | Traversal locality | Wasted space | Refining | GPU / MPI |
+|---|---|---|---|---|---|
+| A. per-level arrays (now) | O(1) arithmetic | good, in clustered regions | virtual, per page | O(1) per node | awkward |
+| dense tiles | O(1) | excellent | high when refinement is sparse | O(1) | good |
+| B. tiles + bitmask/rank | O(1) with `popcount` | excellent | none | batched rebuild | very good |
+| C. linear octree | O(log n), or a hash | excellent | none | batched O(n) | best |
+| D. hashed | O(1) expected | poor alone | none | O(1) | fair |
+| E. families + compaction | walk the tree | good after compaction | none | O(1) | fair |
+
+## Recommendation
+
+1. **For now, keep A for the structure.** Spend the effort on the data
+   instead: sibling-group allocation and Morton-ordered slabs for blocks.
+   That is where the memory traffic is.
+2. **When a GPU or MPI is needed, add C beside A.** C is a sorted array of
+   leaf keys, rebuilt at each regrid. A stays the fast way to find
+   neighbours, and C becomes the contiguous list for GPU launches and for
+   splitting the work across ranks. Each regrid already traverses the whole
+   tree, so keeping the two in step is cheap.
+3. **For tiles, build them as B,** with bitmasks and rank indexing. Pick N by
+   dimension: N = 2 in 3D (a tile of 73 slots), and N = 3 or 4 in 2D. Tiles
+   suit regions that are refined fairly evenly, and the bitmask removes the
+   cost of those that are not.
+
+**To decide, measure:** prototype C beside the current tree, and compare the
+two on a benchmark that refines and traverses.

@@ -19,7 +19,7 @@
   # define SCALAR_ARRAY_WIDTH   8
 
   /* api */
-  void    grid_scalar_init (size_t blocksize);  /* doubles per block */
+  void    grid_scalar_init (size_t blocksize);  /* Reals per block */
   void    grid_scalar_destroy (void);           /* frees every block */
   void *** grid_scalar_node_new (void);  /* a node's table, with a block
                                             for each scalar in use */
