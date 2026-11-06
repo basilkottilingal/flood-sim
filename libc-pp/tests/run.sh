@@ -290,6 +290,32 @@ check "scalar_new () stops the program when no id is left" $?
   ./scalar_runtime2 > /dev/null
 check "linking objects alone also brings in the runtime" $?
 
+"$cwrap" -dimension=1 -Wall loop_run.c loop_other.c -o loop_run 2> loop_run.log &&
+  [ "$(./loop_run)" = "46 144127 10 104 -1 7 9 1 0 7" ] && [ ! -s loop_run.log ]
+check "@loop: typed arguments, hidden locals, given names, nesting, break, scalars, caches" $?
+
+"$cwrap" -c loop_bad.c -o loop_bad.o 2> loop_bad.log
+[ $? -ne 0 ] && [ ! -e loop_bad.o ] &&
+  [ "$(grep -o '^loop_bad.c:[0-9]*: error' loop_bad.log | cut -d: -f2 | tr '\n' ' ')" = "1 2 3 4 5 6 7 9 10 11 11 " ] &&
+  grep -q "^loop_bad.c:7: error: 'z' is not declared by the loop where {...} is" loop_bad.log &&
+  grep -q "^loop_bad.c:8: note: 'ok' is defined here" loop_bad.log &&
+  grep -q "^loop_bad.c:11: error: loop 'ok' takes 1 argument, not 0" loop_bad.log
+check "@loop: each misuse is an error, and the file never reaches gcc" $?
+
+"$cwrap" -c loop_lines.c -o loop_lines.o 2> loop_lines.log
+[ $? -ne 0 ] && grep -q "^loop_lines.c:8:[0-9]*: error: .*no member named .nope." loop_lines.log &&
+  grep -q "^loop_lines.c:10:[0-9]*: error: .*no member named .nope2." loop_lines.log &&
+  grep -q "^loop_lines.c:11:[0-9]*: warning: initialization of .const Bag \*. from incompatible pointer type" loop_lines.log
+check "@loop: errors in the block, in an argument and after the use keep their lines" $?
+
+"$cwrap" -dimension=1 -translate loop_run.c -o loop_run.out 2> /dev/null &&
+  ! grep -q '@loop' loop_run.out &&
+  grep -q '^  { int __cwrap_repeat_n_[0-9]* = 3 ;$' loop_run.out &&
+  grep -q '^  int __cwrap_range_count_[0-9]* = 0;$' loop_run.out &&
+  grep -q '^    count++;$' loop_run.out &&
+  grep -q '^# [0-9]* "loop.h"$' loop_run.out
+check "@loop: -translate writes the expansion with linemarkers, and no definition" $?
+
 "$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
 gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]
 check "-translate -o writes C that gcc can build" $?

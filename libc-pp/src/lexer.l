@@ -31,6 +31,7 @@ struct lexer {
   struct token last;
   int eof_seen;
   int cache_on;           /* <cwrap/cache.h> seen: cache and foreach are keywords */
+  const struct var *binding;  /* of the name just read, for its token */
 };
 
 /* The header that turns on cache (T) and foreach, as a linemarker names it. */
@@ -88,17 +89,27 @@ static void directive (struct lexer *lx, int *lineno, const char *s)
   }
 }
 
-static int identifier_kind (const struct lexer *lx, const char *name)
+/* A name's kind, from the declaration of it visible now, which its token
+ * keeps: a typedef name, a loop defined by @loop, or an identifier. */
+static int identifier_kind (struct lexer *lx, const char *name)
 {
-  return scope_is_type (lx->scopes, name) ? T_TYPE_NAME : T_IDENTIFIER;
+  const struct var *v = scope_find (lx->scopes, name);
+
+  lx->binding = v;
+  if (v && v->kind == SCOPE_TYPEDEF)
+    return T_TYPE_NAME;
+  if (v && v->kind == SCOPE_LOOP)
+    return T_LOOP_NAME;
+  return T_IDENTIFIER;
 }
 
 /* cache and foreach, once <cwrap/cache.h> is in: a keyword, but for a typedef.
  * The parser takes the keyword as a name too. */
-static int cache_word (const struct lexer *lx, const char *name, int keyword)
+static int cache_word (struct lexer *lx, const char *name, int keyword)
 {
   if (!lx->cache_on || scope_is_type (lx->scopes, name))
     return identifier_kind (lx, name);
+  lx->binding = scope_find (lx->scopes, name);
   return keyword;
 }
 
@@ -114,6 +125,8 @@ static struct ast *leaf (struct lexer *lx, int kind, const char *text, int len,
                                    : "";
   lx->last.file = lx->file;
   lx->last.line = line;
+  lx->last.binding = lx->binding;
+  lx->binding = NULL;
   lx->trivia_len = 0;
   return ast_leaf (&lx->last);
 }
@@ -236,6 +249,9 @@ PFX     (u8|u|U|L)
 "%>"    { AST ('}'); }
 
 [\[\](){}.&*+\-~!/%<>^|?:;=,]   { AST ((unsigned char)yytext[0]); }
+
+  /* A block macro: see translate.h. C has no other use for @. */
+"@loop"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_LOOP); }
 
   /* Unknown to the grammar, so it surfaces as a syntax error. */
 .       { AST ((unsigned char)yytext[0]); }

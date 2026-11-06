@@ -43,7 +43,9 @@
   X (SIZEOF_TYPE) X (ALIGNOF_EXPRESSION) X (ALIGNOF_TYPE)                     \
   X (EXTENSION_EXPRESSION) X (CAST) X (MULTIPLICATIVE) X (ADDITIVE) X (SHIFT) \
   X (RELATIONAL) X (EQUALITY) X (BIT_AND) X (BIT_XOR) X (BIT_OR)              \
-  X (LOGICAL_AND) X (LOGICAL_OR) X (CONDITIONAL) X (ASSIGNMENT) X (COMMA)
+  X (LOGICAL_AND) X (LOGICAL_OR) X (CONDITIONAL) X (ASSIGNMENT) X (COMMA)    \
+  X (LOOP_DEFINITION) X (LOOP_SOURCE) X (LOOP_INJECTS) X (LOOP_INJECT_LIST)  \
+  X (LOOP_BODY)
 
 enum ast_kind {
 #define X(name) AST_##name,
@@ -72,6 +74,9 @@ struct ast *ast_leaf (const struct token *t);
 /* New node of the given kind, over kids[0..n). NULL kids are skipped, which
  * lets optional parts of a rule be passed as they are. */
 struct ast *ast_node (enum ast_kind kind, struct ast **kids, size_t n);
+
+/* A copy of the tree under n, tokens included, with no parent. */
+struct ast *ast_copy (const struct ast *n);
 
 /* Appends kid to parent, unless kid is NULL. Returns parent. */
 struct ast *ast_add (struct ast *parent, struct ast *kid);

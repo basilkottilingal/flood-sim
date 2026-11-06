@@ -227,6 +227,22 @@ static struct token *first_token (struct ast *n)
   return &((struct ast_leaf *)n)->tok;
 }
 
+/* Code that cwrap writes as text has no declarations behind its names: each
+ * name spelled `name` under n gets the declaration of the token it was
+ * written from, so that a @loop body renames it along with the rest. */
+static void bind_spelled (struct ast *n, const struct token *from)
+{
+  if (n->kind == AST_TOKEN) {
+    struct token *t = &((struct ast_leaf *)n)->tok;
+
+    if (!t->binding && strcmp (t->text, from->text) == 0)
+      t->binding = from->binding;
+    return;
+  }
+  for (n = n->child; n; n = n->next)
+    bind_spelled (n, from);
+}
+
 /* The name of the index of a foreach loop over the variable %s. */
 #define FOREACH_INDEX "__i_%s"
 
@@ -290,6 +306,9 @@ struct ast *foreach_to_for (struct ast *kw, struct ast *lparen, struct ast *var,
     if (n->kind == AST_TOKEN && strcmp (ast_token (n)->text, ")") == 0)
       first_token (n)->trivia = strchr (trivia, '\n') ? trivia
                                                        : ast_token (rparen)->trivia;
+
+  bind_spelled (loop, ast_token (var));
+  bind_spelled (loop, ast_token (coll));
 
   /* { __auto_type v = V.a[i]; } gets the body after its declaration. */
   block = loop->last;
@@ -366,6 +385,9 @@ struct ast *local_scalars (struct ast *decl)
   for (struct ast *n = parse_snippet (slots), *next; n; n = next) {
     next = n->next;
     n->next = NULL;
+    for (struct ast *d = list->child; d; d = d->next)
+      if (plain_name (d))
+        bind_spelled (n, ast_first_token (d));
     ast_add (with_slots, n);
   }
   return with_slots;
@@ -720,6 +742,360 @@ static void define_caches (struct ast *root)
 {
   for (struct ast *n = root->child; n; n = n->next)
     define_caches_in (n, n);
+}
+
+/* Block macros: @loop */
+
+/* For the names of hidden locals: each expansion has its own. */
+static int loop_expansions;
+
+static int count_newlines (const char *s)
+{
+  int n = 0;
+
+  for (; *s; s++)
+    n += *s == '\n';
+  return n;
+}
+
+/* Puts a linemarker in front of t's trivia, so that t lands on its own line
+ * of its own file wherever it is emitted, and the tokens after it with it.
+ * Trivia that has a linemarker of its own needs none. */
+static void mark_token (struct token *t)
+{
+  const char *tr = t->trivia;
+  int line;
+
+  if (tr[0] == '#' || strstr (tr, "\n#"))
+    return;
+  line = t->line - count_newlines (tr);
+  t->trivia = arena_printf ("\n# %d \"%s\"\n%s", line > 0 ? line : 1,
+                            t->file, tr);
+}
+
+/* The last token under n. */
+static struct token *last_token (struct ast *n)
+{
+  while (n->kind != AST_TOKEN)
+    n = n->last;
+  return &((struct ast_leaf *)n)->tok;
+}
+
+/* The first token after n, in the order of emission, or NULL. */
+static struct token *token_after (struct ast *n)
+{
+  while (n && !n->next)
+    n = n->parent;
+  return n ? first_token (n->next) : NULL;
+}
+
+static void each_leaf (struct ast *n, void (*f) (struct ast *, void *), void *arg)
+{
+  if (n->kind == AST_TOKEN) {
+    f (n, arg);
+    return;
+  }
+  for (struct ast *k = n->child; k; k = k->next)
+    each_leaf (k, f, arg);
+}
+
+static void add_trivia (struct ast *leaf, void *out)
+{
+  fputs (ast_token (leaf)->trivia, out);
+}
+
+struct ast *loop_stub (const struct ast *source)
+{
+  MEMSTREAM (trivia);
+  struct token t = *ast_first_token (source);
+
+  if (!trivia)
+    abort ();
+  each_leaf ((struct ast *)source, add_trivia, trivia);
+  t.kind = T_IDENTIFIER;
+  t.text = "";
+  t.trivia = MEMSTREAM_TEXT (trivia);
+  t.binding = NULL;
+  struct ast *leaf = ast_leaf (&t);
+  return ast_node (AST_LOOP_DEFINITION, &leaf, 1);
+}
+
+static void add_text (struct ast *leaf, void *out)
+{
+  fprintf (out, "%s ", ast_token (leaf)->text);
+}
+
+int loop_same (const struct loop_def *a, const struct loop_def *b)
+{
+  MEMSTREAM (ta);
+  MEMSTREAM (tb);
+
+  if (!ta || !tb)
+    abort ();
+  each_leaf (a->source, add_text, ta);
+  each_leaf (b->source, add_text, tb);
+  return strcmp (MEMSTREAM_TEXT (ta), MEMSTREAM_TEXT (tb)) == 0;
+}
+
+/* The parameters of def, in order, into ps; returns how many. (void) is none. */
+static int loop_params (const struct loop_def *def, struct ast **ps, int max)
+{
+  struct ast *list = def->params;
+  int n = 0;
+
+  if (!list)
+    return 0;
+  if (list->kind == AST_PARAMETER_TYPE_LIST)
+    list = list->child;
+  for (struct ast *p = list->child; p; p = p->next)
+    if (p->kind == AST_PARAMETER && n < max)
+      ps[n++] = p;
+  if (n == 1 && !ps[0]->child->next && has_token (ps[0]->child, T_VOID, NULL))
+    return 0;
+  return n;
+}
+
+#define MAX_LOOP_PARAMS 64
+
+int loop_check_params (const struct loop_def *def)
+{
+  struct ast *ps[MAX_LOOP_PARAMS];
+  int n = loop_params (def, ps, MAX_LOOP_PARAMS), errors = 0;
+
+  if (def->params && def->params->kind == AST_PARAMETER_TYPE_LIST) {
+    diag (def->at->file, def->at->line, DIAG_ERROR, "loop '%s' takes a fixed "
+          "number of arguments: no '...'", def->name);
+    errors++;
+  }
+  for (int i = 0; i < n; i++)
+    if (!ast_declared_name (ps[i])) {
+      const struct token *t = ast_first_token (ps[i]);
+
+      diag (t->file, t->line, DIAG_ERROR, "parameter %d of loop '%s' has no "
+            "name", i + 1, def->name);
+      errors++;
+    }
+  return errors;
+}
+
+static int injected (const struct loop_def *def, const char *name)
+{
+  for (int i = 0; i < def->ninject; i++)
+    if (strcmp (def->inject[i].name, name) == 0)
+      return 1;
+  return 0;
+}
+
+/* Is leaf, a name, one that may stand for a variable or typedef here? Not a
+ * member, designator, label, tag or attribute, which share the spelling of a
+ * name but not its meaning. */
+static int names_ordinary (const struct ast *leaf)
+{
+  const struct ast *p = leaf->parent;
+
+  switch (p->kind) {
+  case AST_MEMBER:
+    return leaf != p->last;
+  case AST_DESIGNATOR: case AST_OLD_DESIGNATOR: case AST_OFFSETOF_MEMBER:
+  case AST_NAMED_LABEL: case AST_GOTO_STATEMENT: case AST_LABEL_LIST:
+  case AST_LABEL_ADDRESS: case AST_STRUCT_SPECIFIER: case AST_ENUM_SPECIFIER:
+  case AST_ATTRIBUTE_ITEM: case AST_ASM_LABELS: case AST_ASM_OPERAND:
+    return 0;
+  case AST_DECL_NAME:
+    /* a struct member's declarator */
+    for (p = p->parent; p; p = p->parent) {
+      if (p->kind == AST_STRUCT_DECLARATOR)
+        return 0;
+      if (p->kind != AST_DECLARATOR && p->kind != AST_PAREN_DECLARATOR
+          && p->kind != AST_SUFFIXED_DECLARATOR
+          && p->kind != AST_ATTRIBUTED_DECLARATOR)
+        return 1;
+    }
+    return 1;
+  default:
+    return 1;
+  }
+}
+
+struct rename {
+  const struct loop_def *def;
+  int expansion;
+  const struct var *const *given;
+};
+
+/* The body's own names, where declared and where used, get a name of their
+ * own for this expansion, unless the block is to see them. */
+static void rename_leaf (struct ast *leaf, void *arg)
+{
+  const struct rename *r = arg;
+  struct token *t = &((struct ast_leaf *)leaf)->tok;
+
+  /* a name the block sees: the declaration the block saw stands for it */
+  for (int i = 0; t->binding && i < r->def->ninject; i++)
+    if (t->binding == r->def->inject[i].var) {
+      t->binding = r->given[i];
+      return;
+    }
+  if ((t->kind != T_IDENTIFIER && t->kind != T_TYPE_NAME)
+      || !t->binding || t->binding->loop != r->def->serial
+      || injected (r->def, t->text) || !names_ordinary (leaf))
+    return;
+  t->text = arena_printf ("__cwrap_%s_%s_%d", r->def->name, t->text,
+                          r->expansion);
+}
+
+/* One space before each token, at the place of `at`: code that cwrap adds
+ * on the line of the use. */
+static void flatten_leaf (struct ast *leaf, void *at)
+{
+  struct token *t = &((struct ast_leaf *)leaf)->tok;
+
+  t->trivia = " ";
+  t->file = ((const struct token *)at)->file;
+  t->line = ((const struct token *)at)->line;
+}
+
+static struct ast *new_token (int kind, const char *text, const struct token *at)
+{
+  struct token t = *at;
+
+  t.kind = kind;
+  t.text = text;
+  t.trivia = " ";
+  t.binding = NULL;
+  return ast_leaf (&t);
+}
+
+/* The DECL_NAME token under a declarator. */
+static struct token *declared_token (struct ast *d)
+{
+  if (d->kind == AST_DECL_NAME)
+    return &((struct ast_leaf *)d->child)->tok;
+  for (d = d->child; d; d = d->next)
+    if (d->kind != AST_TOKEN) {
+      struct token *t = declared_token (d);
+
+      if (t)
+        return t;
+    }
+  return NULL;
+}
+
+/* specs declarator = value; from a parameter of the loop, renamed for this
+ * expansion. If name is not NULL, the declarator declares it instead. */
+static struct ast *bind_parameter (struct ast *param, const char *name,
+                                   struct ast *value, const struct rename *r,
+                                   const struct token *at)
+{
+  struct ast *specs = ast_copy (param->child);
+  struct ast *declarator = ast_copy (param->child->next);
+  struct ast *init, *list, *kids[3];
+
+  each_leaf (specs, rename_leaf, (void *)r);
+  each_leaf (declarator, rename_leaf, (void *)r);
+  if (name)
+    declared_token (declarator)->text = name;
+  kids[0] = declarator;
+  kids[1] = new_token ('=', "=", at);
+  kids[2] = value;
+  init = ast_node (AST_INIT_DECLARATOR, kids, 3);
+  list = ast_node (AST_INIT_DECLARATOR_LIST, &init, 1);
+  kids[0] = specs;
+  kids[1] = list;
+  kids[2] = new_token (';', ";", at);
+  each_leaf (specs, flatten_leaf, (void *)at);
+  each_leaf (declarator, flatten_leaf, (void *)at);
+  return ast_node (AST_DECLARATION, kids, 3);
+}
+
+static struct ast *find_kind (struct ast *n, enum ast_kind kind)
+{
+  if (n->kind == kind)
+    return n;
+  if (n->kind == AST_TOKEN)
+    return NULL;
+  for (n = n->child; n; n = n->next) {
+    struct ast *found = find_kind (n, kind);
+
+    if (found)
+      return found;
+  }
+  return NULL;
+}
+
+struct ast *loop_expand (const struct loop_def *def, struct ast *name,
+                         struct ast *args, struct ast *block,
+                         const struct var *const *given, int *rejected)
+{
+  const struct token *at = ast_token (name);
+  struct ast *ps[MAX_LOOP_PARAMS], *vs[MAX_LOOP_PARAMS];
+  int np = loop_params (def, ps, MAX_LOOP_PARAMS), nv = 0;
+  struct rename r = { def, ++loop_expansions, given };
+  struct ast *items, *body, *placeholder, *open, *close, *kids[3];
+  struct token *after, *end;
+
+  for (struct ast *a = args ? args->child : NULL; a; a = a->next)
+    if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
+        && nv < MAX_LOOP_PARAMS)
+      vs[nv++] = a;
+  if (nv != np) {
+    diag (at->file, at->line, DIAG_ERROR, "loop '%s' takes %d argument%s, not "
+          "%d", def->name, np, np == 1 ? "" : "s", nv);
+    diag (def->at->file, def->at->line, DIAG_NOTE, "'%s' is defined here",
+          def->name);
+    (*rejected)++;
+    return block;
+  }
+  for (int i = 0; i < nv; i++) {
+    vs[i]->parent = vs[i]->next = NULL;
+    each_leaf (vs[i], flatten_leaf, (void *)at);
+  }
+
+  /* The arguments are all evaluated before a parameter the block sees comes
+   * into scope, as `T p = p;` would read the new p: those go through a
+   * hidden local first. */
+  items = ast_new (AST_BLOCK_ITEMS);
+  for (int i = 0; i < np; i++) {
+    const char *pname = ast_declared_name (ps[i]);
+
+    if (injected (def, pname)) {
+      const char *tmp = arena_printf ("__cwrap_%s_arg%d_%d", def->name, i,
+                                      r.expansion);
+      ast_add (items, bind_parameter (ps[i], tmp, vs[i], &r, at));
+      vs[i] = new_token (T_IDENTIFIER, tmp, at);
+    } else {
+      ast_add (items, bind_parameter (ps[i], NULL, vs[i], &r, at));
+      vs[i] = NULL;
+    }
+  }
+  for (int i = 0; i < np; i++)
+    if (vs[i])
+      ast_add (items, bind_parameter (ps[i], NULL, vs[i], &r, at));
+
+  /* The body, on the lines of the definition, and the block on its own. */
+  body = ast_copy (def->body);
+  each_leaf (body, rename_leaf, &r);
+  placeholder = find_kind (body, AST_LOOP_BODY);
+  after = token_after (placeholder);
+  if (after)
+    mark_token (after);
+  mark_token (first_token (body));
+  mark_token (first_token (block));
+  end = last_token (block);
+  ast_replace (placeholder, block);
+  ast_add (items, body);
+
+  /* { at the place of the name, } on the line where the block ends, so the
+   * code after it keeps its lines. */
+  open = new_token ('{', "{", at);
+  first_token (open)->trivia = at->trivia;
+  close = new_token ('}', "}", end);
+  first_token (close)->trivia = arena_printf ("\n# %d \"%s\"\n", end->line,
+                                              end->file);
+  kids[0] = open;
+  kids[1] = items;
+  kids[2] = close;
+  return ast_node (AST_COMPOUND_STATEMENT, kids, 3);
 }
 
 /* The translation itself: rewrite the tree here. */

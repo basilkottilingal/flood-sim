@@ -104,9 +104,9 @@ void grid_scalar_alloc_blocks (scalar s)
 {
   if (!pool_block)        /* no tree yet: tree () allocates them */
     return;
-  morton_start (TREE_ROOT) {
+  morton (TREE_ROOT_INDEX) {
     alloc_block (sblocks, s);
-  } morton_end ();
+  }
 }
 
 void grid_scalar_free_blocks (scalar s)
@@ -118,13 +118,13 @@ void grid_scalar_free_blocks (scalar s)
   */
   if (!pool_block)
     return;
-  morton_start (TREE_ROOT) {
+  morton (TREE_ROOT_INDEX) {
     if (sblocks [s/w] && sblocks [s/w][s%w])
     {
       pool_free (pool_block, sblocks [s/w][s%w]);
       sblocks [s/w][s%w] = NULL;
     }
-  } morton_end ();
+  }
 }
 
 /*
@@ -136,11 +136,11 @@ long grid_scalar_blocks_attached (void)
   long n = 0;
   if (!pool_block)
     return 0;
-  morton_start (TREE_ROOT) {
+  morton (TREE_ROOT_INDEX) {
     foreach_scalar (s)
       if (sblocks [s/w] && sblocks [s/w][s%w])
         n++;
-  } morton_end ();
+  }
   return n;
 }
 
@@ -153,7 +153,7 @@ int grid_scalar_check (void)
   if (!pool_block)
     return 1;
   long attached = 0, slots = 0, groups = 0, tables = 0, missing = 0;
-  morton_start (TREE_ROOT) {
+  morton (TREE_ROOT_INDEX) {
     tables++;
     foreach_scalar (s)
       if (sblocks [s/w] && sblocks [s/w][s%w])
@@ -167,7 +167,7 @@ int grid_scalar_check (void)
         for (int b = 0; b < w; b++)
           slots += sblocks [g][b] != NULL;
       }
-  } morton_end ();
+  }
 
   int ok = 1;
   long out;

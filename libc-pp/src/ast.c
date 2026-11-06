@@ -37,6 +37,18 @@ struct ast *ast_node (enum ast_kind kind, struct ast **kids, size_t n)
   return node;
 }
 
+struct ast *ast_copy (const struct ast *n)
+{
+  struct ast *c;
+
+  if (n->kind == AST_TOKEN)
+    return ast_leaf (ast_token (n));
+  c = ast_new (n->kind);
+  for (n = n->child; n; n = n->next)
+    ast_add (c, ast_copy (n));
+  return c;
+}
+
 struct ast *ast_add (struct ast *parent, struct ast *kid)
 {
   if (!kid)

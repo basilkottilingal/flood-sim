@@ -17,6 +17,7 @@ enum scope_kind {
   SCOPE_VARIABLE,         /* any ordinary name: variable, function,
                            * parameter or enumerator */
   SCOPE_TYPEDEF,
+  SCOPE_LOOP,             /* a name defined by @loop */
 };
 
 struct var {
@@ -24,6 +25,8 @@ struct var {
   enum scope_kind kind;
   const struct ast *decl; /* where it was declared, NULL for gcc's builtins */
   unsigned hash;
+  int loop;               /* declared in the @loop definition with this
+                           * serial, as a parameter or a local; else 0 */
   struct var *chain;      /* next in the hash bucket */
 };
 

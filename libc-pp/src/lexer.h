@@ -18,6 +18,7 @@ typedef void *yyscan_t;
 #endif
 
 struct scope_table;
+struct var;
 
 struct token {
   int kind;
@@ -26,6 +27,8 @@ struct token {
                            * before this token, kept verbatim */
   const char *file;       /* original location, from linemarkers */
   int line;
+  const struct var *binding;  /* a name: the declaration visible when it was
+                               * read, or the one it declares; else NULL */
 };
 
 yyscan_t lex_open (FILE *in, struct scope_table *scopes);

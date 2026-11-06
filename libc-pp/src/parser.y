@@ -50,6 +50,9 @@ struct ast *parse_file (FILE *in, int *rejected);
 struct parse_status {
   int errors;             /* syntax errors reported */
   int rejected;           /* errors that must keep the file from gcc */
+  struct loop_def *loops; /* @loop definitions, newest first */
+  struct loop_def *cur_loop;  /* the one being parsed, or NULL */
+  int loop_serial;
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -76,10 +79,179 @@ static void yyerror (int *lineno, yyscan_t yyscanner, struct ast **root,
                      struct scope_table *scopes, struct parse_status *status,
                      const char *msg);
 
-static void declare (struct scope_table *scopes, const struct ast *declarator,
-                     enum scope_kind kind)
+/* A name now in scope. In a @loop definition, it belongs to the loop, and
+ * its token records the declaration, so the expansion can rename it. */
+static void bind_name (struct parse_status *status, struct var *v,
+                       struct ast *leaf)
 {
-  scope_add (scopes, ast_declared_name (declarator), kind, declarator);
+  if (!v)
+    return;
+  v->loop = status->cur_loop ? status->cur_loop->serial : 0;
+  if (leaf)
+    ((struct ast_leaf *)leaf)->tok.binding = v;
+}
+
+/* The token of the name a declarator declares, or NULL. */
+static struct ast *declared_leaf (const struct ast *d)
+{
+  if (d->kind == AST_DECL_NAME)
+    return d->child;
+  for (d = d->child; d; d = d->next)
+    if (d->kind != AST_TOKEN) {
+      struct ast *leaf = declared_leaf (d);
+
+      if (leaf)
+        return leaf;
+    }
+  return NULL;
+}
+
+static void declare (struct scope_table *scopes, struct parse_status *status,
+                     const struct ast *declarator, enum scope_kind kind)
+{
+  bind_name (status, scope_add (scopes, ast_declared_name (declarator), kind,
+                                declarator),
+             declared_leaf (declarator));
+}
+
+static void loop_error (struct parse_status *status, const struct ast *at,
+                        const char *format, const char *name)
+{
+  const struct token *t = ast_first_token (at);
+
+  diag (t->file, t->line, DIAG_ERROR, format, name);
+  status->rejected++;
+}
+
+static struct loop_def *find_loop (const struct parse_status *status,
+                                   const char *name)
+{
+  for (struct loop_def *d = status->loops; d; d = d->next)
+    if (d->complete && strcmp (d->name, name) == 0)
+      return d;
+  return NULL;
+}
+
+/* @loop name: the name is a loop from here, at file scope, so that a use of
+ * it in its own body is caught. */
+static void loop_begin (struct scope_table *scopes, struct parse_status *status,
+                        struct ast *name)
+{
+  struct loop_def *def = allocate (sizeof (*def));
+
+  def->name = ast_token (name)->text;
+  def->at = ast_token (name);
+  def->serial = ++status->loop_serial;
+  status->cur_loop = def;
+  scope_add (scopes, def->name, SCOPE_LOOP, name);
+}
+
+/* {...}: in a definition, once, with every name listed after `:` declared by
+ * the loop and visible here. */
+static struct ast *loop_placeholder (struct scope_table *scopes,
+                                     struct parse_status *status,
+                                     struct ast *open, struct ast *dots,
+                                     struct ast *close)
+{
+  struct loop_def *def = status->cur_loop;
+  struct ast *node = N (LOOP_BODY, open, dots, close);
+
+  if (!def) {
+    loop_error (status, open, "{...} outside a @loop definition%s", "");
+    return node;
+  }
+  if (++def->placeholders > 1) {
+    loop_error (status, open, "loop '%s' has more than one {...}", def->name);
+    return node;
+  }
+  if (!def->injects)
+    return node;
+  struct ast *list = def->injects->last;
+  int n = 0;
+
+  for (struct ast *k = list->child; k; k = k->next)
+    n += k->kind == AST_TOKEN && ast_token (k)->text[0] != ',';
+  def->inject = allocate ((size_t)n * sizeof (*def->inject));
+  for (struct ast *k = list->child; k; k = k->next) {
+    const char *name = ast_token (k)->text;
+    const struct var *v;
+
+    if (name[0] == ',')
+      continue;
+    v = scope_find (scopes, name);
+    if (!v || v->loop != def->serial) {
+      loop_error (status, k, "'%s' is not declared by the loop where {...} is",
+                  name);
+      continue;
+    }
+    def->inject[def->ninject].name = name;
+    def->inject[def->ninject++].var = v;
+  }
+  return node;
+}
+
+/* The end of a definition: checked, kept, and replaced in the tree by its
+ * trivia. */
+static struct ast *loop_end (struct parse_status *status, struct ast *source,
+                             struct ast *params, struct ast *body)
+{
+  struct loop_def *def = status->cur_loop, *old;
+
+  status->cur_loop = NULL;
+  def->source = source;
+  def->params = params;
+  def->body = body;
+  status->rejected += loop_check_params (def);
+  if (!def->placeholders)
+    loop_error (status, source, "loop '%s' has no {...} for the block",
+                def->name);
+  old = find_loop (status, def->name);
+  if (old && !loop_same (old, def)) {
+    loop_error (status, source, "loop '%s' is defined again, differently",
+                def->name);
+    diag (old->at->file, old->at->line, DIAG_NOTE, "'%s' is defined here",
+          old->name);
+  }
+  if (!old) {
+    def->complete = 1;
+    def->next = status->loops;
+    status->loops = def;
+  }
+  return loop_stub (source);
+}
+
+/* name ( ... ): the block will see the names the loop gives it. */
+static void loop_open (struct scope_table *scopes, struct parse_status *status,
+                       struct ast *name)
+{
+  const struct loop_def *def = find_loop (status, ast_token (name)->text);
+
+  if (!def) {
+    loop_error (status, name, "loop '%s' is used in its own definition",
+                ast_token (name)->text);
+    return;
+  }
+  /* In a definition, they are the outer loop's own: see loop_expand (). */
+  for (int i = 0; i < def->ninject; i++)
+    bind_name (status, scope_add (scopes, def->inject[i].name,
+                                  def->inject[i].var->kind,
+                                  def->inject[i].var->decl), NULL);
+}
+
+/* Expands the use while the names it gave the block are still in scope. */
+static struct ast *loop_use (struct scope_table *scopes,
+                             struct parse_status *status, struct ast *name,
+                             struct ast *args, struct ast *block)
+{
+  const struct loop_def *def = find_loop (status, ast_token (name)->text);
+  const struct var **given;
+
+  if (!def)
+    return block;
+  given = allocate ((size_t)def->ninject * sizeof (*given) + 1);
+  for (int i = 0; i < def->ninject; i++)
+    given[i] = scope_find (scopes, def->inject[i].name);
+  return loop_expand (def, name, args, block, given, &status->rejected);
 }
 
 /* A file may have foreach loops or something named foreach, not both. Reports
@@ -125,6 +297,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token STATIC_ASSERT THREAD_LOCAL
 %token ATTRIBUTE EXTENSION ASM TYPEOF INT128 REAL IMAG LABEL AUTO_TYPE
 %token FOREACH CACHE
+%token AT_LOOP "@loop" LOOP_NAME
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -162,6 +335,7 @@ external_declaration:
   | declaration
   | ASM '(' string ')' ';'        { $$ = N (ASM_DEFINITION, $1, $2, $3, $4, $5); }
   | ';'                           { $$ = N (EMPTY_DECLARATION, $1); }
+  | loop_definition
   /* Error recovery: skip to the end of the declaration, and go on to find more
    * errors. A file with errors is not translated, so these build nothing. */
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -172,6 +346,34 @@ function_definition:
     decl_specs_typed specs_done declarator enter_function compound_statement
     leave_function
                                   { $$ = N (FUNCTION_DEFINITION, $1, $3, $4, $5); }
+  ;
+
+/* A block macro: see translate.h. The parameters and the body share a scope,
+ * and every name declared in it belongs to the loop. */
+loop_definition:
+    AT_LOOP any_identifier        { loop_begin (scopes, status, $2); $$ = NULL; }
+    '(' open_scope loop_params ')' loop_injects compound_statement close_scope
+                                  { $$ = loop_end (status,
+                                                   N (LOOP_SOURCE, $1, $2, $3, $4, $5,
+                                                      $6, $7, $8, $9, $10),
+                                                   $6, $9); }
+  ;
+
+loop_params:
+    %empty                        { $$ = NULL; }
+  | parameter_type_list
+  ;
+
+loop_injects:
+    %empty                        { $$ = NULL; }
+  | ':' loop_inject_list          { $$ = N (LOOP_INJECTS, $1, $2);
+                                    status->cur_loop->injects = $$; }
+  ;
+
+loop_inject_list:
+    any_identifier                { $$ = N (LOOP_INJECT_LIST, $1); }
+  | loop_inject_list ',' any_identifier
+                                  { $$ = ast_add (ast_add ($1, $2), $3); }
   ;
 
 /* Markers: empty rules that run an action at that point of a rule. They reduce
@@ -345,6 +547,7 @@ any_identifier:
   | TYPE_NAME
   | FOREACH
   | CACHE
+  | LOOP_NAME
   ;
 
 /* Declarators */
@@ -365,9 +568,9 @@ init_declarator:
 
 /* The name is in scope from here, before its initializer. */
 named_declarator:
-    declarator                    { declare (scopes, $1, scope_declaring (scopes));
+    declarator                    { declare (scopes, status, $1, scope_declaring (scopes));
                                     $$ = $1; }
-  | declarator declarator_attrs   { declare (scopes, $1, scope_declaring (scopes));
+  | declarator declarator_attrs   { declare (scopes, status, $1, scope_declaring (scopes));
                                     $$ = N (ATTRIBUTED_DECLARATOR, $1, $2); }
   ;
 
@@ -465,7 +668,7 @@ parameter_declaration:
   | decl_specs_typed abstract_declarator
                                   { $$ = N (PARAMETER, $1, $2); }
   | decl_specs_typed param_declarator opt_attributes
-                                  { declare (scopes, $2, SCOPE_VARIABLE);
+                                  { declare (scopes, status, $2, SCOPE_VARIABLE);
                                     $$ = N (PARAMETER, $1, $2, $3); }
   ;
 
@@ -662,6 +865,7 @@ designator:
 statement:
     labeled_statement
   | compound_statement
+  | '{' ELLIPSIS '}'              { $$ = loop_placeholder (scopes, status, $1, $2, $3); }
   | expression_statement
   | selection_statement
   | iteration_statement
@@ -752,7 +956,8 @@ iteration_statement:
                                   { if (foreach_declared (scopes, $1))
                                       status->rejected++;
                                     $$ = (struct ast *)cache_variable (scopes, $5);
-                                    scope_add (scopes, ast_token ($3)->text, SCOPE_VARIABLE, $3); }
+                                    bind_name (status, scope_add (scopes, ast_token ($3)->text,
+                                                                  SCOPE_VARIABLE, $3), $3); }
     statement
                                   /* The loop's scope, with v in it, is still
                                    * open here: the place to check the names
@@ -761,6 +966,15 @@ iteration_statement:
                                                          $8 != NULL); }
     close_scope
                                   { $$ = N (FOR_EACH_STATEMENT, $10, $7, $11); }
+  /* A use of a block macro. Its statement, the block, is parsed in a scope
+   * with the names the loop gives it. */
+  | LOOP_NAME '(' ')' open_scope  { loop_open (scopes, status, $1); $$ = NULL; }
+    statement                     { $$ = loop_use (scopes, status, $1, NULL, $6); (void) $5; }
+    close_scope                   { $$ = $7; (void) $4; (void) $8; }
+  | LOOP_NAME '(' argument_list ')' open_scope
+                                  { loop_open (scopes, status, $1); $$ = NULL; }
+    statement                     { $$ = loop_use (scopes, status, $1, $3, $7); (void) $6; }
+    close_scope                   { $$ = $8; (void) $5; (void) $9; }
   ;
 
 /* in is not a token, so that it stays an ordinary name. */
@@ -787,8 +1001,16 @@ jump_statement:
   | GOTO '*' expression ';'       { $$ = N (GOTO_STATEMENT, $1, $2, $3, $4); }
   | CONTINUE ';'                  { $$ = N (CONTINUE_STATEMENT, $1, $2); }
   | BREAK ';'                     { $$ = N (BREAK_STATEMENT, $1, $2); }
-  | RETURN ';'                    { $$ = N (RETURN_STATEMENT, $1, $2); }
-  | RETURN expression ';'         { status->rejected += check_cache_copy (scopes, $2, $1);
+  | RETURN ';'                    { if (status->cur_loop)
+                                      loop_error (status, $1, "return in loop '%s', "
+                                                  "which would leave the function "
+                                                  "that uses it", status->cur_loop->name);
+                                    $$ = N (RETURN_STATEMENT, $1, $2); }
+  | RETURN expression ';'         { if (status->cur_loop)
+                                      loop_error (status, $1, "return in loop '%s', "
+                                                  "which would leave the function "
+                                                  "that uses it", status->cur_loop->name);
+                                    status->rejected += check_cache_copy (scopes, $2, $1);
                                     $$ = N (RETURN_STATEMENT, $1, $2, $3); }
   ;
 
@@ -1110,7 +1332,7 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
-  struct parse_status status = { 0, 0 };
+  struct parse_status status = { 0, 0, NULL, NULL, 0 };
   int lineno = 1;
   int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 

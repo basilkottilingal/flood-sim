@@ -4,8 +4,7 @@
 Array * tree_block_indices (void)
 {
   Array * a = array_new ();
-  morton_start (TREE_ROOT)
+  morton (TREE_ROOT_INDEX)
     array_append (a, & ((Index) {IJKL}), sizeof (Index));
-  morton_end ();
   return a;
 }

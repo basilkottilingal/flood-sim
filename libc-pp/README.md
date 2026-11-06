@@ -1,6 +1,6 @@
 # c wrapper
 
-*Documentation as of 2026-11-05.*
+*Documentation as of 2026-11-06.*
 
 This subdirectory is written with the help of claude-code
 
@@ -22,6 +22,8 @@ On top of C11 with GNU extensions, cwrap adds:
 - **`cache (T)`**: growable arrays that rebuild themselves on demand
 - **`foreach (v in V)`**: a loop over a cache, or over any struct with fields
   `n` and `a`
+- **`@loop`**: block macros, written as ordinary code with typed arguments,
+  for loops that `#define` cannot express cleanly
 
 ---
 
@@ -33,12 +35,13 @@ On top of C11 with GNU extensions, cwrap adds:
 4. [Scalars](#scalars)
 5. [Caches](#caches)
 6. [foreach](#foreach)
-7. [How the translator works](#how-the-translator-works)
-8. [Source layout](#source-layout)
-9. [Tests](#tests)
-10. [Limitations](#limitations)
-11. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
-12. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
+7. [@loop: block macros](#loop-block-macros)
+8. [How the translator works](#how-the-translator-works)
+9. [Source layout](#source-layout)
+10. [Tests](#tests)
+11. [Limitations](#limitations)
+12. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
+13. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
 
 ---
 
@@ -390,12 +393,219 @@ updates a dirty cache once before the loop.
 
 ---
 
+## @loop: block macros
+
+A block macro wraps code around a block that the caller supplies, like a
+traversal that visits every node. With `#define` it needs a begin and an end
+macro, a backslash on every line, and untyped arguments evaluated as often as
+they appear. `@loop` is written as ordinary code instead:
+
+    @loop name (T1 p1, T2 p2) : a, b
+    {
+      ...
+      {...}           /* the caller's block goes here */
+      ...
+    }
+
+and used like `for`, with any statement as its block:
+
+    name (e1, e2) {
+      ... a, b ...
+    }
+
+The use becomes, on the lines it took:
+
+    { T1 p1' = e1; T2 p2' = e2; <the body, with {...} replaced by the block> }
+
+For example:
+
+    @loop range (int lo, int hi, int step) : i
+    {
+      int count = 0;
+      for (int i = lo; i < hi; i += step) {
+        count++;
+        {...}
+      }
+    }
+
+    range (0, 10, 3)
+      total += i;     /* i is the loop's; count is still the caller's */
+
+### The names after `:`
+
+The list after `:` is the set of names the caller's block may see. Every
+other name the loop declares, parameters included, is private to the loop.
+
+It is not "the iterators", though the iterators are usually on it. It is the
+loop's interface to its block, much as the parameters are its interface to the
+caller:
+
+| | The caller gives the loop | The loop gives the block |
+|---|---|---|
+| declared as | parameters: `(Index root)` | names after `:`: `: IJKL, node, sblocks` |
+| at the use | arguments: `morton (TREE_ROOT_INDEX)` | names the block uses: `level`, `node` |
+| everything else | hidden | hidden |
+
+In libb-amr's traversal, for instance:
+
+    @loop morton (Index root) : IJKL, node, sblocks
+    {
+      struct mstack { Index p; int visited; } stack [...];
+      int depth = 0, visited = 0;
+      Index cur = root;
+      ...
+          INDEX_UNPACK (cur);     /* int i, j, k, level */
+          BAMR_NODE_ENV ();       /* BAMRNode * node; void *** sblocks */
+          {...}
+      ...
+    }
+
+| Name | Listed | What it is |
+|---|---|---|
+| `i`, `j`, `k`, `level` | yes, through `IJKL` | the index of the node visited: the iterators |
+| `node`, `sblocks` | yes | data of the node visited, not iterators |
+| `root` | no | the parameter |
+| `stack`, `depth`, `cur`, `visited` | no | the traversal's own state |
+
+A block may then use any of these names for itself:
+
+    int depth = 0;                    /* the caller's own depth */
+    morton (TREE_ROOT_INDEX) {
+      depth++;                        /* counts nodes: the loop's depth is
+                                         another variable */
+      if (node->flags & BAMR_NODE_LEAF)
+        ...
+    }
+
+#### Why the names are hidden unless listed
+
+A block macro made with `#define` pastes its body around the block as text,
+so any name the body declares is seen by the block. A caller's `depth` above
+would silently become the traversal's stack depth, and the block would break
+the traversal by changing it. With `@loop`, cwrap renames the loop's own names
+at each use. The `range` example above becomes:
+
+    { int __cwrap_range_lo_1 = 0 ; int __cwrap_range_hi_1 = 10 ; int __cwrap_range_step_1 = 3 ;
+    {
+      int __cwrap_range_count_1 = 0;
+      for (int i = __cwrap_range_lo_1; i < __cwrap_range_hi_1; i += __cwrap_range_step_1) {
+        __cwrap_range_count_1++;
+        total += i;
+      }
+    }
+    }
+
+`i` is listed and keeps its name. `lo`, `hi`, `step` and `count` get names of
+their own, `__cwrap_<loop>_<name>_<use>`, which no code can spell by accident.
+(The linemarkers cwrap also puts in are left out here.)
+
+#### What can be listed
+
+- **Any name the loop declares that is in scope where `{...}` is:** a loop
+  variable, a helper, a typedef. cwrap checks each one: a name the loop does
+  not declare, or one whose scope has ended before `{...}`, is an error.
+- **A parameter.** `@loop each (const Bag * b) : x, b` lets the block use `b`.
+  The argument may then be the caller's own `b`, as in `each (b) ...`: every
+  argument is copied to a hidden local first, so `const Bag * b = b;`, which
+  would read the new `b`, never happens.
+- **Names that a loop used in the body gives it.** In
+
+      @loop walk2 (int d) : level, sum
+      {
+        int sum = 0;
+        walk ((P) { d, 0 }) {     /* walk gives its block level and q */
+          sum += level;
+          {...}
+        }
+      }
+
+  the block of `walk2` sees `level`, passed on from `walk`, and `sum`, its own.
+  It does not see `q`, which `walk` gives `walk2` but `walk2` does not list:
+  inside a definition, a name an inner loop gives is the outer loop's own, and
+  hidden like the rest.
+- **Nothing.** Without `:`, the block sees none of the loop's names, as for a
+  loop that only repeats its block:
+
+      @loop twice ()
+      {
+        for (int n = 0; n < 2; n++)
+          {...}
+      }
+
+- **Names that depend on the dimension.** The list is read after the
+  preprocessor, so a macro can stand for part of it. `IJKL` gives `morton`
+  `i, level`, `i, j, level` or `i, j, k, level` as the dimension has them.
+
+#### The block's view
+
+- **A listed name is the same variable as in the body:** its type and its
+  value where `{...}` is, and a change the block makes is seen by the body.
+  Changing an iterator in the block changes the loop, as it would in
+  hand-written code.
+- **A name that is not listed** means whatever it means at the use: a variable
+  of the caller, a global, or nothing, in which case gcc reports it as
+  undeclared at the line of the block.
+- **A listed name that the block does not use** may draw gcc's warning for an
+  unused variable, as in hand-written code. Cast it to `(void)` in the body if
+  that is expected, as `INDEX_UNPACK` does.
+
+### Rules
+
+- **Arguments are typed.** Each parameter becomes a local of its own type,
+  initialised from its argument, so the argument is converted and evaluated
+  once, and gcc reports a wrong type at the line of the use. The number of
+  arguments must match.
+- **The body's names are hidden.** Every name the loop declares, parameters
+  included, is renamed for each use, where it is declared and where it is
+  used. So the block cannot see them, and they cannot capture the block's own
+  names. Renaming follows C's scopes: each name is matched to its declaration,
+  not by spelling, and members, designators, labels and tags are left alone.
+- **The names after `:` are what the block sees,** and nothing else of the
+  loop: see [above](#the-names-after-).
+- **`{...}` appears exactly once,** anywhere a statement can go in the body,
+  however deeply nested.
+- **`break` and `continue` in the block** act on the loop around `{...}` in
+  the body, as they would in hand-written code.
+- **`return` in the block** returns from the function that uses the loop.
+  `return` in the body is an error, as it would leave that function unseen.
+- **The body may use other loops,** and pass on names they give it:
+  `walk2 (...) : level, sum` can list the `level` that a `walk` in its body
+  gives it. A name an inner loop gives but the outer one does not list is the
+  outer loop's own, and hidden like the rest.
+- **The body is parsed after the preprocessor,** so macros in it are expanded
+  and `#if dimension` works inside it.
+- **Definitions emit nothing,** so they belong in headers. A definition can
+  appear more than once if it is the same each time, as from a header
+  included twice. A different one under the same name is an error.
+- **Line numbers:** cwrap puts linemarkers around the expansion, so errors and
+  the debugger show the body at its lines in the header, the block at its lines
+  in your file, and everything after the use keeps its line.
+- **`@` needs no header.** C has no other use for it.
+- **A loop's name is reserved once defined:** it cannot also name a variable
+  or function.
+
+### Errors
+
+cwrap stops with an error, and the file never reaches gcc, for:
+- no `{...}`, or more than one
+- `{...}` outside a definition
+- `return` in a body
+- a parameter with no name, or `...`
+- a name after `:` that the loop does not declare where `{...}` is
+- the wrong number of arguments
+- a loop used in its own definition
+- a second, different definition with the same name
+
+---
+
 ## How the translator works
 
 1. **Lexer** (`src/lexer.l`, reentrant flex)
    - Each token keeps the whitespace, linemarkers and `#pragma`s before it as
      trivia, along with its file and line.
-   - It asks the scope table whether an identifier is a typedef name.
+   - It asks the scope table whether an identifier is a typedef name or a
+     loop, and records on its token which declaration it named, which is
+     what renaming in a `@loop` follows.
    - A linemarker naming `.../cwrap/cache.h` turns `cache` and `foreach` into
      keywords.
 2. **Parser** (`src/parser.y`, pure bison, `%expect 0`)
@@ -409,6 +619,8 @@ updates a dirty cache once before the loop.
 4. **Translation** (`src/translate.c`)
    - Some rewrites happen while the parser reduces a rule:
      - `foreach`, before the loop's scope closes
+     - each use of a `@loop`, before the scope with the names it gives the
+       block closes
      - local scalars and caches, as each declaration in a block is reduced
      - `cache (T)` itself
    - The rest happens in a pass over the finished tree: the global scalar slots,
@@ -430,7 +642,7 @@ updates a dirty cache once before the loop.
 | `src/parser.y` | the grammar, error recovery, and calls into the translation |
 | `src/ast.c`, `src/ast.h` | the tree, its editing functions (`ast_replace`, `ast_insert_before`), output and dump |
 | `src/scope.c`, `src/scope.h` | names by scope |
-| `src/translate.c`, `src/translate.h` | the scalar, cache and foreach rewrites and checks |
+| `src/translate.c`, `src/translate.h` | the scalar, cache, foreach and `@loop` rewrites and checks |
 | `src/diag.c`, `src/diag.h` | gcc-style colored diagnostics |
 | `src/allocator.c`, `src/allocator.h` | the arena that holds each file's tree |
 | `src/scalar.c`, `src/scalar.h` | the scalar runtime |
@@ -459,6 +671,8 @@ on it. The tests cover:
 - caches: running them, their translation, the errors and warnings, and
   having them off without the header
 - colored diagnostics
+- `@loop`: running uses of it, every error, line numbers around an expansion,
+  and its translation
 
 It prints `ok` or `FAIL` for each check, then `all passed`.
 
@@ -484,6 +698,17 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
   struct is defined. A type defined inside a function does not work.
 - **The tag table does not hold struct members,** so a `foreach` over a struct
   that is not a cache uses `__auto_type` rather than the real element type.
+- **In a `@loop` body:**
+  - **Labels are not renamed,** so a loop with a label can be used once per
+    function. GNU's `__label__` declarations make them local.
+  - **A global the body uses can be hidden by a local of the caller** with
+    the same name, as the body is pasted where the loop is used. cwrap does
+    not check for it.
+  - **A `static` local is one per use,** as the body is copied each time.
+  - **A parameter whose type defines a struct,** as in
+    `@loop f (struct { int a; } s)`, defines it at each use, and twice if the
+    block sees the parameter, as two types that do not match. Name the
+    struct, or use a typedef.
 
 ---
 

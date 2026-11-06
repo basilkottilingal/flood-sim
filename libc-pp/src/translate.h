@@ -81,4 +81,66 @@ void check_cache_arguments (const struct scope_table *scopes,
 /* An error for a typedef of cache (T): caches are known by cache (T) alone. */
 int check_cache_declaration (const struct ast *decl);
 
+/* Block macros.
+ *
+ *   @loop name (T1 p1, T2 p2) : a, b
+ *   {
+ *     ... {...} ...
+ *   }
+ *
+ * defines a loop; `name (e1, e2) U`, U a statement as after for, then becomes
+ *
+ *   { T1 p1' = e1; T2 p2' = e2; <the body, with {...} replaced by { U }> }
+ *
+ * The parameters are typed locals, so each argument is converted and
+ * evaluated once. The body's own names, parameters included, are renamed
+ * where they are declared and used, so U cannot see them nor they hide U's
+ * names, except those listed after `:`, which must be declared where {...}
+ * is: those are what U sees. The definition itself emits nothing.
+ *
+ * The parser keeps the definitions, and checks {...} and return as it goes. */
+
+struct var;
+
+struct loop_inject {
+  const char *name;
+  const struct var *var;  /* its declaration in the body */
+};
+
+struct loop_def {
+  const char *name;
+  int serial;             /* the loop of struct var: see scope.h */
+  const struct token *at; /* the name, for messages */
+  struct ast *source;     /* LOOP_SOURCE: every token of the definition */
+  struct ast *params;     /* PARAMETER_LIST or PARAMETER_TYPE_LIST, or NULL */
+  struct ast *body;       /* COMPOUND_STATEMENT */
+  struct ast *injects;    /* LOOP_INJECTS, or NULL */
+  struct loop_inject *inject;
+  int ninject;
+  int placeholders;       /* {...} seen in the body */
+  int complete;           /* parsed to its end, and usable */
+  struct loop_def *next;
+};
+
+/* What goes in the tree for a definition: an empty token with the trivia of
+ * all of its tokens, so that no line moves. */
+struct ast *loop_stub (const struct ast *source);
+
+/* Checks the parameters of def, once parsed: each is named, and there is no
+ * `...`. Returns the number of errors reported. */
+int loop_check_params (const struct loop_def *def);
+
+/* Whether two definitions have the same tokens. */
+int loop_same (const struct loop_def *a, const struct loop_def *b);
+
+/* name (args) block, a use of def: args is an ARGUMENT_LIST or NULL, block
+ * the statement U. given[i] is the declaration that the block saw for the
+ * name def->inject[i]: the expansion's own declaration of it takes its place,
+ * so that in a definition the two stay one name, renamed together or not.
+ * Returns the expansion; on an error, reported and counted in *rejected,
+ * returns block. */
+struct ast *loop_expand (const struct loop_def *def, struct ast *name,
+                         struct ast *args, struct ast *block,
+                         const struct var *const *given, int *rejected);
+
 #endif
