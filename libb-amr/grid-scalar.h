@@ -37,6 +37,13 @@
   .. Its cost is a full traversal: for checks, not for every step.
   */
   long    grid_scalar_blocks_attached (void);   /* blocks of scalars in use */
+
+  /*
+  .. Freed blocks stay in memory, so that the next refinement reuses them
+  .. with no page fault (pool.h). After a coarsening, this gives back the
+  .. pages of all but 'keep' of them.
+  */
+  void    grid_scalar_trim (size_t keep);
   int     grid_scalar_check (void);
 
 #endif

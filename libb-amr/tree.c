@@ -22,14 +22,18 @@ static int G(nleaves) [BAMR_MAX_DEPTH + 1];   /* leaves per level */
 struct _Memindex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;
 
-/* cells in a block, ghosts included: bb^dimension */
-#define bb           ((1 << G (blockdepth)) + 2 * GHOSTS)
+/*
+.. cells a block stores: m^dimension, m = 2^blockdepth, and no ghost cells.
+.. Code that needs ghosts fills a scratch block of its own from the
+.. neighbours: block_gather () in block-ghosts.h.
+*/
+#define bm           (1 << G (blockdepth))
 #if dimension == 1
-# define blockwidth()     (bb)
+# define block_size()     (bm)
 #elif dimension == 2
-# define blockwidth()     (bb * bb)
+# define block_size()     (bm * bm)
 #else
-# define blockwidth()     (bb * bb * bb)
+# define block_size()     (bm * bm * bm)
 #endif
 
 #define is_leaf()   (node->flags & BAMR_NODE_LEAF)
@@ -128,7 +132,7 @@ static int grid_init (int depthmax, int blockdepth)
   G (blockdepth) = blockdepth;
 
   pool_node = pool_new (sizeof (BAMRNode));
-  grid_scalar_init (blockwidth ());
+  grid_scalar_init (block_size ());
 
   Index root = {TREE_ROOT};
   INDEX_UNPACK (root);
@@ -148,9 +152,10 @@ int tree (int depthmax, int blockdepth)
   depthmax = depthmax > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH :
     depthmax <= 0 ? 1 : depthmax;
   /*
-  .. A block has (2^blockdepth + 2 GHOSTS)^dimension doubles, so the largest
-  .. blockdepth shrinks with the dimension: 3D at 6 is already 68^3 doubles,
-  .. 2.4 MB a block. fixme : tune better
+  .. A block has (2^blockdepth)^dimension Reals, and a scratch block with
+  .. ghosts (2^blockdepth + 2 GHOSTS)^dimension, so the largest blockdepth
+  .. shrinks with the dimension: 3D at 6 is already 64^3 doubles, 2 MiB a
+  .. block. fixme : tune better
   */
   #if dimension == 1
   enum { blockdepth_max = 16 };
@@ -179,6 +184,11 @@ int tree_depth (void)
 int tree_nblocks (void)
 {
   return G(nb);
+}
+
+int tree_block_m (void)
+{
+  return bm;
 }
 
 int tree_nleaves (void)

@@ -1,5 +1,20 @@
 # block based amr
 
+## Tests
+
+    sh tests/run.sh
+
+It builds each test in `tests/` with cwrap (`CWRAP`, by default
+`../libc-pp/build/cwrap`), in 1, 2 and 3 dimensions, in double and float
+(`-DBAMR_SINGLE`), under AddressSanitizer and UBSan, and fails on any warning:
+- `test_pool.c`: the hot and cold free lists, with page faults counted;
+- `test_tree.c`: counts, the scalar hooks, Morton order, refinement, and the
+  loops of `tree.h`;
+- `test_blocks.c`: every loop of `block-loops.h` against `block_cells`, in
+  both layouts and every halo;
+- `test_ghosts.c`: restriction, ghost cells at level jumps and at the
+  boundary, and scattering back.
+
 
 
 # Future plans
@@ -18,7 +33,17 @@ How allocation works now:
 
 ### 1. Stop handing pages back on every free
 
-**Gain: large, if the grid adapts often. Effort: small.**
+**Done.** `pool.c` keeps freed objects on a hot list, and
+`pool_alloc_uninit ()` skips the zeroing; `pool_trim ()` (or
+`grid_scalar_trim ()`) gives pages back after a coarsening. Measured by
+`tests/test_pool.c`, reusing 62 KiB blocks: about 26 µs a block before (15
+page faults each), 2.4 µs zeroed and 1.3 µs uninitialised now.
+
+What remains: blocks are still allocated zeroed, as no code fills a new block
+in full yet. Once refinement fills children from their parent, those blocks
+can use `pool_alloc_uninit ()`.
+
+The reasoning, as planned:
 
 `pool_free` gives a large block's pages back to the system at once. The next
 `pool_alloc` of that block then takes a page fault for every 4 KiB page, and
@@ -53,7 +78,22 @@ family's object.
 
 ### 3. Ghost cells are a large share of memory in 3D
 
-**Gain: about 2× memory and ghost bandwidth in 3D. Effort: large.**
+**Done, the first option.** Blocks store m^d cells. `block-ghosts.h` fills a
+scratch block with ghosts (`block_gather ()`), from the same level, from a
+coarser level (the coarse value), or by reflection at the boundary, and
+`tree_restrict ()` keeps parents the mean of their children.
+`foreach_leaf_gathered ()` does it for every leaf, and `block_interior ()`
+gives each cell its index in the scratch block and in the stored one.
+
+What remains:
+- **Interpolation at coarse neighbours.** A ghost next to a coarser block
+  takes the coarse cell's value as it is. A linear interpolation would make
+  second-order stencils second order there too.
+- **Speed.** The gather finds each ghost's node on its own. Finding the
+  neighbour of each face, edge and corner once, and copying runs of cells,
+  would be faster.
+
+The reasoning, as planned:
 
 Storage per block, relative to the interior alone:
 

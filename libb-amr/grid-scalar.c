@@ -198,3 +198,9 @@ int grid_scalar_check (void)
   }
   return ok;
 }
+
+void grid_scalar_trim (size_t keep)
+{
+  if (pool_block)
+    pool_trim (pool_block, keep);
+}

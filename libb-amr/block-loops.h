@@ -21,9 +21,8 @@
   ..  indices, ghosts included. Along j and k the interior is [g, g + m). Along
   ..  i it is [ox, ox + m), where ox depends on the layout:
   ..
-  ..    compact   ox = g, rows of m + 2 g. This is what libb-amr allocates now:
-  ..              grid_scalar_init (blockwidth ()). Rows start anywhere, so
-  ..              vector loads are unaligned.
+  ..    compact   ox = g, rows of m + 2 g. Rows start anywhere, so vector
+  ..              loads are unaligned.
   ..
   ..    aligned   ox and the row length are rounded up to the vector width V,
   ..              in Reals: 4 doubles or 8 floats fill a 32-byte AVX vector.
@@ -34,6 +33,12 @@
   ..              shape.cells Reals: grid_scalar_init (shape.cells). The pool
   ..              aligns blocks of 64 bytes or more to 64 bytes (a page, from
   ..              16 KiB), so vectors up to 64 bytes stay aligned.
+  ..
+  ..  libb-amr stores blocks without ghosts: block_shape (m, 0), m^dimension
+  ..  cells. A stencil that reads neighbours runs on a scratch block with
+  ..  ghosts, block_shape (m, g), that block_gather () (block-ghosts.h) fills
+  ..  from the stored block and its neighbours; block_interior () then gives
+  ..  each interior cell its index in both.
   ..
   ..  Every loop here reads the layout from a BlockShape, so code written with
   ..  them works with either, and with any other that keeps i fastest.
@@ -352,6 +357,47 @@
       stop = 1;
       (void) row, (void) n;
       {...}
+    }
+  }
+
+  /*
+  .. block_interior (shape): the interior cells of a block of that shape,
+  .. rows vectorised, with c their index in it and o their index in a stored
+  .. block of m^dimension cells, without ghosts: to read neighbours in a
+  .. scratch block and write the result to the stored one,
+  ..
+  ..   block_interior (shape)
+  ..     out [o] = cell_at (w, 1, 0) + ... ;
+  ..
+  .. Same rules as block_cells_simd.
+  */
+  @loop block_interior (BlockShape shape) : CIJK, c, o, shape
+  {
+    int m = shape.m;
+    (void) m;
+  #if dimension > 2
+    for (int ck = shape.g; ck < shape.g + m; ck++)
+  #endif
+  #if dimension > 1
+    for (int cj = shape.g; cj < shape.g + m; cj++)
+  #endif
+    {
+      int base = 0, obase = - shape.ox;   /* c and o of the row at ci = 0 */
+  #if dimension > 1
+      base += cj * shape.sy;
+      obase += (cj - shape.g) * m;
+  #endif
+  #if dimension > 2
+      base += ck * shape.sz;
+      obase += (ck - shape.g) * m * m;
+  #endif
+      BLOCK_SIMD
+      for (int ci = shape.ox; ci < shape.ox + m; ci++)
+      {
+        int c = base + ci, o = obase + ci;
+        (void) c, (void) o;
+        {...}
+      }
     }
   }
 

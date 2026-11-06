@@ -229,5 +229,7 @@
   int  tree_depth (void);       /* deepest level with a node */
   int  tree_nblocks (void);     /* nodes, leaves or not      */
   int  tree_nleaves (void);     /* leaf nodes                */
+  int  tree_block_m (void);     /* cells per block side: 2^blockdepth; a
+                                   block stores m^dimension, no ghosts */
 
 #endif
