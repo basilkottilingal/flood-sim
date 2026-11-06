@@ -1,54 +1,24 @@
-#include <limits.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "scalar.h"
 
-#define nn ((NSCALAR_MAX + 31) / 32)
+#define nn __CWRAP_SCALAR_WORDS
 
-/*
-.. bit s of 'bits' is set while the id s is free. The bits from NSCALAR_MAX to
-.. the end of the last word stay clear: those ids are never handed out.
-*/
-static uint32_t bits [nn];
-
-# if (defined(__GNUC__) || defined(__clang__)) && (UINT_MAX == 0xFFFFFFFF)
-#   if defined(__has_builtin)
-#     if __has_builtin(__builtin_ctz)
-#       define HAVE_CTZ
-#     endif
-#   endif
-# endif
-
-static inline unsigned ctz32 (uint32_t v)
-{
-# ifdef HAVE_CTZ
-  return (unsigned) __builtin_ctz (v);
-# else
-  /*
-  .. Portable fallback in case __builtin_ctz function not available.
-  .. de Bruijn sequence lookup.
-  */
-  static const uint8_t tbl [32] =
-  {
-    0,  1,  28,  2, 29, 14, 24,  3, 30, 22, 20, 15, 25, 17,  4,  8,
-    31, 27, 13, 23, 21, 19, 16,  7, 26, 12, 18,  6, 11,  5, 10,  9
-  };
-  return tbl [(uint32_t) ((v & (0u - v)) * 0x077CB531u) >> 27];
-# endif
-}
+/* bit s % 64 of word s / 64 is set while the id s is free: see scalar.h */
+unsigned long long __cwrap_scalar_free_bits [nn];
+#define bits __cwrap_scalar_free_bits
 
 /* the lowest free id, now taken, or -1 */
 static inline int popbit ()
 {
   for (unsigned i = 0; i < nn; i++)
   {
-    uint32_t v = bits [i];
+    unsigned long long v = bits [i];
     if (v != 0)
     {
       bits [i] = v & (v - 1);
-      return (int) (i * 32 + ctz32 (v));
+      return (int) (i * 64 + __cwrap_scalar_ctz (v));
     }
   }
   return -1;
@@ -56,7 +26,7 @@ static inline int popbit ()
 
 static inline void pushbit (int b)
 {
-  bits [b/32] |= (uint32_t) 1 << (b & 31);
+  bits [b/64] |= 1ull << (b & 63);
 }
 
 scalar scalar_new ()
@@ -76,7 +46,7 @@ scalar scalar_new ()
 int scalar_in_use (scalar s)
 {
   return s >= 0 && s < NSCALAR_MAX
-         && !((bits [s/32] >> (s & 31)) & 1);
+         && !((bits [s/64] >> (s & 63)) & 1);
 }
 
 void (* scalar_free_hook) (scalar) = NULL;
@@ -98,11 +68,11 @@ void scalar_free (scalar s)
 
 int scalar_count ()
 {
-  int nfree = 0;
-  for (unsigned i = 0; i < nn; i++)
-    for (uint32_t v = bits [i]; v; v &= v - 1)
-      nfree++;
-  return NSCALAR_MAX - nfree;
+  int n = 0;
+  for (int w = 0; w < nn; w++)
+    for (unsigned long long v = __cwrap_scalar_used (w); v; v &= v - 1)
+      n++;
+  return n;
 }
 
 /*

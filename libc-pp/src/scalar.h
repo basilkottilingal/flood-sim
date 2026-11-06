@@ -54,15 +54,60 @@
   extern void (* scalar_new_hook) (scalar);
 
   /*
-  .. foreach_scalar (s) { ... } runs the body once for each id in use, lowest
-  .. first, with s that id. s is an int, not a scalar, so cwrap neither
-  .. numbers it nor objects to s++; break and continue work as in any loop.
-  .. The empty if keeps a following else from binding to it.
-  .. Note that it is not optimized for faster iteration.
+  .. The free ids, for foreach_scalar (): bit b of word w is set while the id
+  .. 64 w + b is free. Bits from NSCALAR_MAX on stay clear and are never
+  .. handed out. Only scalar.c writes it.
   */
-  #define foreach_scalar(s)                                     \
-    for (int s = 0; s < NSCALAR_MAX; s++)                       \
-      if (!scalar_in_use (s)) {} else
+  #define __CWRAP_SCALAR_WORDS ((NSCALAR_MAX + 63) / 64)
+  extern unsigned long long __cwrap_scalar_free_bits [__CWRAP_SCALAR_WORDS];
+
+  /* the lowest set bit of v, which is not 0 */
+  static inline int __cwrap_scalar_ctz (unsigned long long v)
+  {
+  #if defined (__GNUC__) || defined (__clang__)
+    return __builtin_ctzll (v);
+  #else
+    /* de Bruijn lookup, on the lowest 64 bits */
+    static const unsigned char tbl [64] =
+    {
+       0,  1, 48,  2, 57, 49, 28,  3, 61, 58, 50, 42, 38, 29, 17,  4,
+      62, 55, 59, 36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12,  5,
+      63, 47, 56, 27, 60, 41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11,
+      46, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19,  9, 13,  8,  7,  6
+    };
+    unsigned long long low = (v & (0ull - v)) & 0xFFFFFFFFFFFFFFFFull;
+    return tbl [((low * 0x03F79D71B4CB0A89ull) & 0xFFFFFFFFFFFFFFFFull) >> 58];
+  #endif
+  }
+
+  /* the ids in use in word w, as bits */
+  static inline unsigned long long __cwrap_scalar_used (int w)
+  {
+    unsigned long long all = (w == __CWRAP_SCALAR_WORDS - 1 && NSCALAR_MAX % 64)
+      ? (1ull << (NSCALAR_MAX % 64)) - 1 : 0xFFFFFFFFFFFFFFFFull;
+    return ~__cwrap_scalar_free_bits [w] & all;
+  }
+
+  /*
+  .. foreach_scalar (s) { ... } runs the body once for each id in use, lowest
+  .. first, with s that id, jumping from one id in use to the next (bit pops),
+  .. so it costs one step per scalar in use and one per 64 ids.
+  .. s is an int, not a scalar, so cwrap neither numbers it nor objects to it.
+  .. break leaves the loop and continue goes to the next id, as in any loop.
+  .. Each 64 ids are read when the loop reaches them: freeing s in the body is
+  .. fine; an id taken in the body may or may not be visited.
+  ..
+  .. The innermost for runs once and declares s: on break, __cwrap_brk stays
+  .. 1, which stops the two outer loops.
+  */
+  #define foreach_scalar(s)                                               \
+    for (int __cwrap_w = 0, __cwrap_brk = 0;                              \
+         !__cwrap_brk && __cwrap_w < __CWRAP_SCALAR_WORDS; __cwrap_w++)   \
+      for (unsigned long long __cwrap_v = __cwrap_scalar_used (__cwrap_w); \
+           !__cwrap_brk && __cwrap_v; __cwrap_v &= __cwrap_v - 1)          \
+        for (int s = 64 * __cwrap_w + __cwrap_scalar_ctz (__cwrap_v),     \
+                 __cwrap_k = (__cwrap_brk = 1);                           \
+             ((void) (s), __cwrap_k); __cwrap_k = __cwrap_brk = 0)
 
   /* In 2 and 3 dimensions, also (below):
   ..   vector vector_new (void);    void vector_free (vector);
