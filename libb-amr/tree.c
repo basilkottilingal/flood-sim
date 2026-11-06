@@ -36,47 +36,6 @@ static Pool * pool_node = NULL;
 #define is_pruned() (node->flags & BAMR_NODE_IS_PRUNED)
 #define is_parent() (node->flags & BAMR_NODE_HAS_CHILDREN)
 
-/*
-.. children () { ... } end ();
-.. runs the body for each child of the node at IJKL, with IJKL, node and
-.. sblocks those of the child (node is NULL if the child is not allocated).
-.. The caller's IJKL are left as they were.
-*/
-#define children() {                                             \
-    Index _p_ = {IJKL};                                          \
-    for (int _c_ = 0; _c_ < TREE_NCHILDREN; _c_++) {             \
-      Index _q_ = index_child (_p_, _c_);                        \
-      INDEX_UNPACK (_q_);                                        \
-      BAMR_NODE_ENV ();
-
-/*
-.. neighborhood (N) { ... } end ();
-.. runs the body for each index, at the same level, within N of IJKL in every
-.. direction (the box of (2N+1)^dimension, IJKL itself included).
-*/
-#if dimension == 1
-# define box_loops(p, N)                                         \
-    for (int i = (p).i - (N); i <= (p).i + (N); i++)
-#elif dimension == 2
-# define box_loops(p, N)                                         \
-    for (int i = (p).i - (N); i <= (p).i + (N); i++)             \
-      for (int j = (p).j - (N); j <= (p).j + (N); j++)
-#else
-# define box_loops(p, N)                                         \
-    for (int i = (p).i - (N); i <= (p).i + (N); i++)             \
-      for (int j = (p).j - (N); j <= (p).j + (N); j++)           \
-        for (int k = (p).k - (N); k <= (p).k + (N); k++)
-#endif
-#define neighborhood(N) {                                        \
-    Index _p_ = {IJKL};                                          \
-    box_loops (_p_, N) {                                         \
-      int level = _p_.level;                                     \
-      BAMR_NODE_ENV ();
-
-#define end()                                                    \
-    }                                                            \
-  }
-
 static void update_depthmin (void)
 {
   int l = 0;
@@ -130,12 +89,12 @@ static int add_children (int IJKLargs)
     G (depth)++;
   Memindex m = & G (layers) [level + 1];
   int len = 1 << (level + 1);
-  children ()
+  children_of ((Index) {IJKL})
   {
     assert (!node);
     node = allocate_node ();
     mem_assign (m, IJK, len, node);
-  } end ();
+  }
   G (nb) += TREE_NCHILDREN;
   return 1;
 }
@@ -147,10 +106,8 @@ static int divide_leaf (int IJKLargs)
   BAMR_NODE_ENV ();
   assert (is_leaf ());
   node->flags &= ~BAMR_NODE_LEAF;
-  children ()
-  {
+  children_of ((Index) {IJKL})
     node->flags |= BAMR_NODE_LEAF;
-  } end ();
   G (nleaves) [level]--;
   G (nleaves) [level + 1] += TREE_NCHILDREN;
   G (nlb) += TREE_NCHILDREN - 1;

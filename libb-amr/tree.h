@@ -145,6 +145,81 @@
   }
 
   /*
+  .. Loops over the indices around a node, cwrap @loops. Each gives its block
+  .. IJKL, node and sblocks of the index visited, as BAMR_NODE_ENV () does:
+  .. node is NULL where no node is allocated, as outside the domain. Each is
+  .. one loop, so 'break' leaves it and 'continue' goes to the next index, in
+  .. any dimension.
+  ..
+  ..   children_of (p)              the TREE_NCHILDREN children of p, in Morton
+  ..                                order: index_child (p, c), c = 0, 1, ...
+  ..   neighborhood_of (p, radius)  every index of p's level within radius of p
+  ..                                in each direction, p included: the box of
+  ..                                (2 radius + 1)^dimension, i fastest
+  ..   neighbors_of (p, radius)     the same box, without p
+  */
+  @loop children_of (Index parent) : IJKL, node, sblocks
+  {
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+    {
+      Index q = index_child (parent, c);
+      INDEX_UNPACK (q);
+      BAMR_NODE_ENV ();
+      {...}
+    }
+  }
+
+  /* the m-th index of the box of width w around p, m from 0 to w^dimension */
+  static inline Index index_in_box (Index p, int radius, int m)
+  {
+    int w = 2 * radius + 1;
+    p.i += m % w - radius;
+    #if dimension > 1
+    p.j += m / w % w - radius;
+    #endif
+    #if dimension > 2
+    p.k += m / (w * w) - radius;
+    #endif
+    return p;
+  }
+
+  static inline int box_size (int radius)
+  {
+    int w = 2 * radius + 1, n = w;
+    #if dimension > 1
+    n *= w;
+    #endif
+    #if dimension > 2
+    n *= w;
+    #endif
+    return n;
+  }
+
+  @loop neighborhood_of (Index center, int radius) : IJKL, node, sblocks
+  {
+    for (int m = 0, size = box_size (radius); m < size; m++)
+    {
+      Index q = index_in_box (center, radius, m);
+      INDEX_UNPACK (q);
+      BAMR_NODE_ENV ();
+      {...}
+    }
+  }
+
+  @loop neighbors_of (Index center, int radius) : IJKL, node, sblocks
+  {
+    for (int m = 0, size = box_size (radius); m < size; m++)
+    {
+      if (m == size / 2)          /* the center: the middle of the box */
+        continue;
+      Index q = index_in_box (center, radius, m);
+      INDEX_UNPACK (q);
+      BAMR_NODE_ENV ();
+      {...}
+    }
+  }
+
+  /*
   .. API (s)
   */
   int  tree (int depthmax, int blockdepth);
