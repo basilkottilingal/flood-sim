@@ -334,6 +334,15 @@ check "@loop nested: misuse inside bodies and blocks is an error" $?
   grep -q "^loop_nest_lines.c:14:[0-9]*: error: .nope3. undeclared" loop_nest_lines.log
 check "@loop nested: errors keep their lines, in the block, in a body, and after" $?
 
+"$cwrap" -c loop_pragma.c -o loop_pragma.o 2> loop_pragma.log
+[ $? -ne 0 ] && [ "$(grep -c 'error' loop_pragma.log)" = 1 ] &&
+  grep -q "^loop_pragma.c:18:[0-9]*: error: .nope. undeclared" loop_pragma.log &&
+  sed 's/ + nope//' loop_pragma.c > loop_pragma2.c && "$cwrap" -Wall loop_pragma2.c -o loop_pragma &&
+  { ./loop_pragma; [ $? = 12 ]; } &&
+  "$cwrap" -translate loop_pragma2.c -o loop_pragma.out &&
+  [ "$(grep -c '^#pragma GCC ivdep' loop_pragma.out)" = 2 ]
+check "@loop: a pragma in a body goes with each use, and lines stay right" $?
+
 "$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
 gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]
 check "-translate -o writes C that gcc can build" $?

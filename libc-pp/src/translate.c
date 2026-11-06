@@ -761,12 +761,29 @@ static int count_newlines (const char *s)
 /* Puts a linemarker in front of t's trivia, so that t lands on its own line
  * of its own file wherever it is emitted, and the tokens after it with it.
  * Trivia that has a linemarker of its own needs none. */
+/* Does trivia hold a linemarker, `# 12 "file"`? A #pragma line does not
+ * count: it sets no line. */
+static int has_linemarker (const char *tr)
+{
+  for (const char *p = tr; p; p = strchr (p, '\n')) {
+    if (*p == '\n')
+      p++;
+    p += strspn (p, " \t");
+    if (*p == '#') {
+      p += 1 + strspn (p + 1, " \t");
+      if (*p >= '0' && *p <= '9')
+        return 1;
+    }
+  }
+  return 0;
+}
+
 static void mark_token (struct token *t)
 {
   const char *tr = t->trivia;
   int line;
 
-  if (tr[0] == '#' || strstr (tr, "\n#"))
+  if (has_linemarker (tr))
     return;
   line = t->line - count_newlines (tr);
   t->trivia = arena_printf ("\n# %d \"%s\"\n%s", line > 0 ? line : 1,
@@ -799,9 +816,27 @@ static void each_leaf (struct ast *n, void (*f) (struct ast *, void *), void *ar
     each_leaf (k, f, arg);
 }
 
+/* The trivia of leaf, for the stub of a definition: line breaks and
+ * linemarkers, so that no line moves, but no other directive. A #pragma in a
+ * body, as from _Pragma, belongs to the code where the loop is used, and has
+ * no place where it is defined. */
 static void add_trivia (struct ast *leaf, void *out)
 {
-  fputs (ast_token (leaf)->trivia, out);
+  const char *p = ast_token (leaf)->trivia;
+
+  while (*p) {
+    const char *eol = strchr (p, '\n');
+    size_t n = eol ? (size_t)(eol - p) + 1 : strlen (p);
+    const char *q = p + strspn (p, " \t");
+
+    const char *after = q + 1 + strspn (q + 1, " \t");
+
+    if (*q == '#' && !(*after >= '0' && *after <= '9'))
+      fputc ('\n', out);         /* a directive other than a linemarker */
+    else
+      fwrite (p, 1, n, out);
+    p += n;
+  }
 }
 
 struct ast *loop_stub (const struct ast *source)

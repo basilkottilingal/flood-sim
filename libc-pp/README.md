@@ -574,6 +574,9 @@ their own, `__cwrap_<loop>_<name>_<use>`, which no code can spell by accident.
   outer loop's own, and hidden like the rest.
 - **The body is parsed after the preprocessor,** so macros in it are expanded
   and `#if dimension` works inside it.
+- **Pragmas in the body go with each use.** `_Pragma ("omp simd")` or
+  `#pragma GCC ivdep` before a loop in the body is written before that loop
+  in every expansion, and not where the loop is defined.
 - **Definitions emit nothing,** so they belong in headers. A definition can
   appear more than once if it is the same each time, as from a header
   included twice. A different one under the same name is an error.
