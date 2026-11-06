@@ -4,8 +4,11 @@
   /*
   ..  Traversals of the cells of a block, as cwrap @loops: a reference.
   ..
-  ..  A block holds (m + 2 g)^dimension cells: m interior cells per side, m a
-  ..  power of 2 (2^blockdepth), and g ghost layers (GHOSTS) on every side.
+  ..  A block has m cells per side, m a power of 2 (2^blockdepth). libb-amr
+  ..  stores m^dimension of them, without ghosts. A stencil runs on a scratch
+  ..  block of (m + 2 g)^dimension cells, g ghost layers (GHOSTS) on every
+  ..  side, which block_gather () fills: see block-ghosts.h. The loops here
+  ..  work on either, as a BlockShape says which.
   ..
   ..
   ..  1. Layout
@@ -30,9 +33,15 @@
   ..              power of 2, m / V vectors cover it with no remainder. It
   ..              costs some padding, (ox - g) cells before each row and the
   ..              rest after, and the block must then be allocated with
-  ..              shape.cells Reals: grid_scalar_init (shape.cells). The pool
-  ..              aligns blocks of 64 bytes or more to 64 bytes (a page, from
-  ..              16 KiB), so vectors up to 64 bytes stay aligned.
+  ..              shape.cells Reals. The pool aligns blocks of 64 bytes or more
+  ..              to 64 bytes (a page, from 16 KiB), and block_scratch_new ()
+  ..              aligns scratch blocks the same, so vectors up to 64 bytes
+  ..              stay aligned.
+  ..
+  ..  A stored block has g = 0, so ox = 0 and rows of m: as m is a power of 2,
+  ..  a multiple of V, both layouts are the same there, aligned, with no
+  ..  padding. The choice only matters for scratch blocks, whose ghosts move
+  ..  the interior off the vector boundary in the compact layout.
   ..
   ..  libb-amr stores blocks without ghosts: block_shape (m, 0), m^dimension
   ..  cells. A stencil that reads neighbours runs on a scratch block with
@@ -96,23 +105,31 @@
   ..  memcpy becomes an aligned load.
   ..
   ..  CPU, many cores. Parallelise over blocks, not inside them: there are
-  ..  many blocks, and each is a natural unit of cache. foreach_leaf_parallel
-  ..  runs blocks on all threads, with block_cells_simd inside each:
+  ..  many blocks, and each is a natural unit of cache. A stencil reads
+  ..  neighbours, which a stored block does not hold, so each thread gathers
+  ..  a scratch block of its own: foreach_leaf_gathered_parallel
+  ..  (block-ghosts.h) runs blocks on all threads, with w the scratch block
+  ..  and shape its shape, and block_interior inside each:
   ..
-  ..      foreach_leaf_parallel () {
-  ..        Real * u = block_data (sblocks, s), * v = block_data (sblocks, t);
-  ..        block_cells_simd (shape, 0)
-  ..          v [c] = cell_at (u, 1, 0) + cell_at (u, -1, 0) + ... ;
+  ..      foreach_leaf_gathered_parallel (s, 1) {
+  ..        Real * v = block_data (sblocks, t);
+  ..        block_interior (shape)
+  ..          v [o] = cell_at (w, 1, 0) + cell_at (w, -1, 0) + ... ;
   ..      }
+  ..
+  ..  A pointwise update, which reads no neighbour, needs no gather:
+  ..  foreach_leaf_parallel with block_cells_simd (tree_block_shape (), 0) on
+  ..  the stored block.
   ..
   ..  block_cells_threads, threads inside one block, only pays when there are
   ..  fewer blocks than cores and the blocks are large (3D, m >= 32).
   ..
-  ..  Cache. A block of m = 16 in 3D is 20^3 doubles, 62 KiB (31 KiB in
-  ..  float): one or two fit in L2, and a 7-point stencil streams well. From
-  ..  m = 64 (68^3 doubles, 2.4 MiB) planes of k stop fitting, and
-  ..  block_cells_tiled, which walks (j, k) in tiles, keeps the k-1, k, k+1
-  ..  planes of a tile in cache.
+  ..  Cache. With m = 16 in 3D, a stored block is 16^3 doubles, 32 KiB, and a
+  ..  scratch block with 2 ghost layers 20^3, 62 KiB (half each in float):
+  ..  the scratch block, one per thread, stays in L2 while the stencil runs on
+  ..  it. From m = 64 (68^3 doubles with ghosts, 2.4 MiB) planes of k stop
+  ..  fitting, and block_cells_tiled, which walks (j, k) in tiles, keeps the
+  ..  k-1, k, k+1 planes of a tile in cache.
   ..
   ..  GPU. Launch once for all blocks, not once per block: a launch costs
   ..  microseconds, a block of 16^3 cells is a few microseconds of work.
@@ -127,6 +144,13 @@
   ..    - otherwise copy the blocks of a scalar into one device array of
   ..      nblocks * shape.cells Reals, index it u [blk * shape.cells + c],
   ..      and map it with #pragma omp target data map (...) around the loops.
+  ..
+  ..  Stored blocks have no ghosts, so a stencil on the GPU needs them
+  ..  gathered first: block_gather () each block into its slot of a device
+  ..  array of nblocks scratch blocks (on the host, then copied; or on the
+  ..  device, with the neighbours of each block found beforehand), then
+  ..  gpu_cells over that array with the scratch shape, halo 0. A pointwise
+  ..  update runs on the stored blocks directly.
   ..
   ..  CUDA or HIP, which cwrap cannot compile (its output goes to gcc), map
   ..  the same way: one CUDA block per AMR block, a thread per cell of a
@@ -189,7 +213,8 @@
     return b;
   }
 
-  /* the layout libb-amr allocates now: (m + 2 g)^dimension, no padding */
+  /* compact: (m + 2 g)^dimension, no padding. With g = 0, the layout of a
+  .. stored block: tree_block_shape () in block-ghosts.h */
   static inline BlockShape block_shape (int m, int g)
   {
     return block_shape_aligned (m, g, 1);

@@ -35,6 +35,7 @@
   .. cache. The gather does the work a ghost update would do anyway.
   */
 
+  #include <stdlib.h>
   #include "block-loops.h"
 
   /* a stored block: no ghosts */
@@ -53,6 +54,20 @@
   void block_gather  (Real * w, BlockShape shape, Index p, int s);
   void block_scatter (Index p, int s, const Real * w, BlockShape shape);
   void tree_restrict (int s);   /* each parent: the mean of its children */
+
+  /*
+  .. block_scratch_new (shape): a scratch block of that shape, aligned to 64
+  .. bytes, as the pool aligns stored blocks: free () it. Its contents are
+  .. not set: block_gather () fills it.
+  */
+  static inline Real * block_scratch_new (BlockShape shape)
+  {
+    size_t bytes = ((size_t) shape.cells * sizeof (Real) + 63) / 64 * 64;
+    Real * w = aligned_alloc (64, bytes);
+    if (!w)
+      abort ();
+    return w;
+  }
 
   /*
   .. foreach_leaf_gathered (s, g) { ... }: every leaf, with w, a scratch
@@ -75,10 +90,44 @@
   {
     BlockShape shape = tree_scratch_shape (ghosts);
     Real * w __attribute__ ((cleanup (block_ghosts_free))) =
-      malloc ((size_t) shape.cells * sizeof (Real));
+      block_scratch_new (shape);
     foreach_leaf () {
       block_gather (w, shape, (Index) {IJKL}, scalar_id);
       {...}
+    }
+  }
+
+  /*
+  .. foreach_leaf_gathered_parallel (s, g) { ... }: the same, the leaves
+  .. shared out among threads, each with a scratch block of its own. Each
+  .. leaf must be thread safe: no break, nothing shared written, and only
+  .. its own stored blocks written. The gathers only read, so they may run
+  .. at once; but a leaf writing the scalar it gathers would change what a
+  .. neighbour's gather reads, so write the result to another scalar. Without
+  .. OpenMP, foreach_leaf_gathered.
+  */
+  @loop foreach_leaf_gathered_parallel (int scalar_id, int ghosts) : IJKL, node, sblocks, w, shape
+  {
+    BlockShape shape = tree_scratch_shape (ghosts);
+    cache (Index) leaves;
+    cache_reserve (leaves, tree_nleaves ());
+    morton (TREE_ROOT_INDEX)
+      if (node->flags & BAMR_NODE_LEAF)
+        cache_push (leaves, (Index) {IJKL});
+    Index * list = leaves.a;
+    int n = leaves.n;
+    BLOCK_PRAGMA (omp parallel)
+    {
+      Real * w __attribute__ ((cleanup (block_ghosts_free))) =
+        block_scratch_new (shape);
+      BLOCK_PRAGMA (omp for schedule (dynamic))
+      for (int b = 0; b < n; b++)
+      {
+        INDEX_UNPACK (list [b]);
+        BAMR_NODE_ENV ();
+        block_gather (w, shape, list [b], scalar_id);
+        {...}
+      }
     }
   }
 
