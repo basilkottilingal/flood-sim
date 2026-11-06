@@ -6,7 +6,7 @@ cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
 lib=$(pwd)
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/pool.c $lib/block-ghosts.c"
+src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c"
 flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib"
 fails=0
 
@@ -31,6 +31,7 @@ for prec in "" "-DBAMR_SINGLE"; do
     run tree   $d "$prec" tests/test_tree.c $src
     run blocks $d "$prec" tests/test_blocks.c "$lib/tree.c" $src
     run ghosts $d "$prec" tests/test_ghosts.c $src
+    run adapt  $d "$prec" tests/test_adapt.c "$lib/tree.c" $src
   done
 done
 # with OpenMP: threads, simd and the offload pragmas (run on the host here)

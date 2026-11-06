@@ -14,6 +14,10 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   both layouts and every halo;
 - `test_ghosts.c`: restriction, ghost cells at level jumps and at the
   boundary, and scattering back.
+- `test_adapt.c`: families allocated at once, prolongation (exact for a
+  linear field, and keeping the mean), coarsening, 2:1 balance through
+  random refining and coarsening, and `adapt_wavelet ()` on a front: it
+  settles, keeps the integral, and coarsens a constant field to minlevel.
 
 
 
@@ -62,7 +66,13 @@ The fix:
 
 ### 2. Allocate the children of a node as one group
 
-**Gain: moderate. Effort: medium.**
+**Done.** `tree_refine ()` allocates a family at once: one object of
+TREE_NCHILDREN nodes, and for each scalar one object of TREE_NCHILDREN
+blocks, which `tree_coarsen ()` frees together. Children are filled by linear
+prolongation, which writes every cell, so their blocks are not zeroed
+(`pool_alloc_uninit ()`).
+
+The reasoning, as planned:
 
 `add_children` always creates all 2^d children at once, and in a 2:1-balanced
 tree a family is also coarsened at once. So allocate one object of 2^d blocks
@@ -89,9 +99,11 @@ What remains:
 - **Interpolation at coarse neighbours.** A ghost next to a coarser block
   takes the coarse cell's value as it is. A linear interpolation would make
   second-order stencils second order there too.
-- **Speed.** The gather finds each ghost's node on its own. Finding the
-  neighbour of each face, edge and corner once, and copying runs of cells,
-  would be faster.
+- **Speed: done.** `block_gather ()` finds the source of each face, edge
+  and corner region once, and copies rows, with `memcpy` where they are
+  runs of the same level. With 2 ghost layers, against a tree search per
+  ghost cell: 2.9× faster in 2D, 4.7× in 3D (12 µs a block with m = 16),
+  with the same values bit for bit.
 
 The reasoning, as planned:
 

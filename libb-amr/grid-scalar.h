@@ -21,16 +21,25 @@
   /* api */
   void    grid_scalar_init (size_t blocksize);  /* Reals per block */
   void    grid_scalar_destroy (void);           /* frees every block */
-  void *** grid_scalar_node_new (void);  /* a node's table, with a block
-                                            for each scalar in use */
-  void    grid_scalar_node_free (void *** s);
+  void *** grid_scalar_table_new (void);    /* a node's table, empty */
+  void    grid_scalar_root_blocks (void *** t);  /* the root: a block of
+                                                    its own per scalar */
+  /*
+  .. A family of TREE_NCHILDREN children, tables t [0..]: for each scalar in
+  .. use, one object holding the blocks of all of them, child c's the c-th.
+  .. uninit: the caller writes every cell, so no zeroing. Freed together,
+  .. tables and all, when the family is coarsened.
+  */
+  void    grid_scalar_family_new (void *** t [], int uninit);
+  void    grid_scalar_family_free (void *** t []);
   void    grid_scalar_alloc_blocks (scalar s);  /* in every node */
   void    grid_scalar_free_blocks (scalar s);   /* in every node */
 
   /*
   .. Debug: counts what the tree's nodes hold and compares it with what the
   .. pools have handed out and not had back (pool_used ()):
-  ..   blocks of scalars in use      == blocks out of the block pool
+  ..   blocks of scalars in use      == the root's, plus TREE_NCHILDREN per
+  ..                                    family out of the family pool
   ..   blocks in every slot          == the same (none left by a freed scalar)
   ..   groups, tables                == out of their pools
   .. Prints each mismatch to stderr, then returns 0; returns 1 if all agree.

@@ -57,6 +57,8 @@
     BAMR_NODE_LEAF   = 1,
     BAMR_NODE_IS_PRUNED = 2,
     BAMR_NODE_HAS_CHILDREN = 4,
+    BAMR_NODE_REFINE = 8,         /* needs refining: adapt.h          */
+    BAMR_NODE_COARSEN = 16,       /* may be coarsened, with its family */
   } BAMRNodeFlags;
 
   typedef struct
@@ -227,9 +229,34 @@
   void tree_shift_resize (double x0, double y0, double z0, double h0);
   void tree_destroy (void);
   int  tree_depth (void);       /* deepest level with a node */
+  int  tree_depth_max (void);   /* the depth tree () was given */
+  int  tree_depth_min (void);   /* the coarsest level of a leaf */
   int  tree_nblocks (void);     /* nodes, leaves or not      */
   int  tree_nleaves (void);     /* leaf nodes                */
   int  tree_block_m (void);     /* cells per block side: 2^blockdepth; a
                                    block stores m^dimension, no ghosts */
+
+  /*
+  .. Refining and coarsening, keeping the tree 2:1 balanced: two leaves that
+  .. touch, by a face, an edge or a corner, differ by at most one level.
+  ..
+  ..   tree_refine (p)    divides the leaf p into its TREE_NCHILDREN
+  ..                      children, refining first any coarser leaf beside
+  ..                      it, as far as needed. Returns how many leaves were
+  ..                      divided: 0 if p is not a leaf, or at depth max.
+  ..   tree_coarsen (p)   merges the children of p, all leaves, back into p,
+  ..                      unless a neighbour of p has grandchildren, which
+  ..                      would then touch p two levels finer. Returns 1 if
+  ..                      it did, 0 if not.
+  ..
+  .. The children of a node are allocated together, nodes and blocks: one
+  .. object of TREE_NCHILDREN nodes, and for each scalar one object of
+  .. TREE_NCHILDREN blocks. A refinement fills the children by linear
+  .. prolongation from p and its neighbours, which keeps the mean: so their
+  .. blocks are not zeroed first. A coarsening gives p the mean of its
+  .. children. See block-ghosts.h for both.
+  */
+  int  tree_refine (Index p);
+  int  tree_coarsen (Index p);
 
 #endif

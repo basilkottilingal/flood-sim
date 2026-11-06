@@ -56,6 +56,15 @@
   void tree_restrict (int s);   /* each parent: the mean of its children */
 
   /*
+  .. One family, for refining and coarsening (tree_refine (), tree_coarsen ()):
+  ..   block_prolong (p, s)    p's children from p: linear, from p and one
+  ..                           ghost layer around it, keeping the mean
+  ..   block_restrict (p, s)   p from its children: their mean
+  */
+  void block_prolong (Index p, int s);
+  void block_restrict (Index p, int s);
+
+  /*
   .. block_scratch_new (shape): a scratch block of that shape, aligned to 64
   .. bytes, as the pool aligns stored blocks: free () it. Its contents are
   .. not set: block_gather () fills it.
