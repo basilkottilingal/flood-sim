@@ -316,6 +316,24 @@ check "@loop: errors in the block, in an argument and after the use keep their l
   grep -q '^# [0-9]* "loop.h"$' loop_run.out
 check "@loop: -translate writes the expansion with linemarkers, and no definition" $?
 
+"$cwrap" -dimension=1 -Wall -Wextra loop_nest.c -o loop_nest 2> loop_nest.log &&
+  [ "$(./loop_nest)" = "24 checks, 0 failed" ] && [ ! -s loop_nest.log ]
+check "@loop nested: in blocks, in bodies three levels deep, names passed on, break, statics, caches, scalars" $?
+
+"$cwrap" -c loop_nest_bad.c -o loop_nest_bad.o 2> loop_nest_bad.log
+[ $? -ne 0 ] && [ ! -e loop_nest_bad.o ] &&
+  [ "$(grep -o '^loop_nest_bad.c:[0-9]*: error' loop_nest_bad.log | cut -d: -f2 | tr '\n' ' ')" = "2 3 4 5 7 " ] &&
+  grep -q "^loop_nest_bad.c:2: error: 'k' is not declared by the loop where {...} is" loop_nest_bad.log &&
+  grep -q "^loop_nest_bad.c:5: error: loop 'itself' is used in its own definition" loop_nest_bad.log
+check "@loop nested: misuse inside bodies and blocks is an error" $?
+
+"$cwrap" -dimension=1 -c loop_nest_lines.c -o loop_nest_lines.o 2> loop_nest_lines.log
+[ $? -ne 0 ] && grep -q "^loop_nest_lines.c:9:[0-9]*: error: .nope1. undeclared" loop_nest_lines.log &&
+  grep -q "^loop_nest_lines.c:11:[0-9]*: error: .nope2. undeclared" loop_nest_lines.log &&
+  grep -q "^loop_nest_lines.h:7:[0-9]*: error: .missing_name. undeclared" loop_nest_lines.log &&
+  grep -q "^loop_nest_lines.c:14:[0-9]*: error: .nope3. undeclared" loop_nest_lines.log
+check "@loop nested: errors keep their lines, in the block, in a body, and after" $?
+
 "$cwrap" -translate -DVALUE=42 hello.c -o hello.tr.c
 gcc -w hello.tr.c -o hello.tr -lm && [ "$(./hello.tr)" = '5.0 42 a"b' ]
 check "-translate -o writes C that gcc can build" $?

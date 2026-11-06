@@ -1,10 +1,10 @@
 #include "morton-curve.h"
 #include "tree.h"
 
-Array * tree_block_indices (void)
+void tree_block_indices (cache (Index) * c)
 {
-  Array * a = array_new ();
+  cache_clear (*c);
+  cache_reserve (*c, tree_nblocks ());
   morton (TREE_ROOT_INDEX)
-    array_append (a, & ((Index) {IJKL}), sizeof (Index));
-  return a;
+    cache_push (*c, (Index) {IJKL});
 }

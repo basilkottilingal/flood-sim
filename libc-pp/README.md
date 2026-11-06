@@ -673,6 +673,12 @@ on it. The tests cover:
 - colored diagnostics
 - `@loop`: running uses of it, every error, line numbers around an expansion,
   and its translation
+- nested `@loop`: 24 self-checking cases (`loop_nest.c`), each against the
+  same computation in plain loops: a loop in its own block, five deep,
+  arguments that read an outer loop's names, each argument evaluated once,
+  definitions three levels deep, names passed on from two levels down, break
+  and continue at every level, parameters the block sees, statics, caches and
+  scalars; with their errors and line numbers
 
 It prints `ok` or `FAIL` for each check, then `all passed`.
 
@@ -705,6 +711,8 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
     the same name, as the body is pasted where the loop is used. cwrap does
     not check for it.
   - **A `static` local is one per use,** as the body is copied each time.
+  - **Columns can shift** after a renamed name on the same line, as
+    `__cwrap_range_count_1` is longer than `count`. Lines are always right.
   - **A parameter whose type defines a struct,** as in
     `@loop f (struct { int a; } s)`, defines it at each use, and twice if the
     block sees the parameter, as two types that do not match. Name the

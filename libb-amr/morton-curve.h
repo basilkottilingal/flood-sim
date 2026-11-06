@@ -1,8 +1,8 @@
 #ifndef _QUADTREE_MORTON_CURVE_H_
 #define _QUADTREE_MORTON_CURVE_H_
 
+  #include <cwrap/cache.h>
   #include "tree.h"
-  #include "liballoc/array.h"
 
   /*
   .. morton (p) { ... }
@@ -52,7 +52,18 @@
       }
   }
 
-  /* API */
-  Array * tree_block_indices (void);
+  /*
+  .. API
+  .. tree_block_indices (&c) puts the Index of every node in c, in the order
+  .. of morton (), after emptying it. c is the caller's: a cache cannot be
+  .. returned, as the copy would share its array. A local cache is freed as
+  .. its scope ends:
+  ..
+  ..   cache (Index) blocks;
+  ..   tree_block_indices (&blocks);
+  ..   foreach (b in blocks)
+  ..     ... b.level ...
+  */
+  void tree_block_indices (cache (Index) * c);
 
 #endif
