@@ -11,7 +11,7 @@
  *
  * With -dimension=1, 2 or 3, the euclidean dimension, every translated file
  * also gets scalar.h, as if by #include on its first line, with
- * CWRAP_DIMENSION defined: scalar, and for 2 and 3 vector and tensor, are then
+ * CWRAP_DIMENSION and dimension defined: scalar, and for 2 and 3 vector and tensor, are then
  * types that cwrap numbers. A program always gets scalar.o: see scalar.h. The headers cwrap brings,
  * such as <cwrap/cache.h>, are on the include path, after the user's own.
  *
@@ -407,6 +407,8 @@ int main (int argc, char **argv)
     for (int i = 1; i < argc; i++)
       if (strncmp (argv[i], "-dimension=", 11) != 0)
         push (&all, argv[i]);
+    if (dimension)
+      push (&all, fmt ("-Ddimension=%d", dimension));
     push (&all, "-I");
     push (&all, CWRAP_HEADER_DIR);
     /* Linking objects alone still needs the runtime. */
@@ -454,6 +456,7 @@ int main (int argc, char **argv)
     add_stage_flags (&pp, items, nitems, ST_PP);
     if (dimension) {
       push (&pp, fmt ("-DCWRAP_DIMENSION=%d", dimension));
+      push (&pp, fmt ("-Ddimension=%d", dimension));
       push (&pp, "-include");
       push (&pp, CWRAP_INCLUDE_DIR "/scalar.h");
     }

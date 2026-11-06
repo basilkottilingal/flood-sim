@@ -38,6 +38,32 @@
   int    scalar_in_use (scalar);
   int    scalar_count  (void);         /* ids in use */
 
+  /*
+  .. If not NULL, scalar_free (s) calls scalar_free_hook (s) first, while s is
+  .. still in use, so the hook can release whatever it keeps for s. It is not
+  .. called for an id not in use, so freeing twice calls it once.
+  */
+  extern void (* scalar_free_hook) (scalar);
+
+  /*
+  .. If not NULL, scalar_new () calls scalar_new_hook (s) with the id it
+  .. hands out, once s is in use, so the hook can set up what it keeps for s.
+  .. Scalars at file scope get their ids before main () runs, before any hook
+  .. can be set; foreach_scalar (s) reaches them.
+  */
+  extern void (* scalar_new_hook) (scalar);
+
+  /*
+  .. foreach_scalar (s) { ... } runs the body once for each id in use, lowest
+  .. first, with s that id. s is an int, not a scalar, so cwrap neither
+  .. numbers it nor objects to s++; break and continue work as in any loop.
+  .. The empty if keeps a following else from binding to it.
+  .. Note that it is not optimized for faster iteration.
+  */
+  #define foreach_scalar(s)                                     \
+    for (int s = 0; s < NSCALAR_MAX; s++)                       \
+      if (!scalar_in_use (s)) {} else
+
   /* In 2 and 3 dimensions, also (below):
   ..   vector vector_new (void);    void vector_free (vector);
   ..   tensor tensor_new (void);    void tensor_free (tensor);

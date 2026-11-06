@@ -1,4 +1,4 @@
 DEPS := alloc
 
-CFLAGS += -D_GNU_SOURCE -Ddimension=2
+CFLAGS += -D_GNU_SOURCE -dimension=2
 include ../lib.mk

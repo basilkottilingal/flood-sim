@@ -5,92 +5,52 @@
   #include "tree.h"
   #include "liballoc/array.h"
 
-  #if dimension == 1
-
-  #define morton_start(_i_,_j_) do {                               \
-    int _ii_ = _i_, _ll_ = _l_;                                    \
-    do {                                                           \
-      int i = _ii_, level = _ll_;                                  \
-      BAMR_NODE_ENV ();                                            \
-      if (!node) break;                                            \
-      struct _index_ {int i, level, visited;}                      \
-        stack [(1 << dimension) * BAMR_MAX_DEPTH + 1];             \
-      int depth = 0, visited = 0;                                  \
-      do                                                           \
+  /*
+  .. morton_start (IJKL) { ... } morton_end ();
+  .. runs the body once for every node of the subtree at IJKL (TREE_ROOT for
+  .. the whole tree), in any dimension. A leaf is visited when it is reached,
+  .. a parent after all its children. In the body, IJKL, node and sblocks are
+  .. those of the node visited. 'break' leaves the body, not the traversal.
+  ..
+  .. Each step down pushes the parent and all but the first child, so the
+  .. stack never holds more than TREE_NCHILDREN per level.
+  */
+  #define morton_start(...) do {                                   \
+    Index _cur_ = {__VA_ARGS__};                                   \
+    struct _mstack_ { Index p; int visited; }                      \
+      _stack_ [TREE_NCHILDREN * BAMR_MAX_DEPTH + 1];               \
+    int _depth_ = 0, _visited_ = 0;                                \
+    if (!index_is_allocated (_cur_))                               \
+      break;                                                       \
+    for (;;)                                                       \
+    {                                                              \
+      while (!_visited_)                                           \
       {                                                            \
-        while (!visited)                                           \
-        {                                                          \
-          BAMR_NODE_ENV ();                                        \
-          assert (node);                                           \
-          if (!tree_has_children (node))                           \
-            break;                                                 \
-          stack [depth++] = (struct _index_) {i,  level, 1};       \
-          i *= 2, level++;                                         \
-          assert (level <= BAMR_MAX_DEPTH);                        \
-          stack [depth++] = (struct _index_) {i+1, level, 0};      \
-        }                                                          \
-        do {                                                       \
-          BAMR_NODE_ENV ();                                        \
-          /* do something here */
-    #define morton_end()                                           \
-        } while (0);                                               \
-        if (!depth)                                                \
+        BAMRNode * _n_ = index_node (_cur_);                       \
+        if (!tree_has_children (_n_))                              \
           break;                                                   \
-        depth--;                                                   \
-        i = stack [depth].i;                                       \
-        level   = stack [depth].level;                             \
-        visited = stack [depth].visited;                           \
-      } while (1);                                                 \
-    } while (0);                                                   \
+        assert (_cur_.level < BAMR_MAX_DEPTH);                     \
+        _stack_ [_depth_++] = (struct _mstack_) {_cur_, 1};        \
+        for (int _c_ = TREE_NCHILDREN - 1; _c_ > 0; _c_--)         \
+          _stack_ [_depth_++] =                                    \
+            (struct _mstack_) {index_child (_cur_, _c_), 0};       \
+        _cur_ = index_child (_cur_, 0);                            \
+      }                                                            \
+      do {                                                         \
+        INDEX_UNPACK (_cur_);                                      \
+        BAMR_NODE_ENV ();                                          \
+        /* do something here */
+  #define morton_end()                                             \
+      } while (0);                                                 \
+      if (!_depth_)                                                \
+        break;                                                     \
+      _depth_--;                                                   \
+      _cur_     = _stack_ [_depth_].p;                             \
+      _visited_ = _stack_ [_depth_].visited;                       \
+    }                                                              \
   } while (0)
-
-  #elif dimension == 2
-
-  #define morton_start(_i_,_j_,_l_) do {                           \
-    int _ii_ = _i_, _jj_ = _j_, _ll_ = _l_;                        \
-    do {                                                           \
-      int i = _ii_, j = _jj_, level = _ll_;                        \
-      BAMR_NODE_ENV ();                                            \
-      if (!node) break;                                            \
-      struct _index_ {int i, j, level, visited;}                   \
-        stack [(1 << dimension) * BAMR_MAX_DEPTH + 1];             \
-      int depth = 0, visited = 0;                                  \
-      do                                                           \
-      {                                                            \
-        while (!visited)                                           \
-        {                                                          \
-          BAMR_NODE_ENV ();                                        \
-          assert (node);                                           \
-          if (!tree_has_children (node))                           \
-            break;                                                 \
-          stack [depth++] = (struct _index_) {i,   j,   level, 1}; \
-          i *= 2, j *= 2, level++;                                 \
-          assert (level <= BAMR_MAX_DEPTH);                        \
-          stack [depth++] = (struct _index_) {i+1, j+1, level, 0}; \
-          stack [depth++] = (struct _index_) {i+1, j,   level, 0}; \
-          stack [depth++] = (struct _index_) {i,   j+1, level, 0}; \
-        }                                                          \
-        do {                                                       \
-          BAMR_NODE_ENV ();                                        \
-          /* do something here */
-    #define morton_end()                                           \
-        } while (0);                                               \
-        if (!depth)                                                \
-          break;                                                   \
-        depth--;                                                   \
-        i = stack [depth].i;                                       \
-        j = stack [depth].j;                                       \
-        level   = stack [depth].level;                             \
-        visited = stack [depth].visited;                           \
-      } while (1);                                                 \
-    } while (0);                                                   \
-  } while (0)
-
-  #else
-
-  #endif
 
   /* API */
-  Array * tree_block_indices ();
-  
+  Array * tree_block_indices (void);
+
 #endif

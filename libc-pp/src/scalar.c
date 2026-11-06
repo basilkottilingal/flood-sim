@@ -68,6 +68,8 @@ scalar scalar_new ()
              NSCALAR_MAX);
     abort ();
   }
+  if (scalar_new_hook)
+    scalar_new_hook ((scalar) s);
   return (scalar) s;
 }
 
@@ -77,6 +79,9 @@ int scalar_in_use (scalar s)
          && !((bits [s/32] >> (s & 31)) & 1);
 }
 
+void (* scalar_free_hook) (scalar) = NULL;
+void (* scalar_new_hook) (scalar) = NULL;
+
 void scalar_free (scalar s)
 {
   /*
@@ -84,7 +89,11 @@ void scalar_free (scalar s)
   .. jumps past the declaration of a local scalar.
   */
   if (scalar_in_use (s))
+  {
+    if (scalar_free_hook)
+      scalar_free_hook (s);
     pushbit ((int) s);
+  }
 }
 
 int scalar_count ()

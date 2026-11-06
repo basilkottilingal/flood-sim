@@ -88,8 +88,16 @@ void mem_destroy (Memindex m, int len)
 
 /**
 The `mem_assign()` function assigns a (pointer) value to a given index. */
-#define mymap(len) \
-  mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+static void * mymap (int len)
+{
+  void * p = mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE,
+                   MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) {
+    perror ("memindex: mmap");
+    abort ();
+  }
+  return p;
+}
 
 #if dimension == 1
 void mem_assign (Memindex m, int i, int len, void * b)
