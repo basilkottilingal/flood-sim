@@ -1,6 +1,6 @@
 CC        = cwrap
 LIBS     ?= flow-network geotiff view geojson b-amr alloc # Order in the dependency order
-CPPFLAGS += -I. -I../
+CPPFLAGS += -dimension=2 -I. -I../
           #$(addprefix -I../lib,$(LIBS))
 LDFLAGS  += $(addprefix -L../lib,$(LIBS))
 LDLIBS   += $(addprefix -l,$(LIBS))

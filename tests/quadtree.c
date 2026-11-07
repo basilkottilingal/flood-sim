@@ -1,24 +1,21 @@
 #include <stdio.h>
 
-#include "libb-amr/tree.h"
-#include "libb-amr/morton-curve.h"
-#include "libb-amr/scalar.h"
+#include "../libb-amr/morton-curve.h"
 
 int main ()
 {
   tree (3, 6);
-  morton_start (0, 0, 0)
-  {
+  morton ((Index) {0, 0, 0})
+  do {
     printf("\n[%d %d %d]", i, j, level);
     fflush (stdout);
-  } morton_end ();
+  } while (0);
 
-  scalar s = scalar_new ();
-  vector v = vector_new ();
+  scalar s;
+  vector v;
   printf ("\nscalar s %u", s);
   printf ("\nvector v %u %u", v.x, v.y);
-  scalar_free (s);
-  vector u = vector_new ();
+  vector u;
   printf ("\nvector u %u %u", u.x, u.y);
 
   tree_destroy ();  
