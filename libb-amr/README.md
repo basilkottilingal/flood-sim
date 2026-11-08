@@ -111,6 +111,19 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
 It also runs `blocks`, `ghosts` and `adapt` with OpenMP (2D, 3D) and with
 `-DBAMR_ALIGN=4` (1D to 3D).
 
+### Benchmark: memindex against voxel-memindex
+
+    sh tests/bench_memindex.sh [RAW]
+
+It builds `tests/bench_memindex.c` with gcc, in 2D and 3D, and runs each case
+(dense, shell, river, random) once per implementation, each in its own
+process. It prints a table, and checks that the two implementations return
+the same values (checksum). Results and their reading are in
+`tests/bench_memindex.md`, summed up below in
+[Measured: memindex against voxel-memindex](#measured-memindex-against-voxel-memindex).
+The sparse cases need about 1.5 GB for memindex. Cache and dTLB misses are
+printed only if `kernel.perf_event_paranoid` is 2 or less.
+
 
 
 # Future plans
@@ -245,6 +258,14 @@ This conflicts with 1: giving back part of a huge page splits it. So for
 pools of huge pages, rely on the hot free list, and give memory back only in
 an explicit `pool_trim ()`.
 
+The reverse holds for `memindex`: huge pages only hurt its sparse arrays. With
+transparent huge pages set to `[always]`, one pointer written can commit 2 MiB
+instead of 4 KiB, up to 512 times the memory. `mymap ()` therefore calls
+`madvise (MADV_NOHUGEPAGE)` on every array it maps. Under `[always]`,
+khugepaged can also collapse a pool chunk whose cold objects were given back.
+If that shows up, give pool chunks `MADV_NOHUGEPAGE` too, or adopt the
+huge-page pools described above.
+
 ### 5. Contiguous storage in Morton order
 
 **Gain: large for a GPU and for prefetching. Effort: medium.**
@@ -317,6 +338,41 @@ per-thread free lists, or a lock around `pool_alloc` and `pool_free`.
 coarsen cycle. Use `grid_scalar_check ()` and `pool_used ()` to make sure no
 change leaks blocks.
 
+## Tree structure: voxel-memindex
+
+`voxel-memindex.[ch]` (F, compared under
+[Measured: memindex against voxel-memindex](#measured-memindex-against-voxel-memindex))
+beat memindex on memory and build time for every level that is not full. Next
+steps, in order:
+
+1. **Wire it into `tree.c` behind a switch** (`-DBAMR_VOXEL_MEMINDEX`).
+   - `grid_info_layers` becomes an array of `struct _VMemindex`.
+   - `tree_destroy ()` calls `vmem_destroy ()`.
+   - `BAMR_NODE_ENV ()` makes a single `vmem_get ()` instead of
+     `tree_is_allocated ()` followed by `tree_node ()`.
+   - Then run `tests/run.sh`, and time `adapt` and `ghosts_update ()` on a
+     sparse 3D case, with each backend. That is the measure that decides,
+     rather than isolated lookups.
+2. **Use cursors in the hot loops.** `block-ghosts` gathers neighbours and
+   `adapt` checks 2:1 balance: both visit nearby indices, so one cursor per
+   level makes most lookups a single load. Cursors must be reset after a
+   `vmem_free ()`, so reset them at the end of each regrid pass.
+3. **Compact nodes for sparse levels.** A node holds a 64-bit mask and only
+   its occupied children, found by rank (`popcount` from libutils/bits.h).
+   - It would cut the 2–4 kB per isolated point by up to 8 times.
+   - Children sit in arrays of varying sizes, from a few size-classed pools.
+   - Inserting moves the children of one node, so batch it per regrid.
+   - Possibly mixed: full nodes near the bottom, compact ones above.
+4. **Memory after freeing.** Freed nodes stay hot in the pool. Call
+   `pool_trim ()` after a coarsening pass, or give voxel its own hot limit
+   (`pool_set_hot_max ()`), so that memory returns after a large coarsening.
+5. **Measure the misses.** Rerun the benchmark with
+   `kernel.perf_event_paranoid=1`, to get LLC and dTLB misses per lookup.
+   Rerun it on a cluster node with transparent huge pages `[always]`, and with
+   memindex without `MADV_NOHUGEPAGE`, to quantify the blow-up seen elsewhere.
+6. **Later, for MPI or GPU:** the nodes already give Morton order, so a
+   linear octree (C) can be built in one traversal of the leaves.
+
 # Comparison of AMR implementations
 
 How to store the tree itself: its nodes, and the way to find a node or its
@@ -365,9 +421,13 @@ system only commits the pages that are actually written.
   with no pointer chasing. Basilisk uses this scheme.
 - **Cost:** sparseness becomes virtual address space, plus one 4 KiB page per
   isolated row of nodes, as a page holds 512 pointers. Refined regions are
-  usually clustered, so pages fill well in practice.
+  usually clustered, so pages fill well in practice. Each touched page also
+  needs its share of a page-table page, which stays after the page is given
+  back. It depends on the system: page size, overcommit, and transparent huge
+  pages (opted out with `MADV_NOHUGEPAGE`, see Huge pages).
 - **Verdict:** this is already a version of the dense-tile idea in which the
-  operating system handles the sparseness. Measure before replacing it.
+  operating system handles the sparseness. Measured against a tree of 64-way
+  nodes below: it is cheap only on levels refined fairly evenly.
 
 ### B. Dense tiles, with occupancy bitmasks and rank indexing (NanoVDB-style)
 
@@ -429,6 +489,66 @@ families are copied into Morton order.
 | C. linear octree | O(log n), or a hash | excellent | none | batched O(n) | best |
 | D. hashed | O(1) expected | poor alone | none | O(1) | fair |
 | E. families + compaction | walk the tree | good after compaction | none | O(1) | fair |
+| F. 64-way node tree (`voxel-memindex`) | ceil(L/B) loads; one with a cursor | good | per node of 64 | O(depth) | fair |
+
+## Measured: memindex against voxel-memindex
+
+`voxel-memindex.[ch]` is a prototype of the packed-node idea (F above). It is
+not wired into `tree.c` or the `Makefile`.
+- Each node is 64 pointers, 512 bytes, from a pool. It takes B bits of every
+  index: B = 2 in 3D (two tree levels), 3 in 2D, 6 in 1D. A level-L array is
+  ceil (L / B) nodes deep.
+- Its interface is the memindex one, prefixed `vmem_`, plus:
+  - `vmem_get ()`, which finds and reads an entry in one walk, where
+    memindex needs `mem_allocated ()` and then `mem_data ()`;
+  - `vmem_get_cursor ()`, which remembers the last bottom node, so that an
+    index in the same group of 64 costs a single load.
+- Empty nodes go back to the pool as soon as their last entry is freed.
+
+`tests/bench_memindex.sh` compares the two (see Tests). The numbers below come
+from an i7-8650U laptop with about 2.3 GB free, Linux 6.8, transparent huge
+pages set to `[madvise]`, and memindex with `MADV_NOHUGEPAGE`. Each case ran
+once. The full table is in `tests/bench_memindex.md`.
+
+| case (points) | B/point mem / voxel | build ns/point mem / voxel | shuffled lookup ns mem / voxel | neighbours ns mem / voxel+cursor | absent entry ns mem / voxel |
+|---|--:|--:|--:|--:|--:|
+| 2D dense L11 (4.2M) | 8 / 8 | 9 / 13 | 16 / 56 | 4.2 / 4.8 | — |
+| 2D river L16 (2.1M) | 168 / 19 | 184 / 23 | 62 / 105 | 6.8 / 4.8 | 934 / 8 |
+| 2D random L20 (50k) | 8370 / 1907 | 6398 / 1351 | 118 / 268 | 44 / 67 | 103 / 49 |
+| 3D dense L7 (2.1M) | 32 / 8 | 48 / 15 | 32 / 69 | 6.1 / 6.3 | — |
+| 3D shell L9 (0.5M) | 1027 / 47 | 1915 / 33 | 54 / 72 | 13.6 / 9.8 | 42 / 19 |
+| 3D shell L10 (2.1M) | out of memory / 47 | — / 33 | — / 114 | — / 10.2 | — / 17 |
+| 3D river L12 (0.85M) | 344 / 26 | 594 / 34 | 86 / 137 | 8.7 / 12.2 | 26 / 15 |
+| 3D random L20 (30k) | 16715 / 3636 | 12325 / 2974 | 291 / 629 | 76 / 172 | 72 / 37 |
+
+What it shows:
+- **Memory.** voxel takes 3–60 times less wherever a level is not full, and
+  about the same, or less in 3D, on a full level. memindex pays a page, and
+  part of a page-table page, per row touched. On the 3D shell at level 10 that
+  came to more than the 2.3 GB free, where voxel needed 99 MB.
+- **Building.** voxel is 5–60 times faster on sparse levels, because it takes
+  far fewer page faults. Both are about the same on full levels.
+- **Finding an entry that exists, in random order.** memindex is 1.3–3 times
+  faster, more so on deeper levels. voxel makes ceil (L / B) dependent loads,
+  where memindex makes one per dimension. On a full level in Morton order,
+  memindex is about 3 times faster (2.5 against 7.4 ns in 2D).
+- **Neighbours.** With the cursor, voxel is about as fast as memindex on full
+  and clustered levels, and faster on the 3D shell and the 2D river. It is
+  1.5–2.3 times slower on isolated points (random, deep levels).
+- **Absent entries** (indices drawn uniformly over a sparse level). voxel is
+  2–120 times faster. memindex reads untouched pages, and each read is a page
+  fault on the zero page.
+- **After freeing everything.** memindex keeps its page tables and its upper
+  rows (about 570–590 MB on the random level-20 cases). voxel keeps its freed
+  nodes, hot, in the pool, until `pool_trim ()` or `vmem_destroy ()`.
+- **voxel's weak case:** isolated points on deep levels, at 2–4 kB per point.
+  Each point owns most of the nodes on its path.
+
+In libb-amr the tree indexes blocks, not cells. Stencils run inside padded
+blocks, and `block-ghosts` gathers each block's neighbourhood once. So the
+slower lookups of voxel are mostly off the hot path, while its memory and
+build costs are on it, at every regrid. Confirming that needs voxel wired into
+`tree.c` (see Future plans).
 
 ## Recommendation
 
@@ -447,3 +567,10 @@ families are copied into Morton order.
 
 **To decide, measure:** prototype C beside the current tree, and compare the
 two on a benchmark that refines and traverses.
+
+**Measured since:** F (`voxel-memindex`) against A, in isolation (see
+[Measured: memindex against voxel-memindex](#measured-memindex-against-voxel-memindex)).
+F wins on memory and build time on every level that is not full. A wins on
+random lookups, by 1.3–3 times. This revises point 1: replace A by F, once a
+run of `adapt` and the ghosts on a sparse case confirms that the lookups stay
+off the hot path (Future plans, Tree structure).

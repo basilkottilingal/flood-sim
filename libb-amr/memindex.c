@@ -87,15 +87,30 @@ void mem_destroy (Memindex m, int len)
 }
 
 /**
-The `mem_assign()` function assigns a (pointer) value to a given index. */
+The `mem_assign()` function assigns a (pointer) value to a given index.
+
+The arrays are sparse: a page is committed only when one of its
+pointers is set. Transparent huge pages break this. With THP set to
+"always" (/sys/kernel/mm/transparent_hugepage/enabled), the kernel may
+back a 2 MB range with a huge page on the first write to any byte in it
+(or khugepaged collapses it later, even with a single page in use), so
+each pointer set can commit 2 MB instead of 4 kB, up to 512 times the
+memory. That holds for small arrays too: neighbouring mappings with the
+same flags merge into one larger area. MADV_NOHUGEPAGE turns THP off for
+these mappings only. A failure here is harmless: it only means THP is
+not available. */
 static void * mymap (int len)
 {
-  void * p = mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE,
+  size_t size = len*sizeof (char *);
+  void * p = mmap (NULL, size, PROT_READ|PROT_WRITE,
                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) {
     perror ("memindex: mmap");
     abort ();
   }
+#ifdef MADV_NOHUGEPAGE
+  madvise (p, size, MADV_NOHUGEPAGE);
+#endif
   return p;
 }
 
