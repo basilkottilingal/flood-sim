@@ -15,7 +15,7 @@ scalar u;
 
 static long ipow (long x, int e) { long r = 1; while (e--) r *= x; return r; }
 
-/* the centre of cell (ci, cj, ck) of block p, in [0, 1] */
+/* the centre of interior cell (ci, cj, ck) of block p (0 to m - 1), in [0, 1] */
 static void centre (Index p, int ci, int cj, int ck, double x [3])
 {
   double n = (double) (tree_get_block_m () << p.level);
@@ -40,12 +40,12 @@ static void set (double (* f) (const double [3]))
       double x [3];
       int y = 0, z = 0;
 #if dimension > 1
-      y = cj;
+      y = cj - st.g;
 #endif
 #if dimension > 2
-      z = ck;
+      z = ck - st.g;
 #endif
-      centre ((Index) {IJKL}, ci, y, z, x);
+      centre ((Index) {IJKL}, ci - st.ox, y, z, x);
       b [c] = (Real) f (x);
     }
   }
@@ -167,7 +167,7 @@ int main (void)
   refine_all ();                                   /* uniform level 2 */
   CHECK (balanced () && tree_get_nleaves () == ipow (nc, 2));
   set (linear);
-  tree_restrict (u);
+  ghosts_update (u);
   Index p = { 1,
 #if dimension > 1
               1,
@@ -189,12 +189,12 @@ int main (void)
         double x [3];
         int y = 0, z = 0;
 #if dimension > 1
-        y = cj;
+        y = cj - st.g;
 #endif
 #if dimension > 2
-        z = ck;
+        z = ck - st.g;
 #endif
-        centre (q, ci, y, z, x);
+        centre (q, ci - st.ox, y, z, x);
         err = fmax (err, fabs (b [c] - linear (x)));
       }
     }
@@ -259,7 +259,7 @@ int main (void)
 
   /* 5. the wavelet of a linear field is zero away from the walls */
   set (linear);
-  tree_restrict (u);
+  ghosts_update (u);
   {
     double x [3] = { 0.5, 0.5, 0.5 };
     Index q = leaf_at (x);

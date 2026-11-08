@@ -5,15 +5,19 @@
   .. Adapting the tree to the fields it holds, keeping it 2:1 balanced.
   ..
   .. The error of a block is its wavelet: how far each of its cells is from
-  .. what the coarser level would predict for it. The block, gathered with
-  .. two ghost layers, is averaged into coarse cells, 2^dimension fine cells
-  .. each; each fine cell is then predicted from its coarse cell and that
-  .. cell's neighbours, by the same linear prolongation as a refinement
-  .. (block_prolong ()). The error is the largest |cell - prediction|: zero
-  .. where the field is linear, large where the coarse level would lose it.
+  .. what the coarser level would predict for it. The block, with two of its
+  .. stored ghost layers, is averaged into coarse cells, 2^dimension fine
+  .. cells each; each fine cell is then predicted from its coarse cell and
+  .. that cell's neighbours, by linear prolongation (prolong_linear ()). The
+  .. error is the largest |cell - prediction|: zero where the field is
+  .. linear, large where the coarse level would lose it. It reads the ghosts
+  .. as they are: ghosts_update () first.
   ..
   .. adapt_wavelet (n, s, max, minlevel, maxlevel) then, for scalars s [0..n):
   ..
+  ..   0. fills the ghosts of every scalar, at every node
+  ..      (ghosts_update_scalars (1)): the values may have changed since the
+  ..      last step;
   ..   1. flags every leaf: BAMR_NODE_REFINE where some error > max [i]
   ..      (or the leaf is coarser than minlevel), BAMR_NODE_COARSEN where
   ..      every error < max [i] / 1.5, so a leaf just past the threshold
@@ -33,8 +37,10 @@
   .. coarsened if its children were leaves when flagged. Call it once per
   .. step, as the fields change.
   ..
-  .. New children get values by linear prolongation, and a coarsened parent
-  .. the mean of its children: both keep the integral of every scalar.
+  .. New children get values by their scalar's prolongation, and a
+  .. coarsened parent its restriction: with the defaults (linear, the mean)
+  .. both keep the integral of every scalar. On return, the ghosts of every
+  .. leaf are valid.
   */
 
   #include "tree.h"

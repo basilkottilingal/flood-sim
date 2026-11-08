@@ -1,257 +1,439 @@
-/* Ghost cells for blocks stored without them: restriction, gathering at
- * level jumps and at the boundary, scattering. Includes tree.c to refine. */
-#include "tree.c"
-#include "block-ghosts.h"
+/* Stored ghost cells: ghosts_update () at level jumps, at the walls and in
+ * corners, on parents; the operations of a scalar (prolongation,
+ * restriction, boundary condition); derived scalars on the halo; and
+ * refining and coarsening keeping the ghosts valid. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
+#include "adapt.h"
+#include "block-ghosts.h"
+
 static int checks, fails;
-#define CHECK(c) do { checks++; if (!(c)) { fails++; if (fails < 10) printf ("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
-scalar u, v;
+#define CHECK(c) do { checks++; if (!(c)) { fails++; \
+  printf ("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 
-/* f at the centre of cell (x, y, z) of level l, in cells of the domain */
-static double f (int l, int x, int y, int z)
-{
-  double n = (double) (tree_get_block_m () << l);
-  return 1 + 2 * (x + 0.5) / n + 3 * (dimension > 1) * (y + 0.5) / n
-           + 5 * (dimension > 2) * (z + 0.5) / n;
-}
-static int refl (int x, int n) { return x < 0 ? -1 - x : x >= n ? 2 * n - 1 - x : x; }
+scalar u, v, w, z, e, u2;
 
-/* the expected value of a ghost: f at the finest existing cell covering it */
-static double expected (int l, int x, int y, int z)
+static const double tol = 1e3 * REAL_EPSILON;
+
+/* the block coordinates of p, as an array */
+static void coords (Index p, int P [3])
 {
-  int m = tree_get_block_m (), n = m << l;
-  x = refl (x, n); y = refl (y, n); z = refl (z, n);
-  for (int L = l; L >= 0; L--) {
-    int X = x >> (l - L), Y = y >> (l - L), Z = z >> (l - L);
-    Index b = { X / m,
+  P [0] = p.i, P [1] = 0, P [2] = 0;
 #if dimension > 1
-                Y / m,
+  P [1] = p.j;
 #endif
 #if dimension > 2
-                Z / m,
+  P [2] = p.k;
 #endif
-                L };
-    if (index_is_allocated (b))
-      return f (L, X, Y, Z);
+}
+
+/* the interior coordinates of cell (ci, cj, ck) of a stored block */
+#if dimension == 1
+# define XOF(x) int x [3] = { ci - shape.ox, 0, 0 }
+#elif dimension == 2
+# define XOF(x) int x [3] = { ci - shape.ox, cj - shape.g, 0 }
+#else
+# define XOF(x) int x [3] = { ci - shape.ox, cj - shape.g, ck - shape.g }
+#endif
+
+/* the centre of interior cell x of block p, in [0, 1] (outside for ghosts) */
+static void centre (Index p, const int x [3], double r [3])
+{
+  int P [3];
+  coords (p, P);
+  double n = (double) (tree_get_block_m () << p.level);
+  for (int a = 0; a < 3; a++)
+    r [a] = a < dimension ? (P [a] * tree_get_block_m () + x [a] + 0.5) / n : 0.5;
+}
+
+static int is_ghost (BlockShape shape, const int x [3])
+{
+  int gh = 0;
+  for (int a = 0; a < dimension; a++)
+    gh |= x [a] < 0 || x [a] >= shape.m;
+  return gh;
+}
+
+static double linear (const double r [3]) { return 1 + 2 * r [0] + 3 * r [1] + 5 * r [2]; }
+static double wavy (const double r [3])
+{
+  return sin (5 * r [0]) + (dimension > 1) * cos (3 * r [1]) + (dimension > 2) * r [2] * r [2];
+}
+static double kink (const double r [3]) { return fmax (0, r [0] - 0.37) + fmax (0, 0.61 - r [1]); }
+
+/* scalar s = f on the interior of every leaf */
+static void set (int s, double (* f) (const double [3]))
+{
+  BlockShape shape = tree_block_shape ();
+  foreach_leaf () {
+    Real * b = block_data (sblocks, s);
+    block_cells (shape, 0) {
+      XOF (x);
+      double r [3];
+      centre ((Index) {IJKL}, x, r);
+      b [c] = (Real) f (r);
+    }
   }
-  return NAN;
+}
+
+/* the largest |s - f| over the ghosts of every leaf, or every node */
+static double ghost_error (int s, double (* f) (const double [3]), int parents)
+{
+  BlockShape shape = tree_block_shape ();
+  double err = 0;
+  morton (TREE_ROOT_INDEX) {
+    if (!parents && !(node->flags & BAMR_NODE_LEAF))
+      continue;
+    const Real * b = block_data (sblocks, s);
+    block_cells (shape, shape.g) {
+      XOF (x);
+      double r [3];
+      centre ((Index) {IJKL}, x, r);
+      err = fmax (err, fabs (b [c] - f (r)));
+    }
+  }
+  return err;
+}
+
+/* a linear extrapolation at the walls: exact for a linear field */
+static void bc_linear (const Boundary * bc)
+{
+  boundary_cells (bc) {
+    Real w0 = bc->b [ghost + (layer + 1) * inward];
+    Real w1 = bc->b [ghost + (layer + 2) * inward];
+    bc->b [ghost] = w0 + (layer + 1) * (w0 - w1);
+  }
+}
+
+/* restrictions counted, to check each parent gets one */
+static long restricted;
+static void restriction_counted (Index p, int s)
+{
+  BLOCK_PRAGMA (omp atomic)
+  restricted++;
+  restriction_mean (p, s);
+}
+
+/* the leaf holding the point r */
+static Index leaf_at (const double r [3])
+{
+  for (int l = 0; ; l++) {
+    int n = 1 << l;
+    Index q = { (int) (r [0] * n),
+#if dimension > 1
+                (int) (r [1] * n),
+#endif
+#if dimension > 2
+                (int) (r [2] * n),
+#endif
+                l };
+    if (index_is_allocated (q) && (index_node (q)->flags & BAMR_NODE_LEAF))
+      return q;
+  }
+}
+
+/* the ghost cells of leaves next to a coarser leaf: those that test the
+ * prolongation */
+static long jump_ghosts (void)
+{
+  BlockShape shape = tree_block_shape ();
+  long n = 0;
+  foreach_leaf () {
+    Index p = {IJKL};
+    int P [3];
+    coords (p, P);
+    int nb = 1 << level;
+    block_cells (shape, shape.g) {
+      XOF (x);
+      if (!is_ghost (shape, x))
+        continue;
+      int q [3] = { 0, 0, 0 }, in = 1;
+      for (int a = 0; a < dimension; a++) {
+        q [a] = P [a] + (x [a] < 0 ? -1 : x [a] >= shape.m ? 1 : 0);
+        in &= q [a] >= 0 && q [a] < nb;
+      }
+      Index b = { q [0],
+#if dimension > 1
+                  q [1],
+#endif
+#if dimension > 2
+                  q [2],
+#endif
+                  level };
+      n += in && !index_is_allocated (b);
+    }
+  }
+  return n;
+}
+
+/* every leaf's block of scalar s, ghosts included, copied */
+static Real * snapshot (int s, long * n)
+{
+  long cells = tree_block_shape ().cells, k = 0;
+  Real * all = malloc ((size_t) tree_get_nblocks () * cells * sizeof (Real));
+  foreach_leaf () {
+    memcpy (all + k * cells, block_data (sblocks, s), cells * sizeof (Real));
+    k++;
+  }
+  *n = k * cells;
+  return all;
+}
+
+/* the largest difference between the leaves of s, ghosts included, as
+ * they are and after ghosts_update_scalars () */
+static double kept_against_fresh (int s)
+{
+  long n;
+  Real * kept = snapshot (s, &n);
+  ghosts_update_scalars (0);
+  Real * fresh = snapshot (s, &n);
+  double d = 0;
+  for (long q = 0; q < n; q++)
+    d = fmax (d, fabs (kept [q] - fresh [q]));
+  free (kept);
+  free (fresh);
+  return d;
 }
 
 int main (void)
 {
-  int m;
-  tree (4, 4);
-  m = tree_get_block_m ();
-  CHECK (m == 16 && tree_block_shape ().cells == (long) pow (16, dimension));
-  /* refine: corner chain to level 3, and one more level-1 leaf to level 2 */
-  Index a1 = index_child (TREE_ROOT_INDEX, 0), a2 = index_child (a1, TREE_NCHILDREN - 1);
-  { INDEX_UNPACK (a1); CHECK (divide_leaf (IJKL)); }
-  { INDEX_UNPACK (a2); CHECK (divide_leaf (IJKL)); }
-  Index b1 = index_child (TREE_ROOT_INDEX, TREE_NCHILDREN - 1);
-  { INDEX_UNPACK (b1); CHECK (divide_leaf (IJKL)); }
+  tree (5, 4);
+  BlockShape shape = tree_block_shape ();
+  CHECK (shape.g == GHOSTS && shape.m == 16);
 
-  /* every leaf: f at its cell centres */
-  BlockShape store = tree_block_shape ();
+  /* levels 1 to 4 around one point, 2 around another: level jumps of one,
+   * in faces, edges and corners */
+  {
+    double a [3] = { 0.3, 0.3, 0.3 }, b [3] = { 0.9, 0.1, 0.6 };
+    for (int l = 0; l < 3; l++)
+      tree_refine (leaf_at (a));
+    tree_refine (leaf_at (b));
+    CHECK (leaf_at (a).level == 4 && tree_get_depth_min () < 4);
+  }
+  long jumps = jump_ghosts ();
+  CHECK (jumps > 0);
+
+  /* 1. a linear field, extrapolated at the walls: every ghost exact, at
+   * level jumps, walls and corners; parents too with ghosts_update_levels */
+  scalar_set_ops (u, (ScalarOps) { .boundary = bc_linear });
+  set (u, linear);
+  ghosts_update (u);
+  CHECK (ghost_error (u, linear, 0) < tol);
+  ghosts_update_levels (u);
+  CHECK (ghost_error (u, linear, 1) < tol);
+
+  /* 2. the defaults: zero gradient at the walls, mirrored over every wall a
+   * ghost is beyond; bc_odd the same, with a sign per wall */
+  scalar_set_ops (w, (ScalarOps) { .boundary = bc_odd });
+  set (v, wavy);
+  set (w, wavy);
+  ghosts_update (v, w);
+  {
+    double dn = 0, dodd = 0;
+    long walls = 0;
+    foreach_leaf () {
+      int P [3];
+      coords ((Index) {IJKL}, P);
+      int nb = 1 << level;
+      const Real * bv = block_data (sblocks, v), * bw = block_data (sblocks, w);
+      block_cells (shape, shape.g) {
+        XOF (x);
+        int y [3] = { x [0], x [1], x [2] }, flips = 0;
+        for (int a = 0; a < dimension; a++) {
+          if (P [a] == 0 && x [a] < 0)
+            y [a] = -1 - x [a], flips++;
+          if (P [a] == nb - 1 && x [a] >= shape.m)
+            y [a] = 2 * shape.m - 1 - x [a], flips++;
+        }
+        if (!flips)
+          continue;
+        walls++;
+        long mc = block_at (shape, y);
+        dn = fmax (dn, fabs (bv [c] - bv [mc]));
+        dodd = fmax (dodd, fabs (bw [c] - (flips & 1 ? -1 : 1) * bw [mc]));
+      }
+    }
+    CHECK (walls > 0 && dn == 0 && dodd == 0);
+  }
+
+  /* 3. injection: a ghost next to a coarser leaf is that leaf's cell, as
+   * it is; next to a node of its level, that node's cell */
+  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_injection });
+  set (z, linear);
+  ghosts_update (z);
+  {
+    double err = 0;
+    long coarse = 0;
+    int m = shape.m;
+    foreach_leaf () {
+      int P [3];
+      coords ((Index) {IJKL}, P);
+      int nb = 1 << level;
+      const Real * b = block_data (sblocks, z);
+      block_cells (shape, shape.g) {
+        XOF (x);
+        int q [3] = { 0, 0, 0 }, in = 1, X [3] = { 0, 0, 0 };
+        if (!is_ghost (shape, x))
+          continue;
+        for (int a = 0; a < dimension; a++) {
+          q [a] = P [a] + (x [a] < 0 ? -1 : x [a] >= m ? 1 : 0);
+          in &= q [a] >= 0 && q [a] < nb;
+          X [a] = P [a] * m + x [a];
+        }
+        if (!in)
+          continue;
+        Index qb = { q [0],
+#if dimension > 1
+                    q [1],
+#endif
+#if dimension > 2
+                    q [2],
+#endif
+                    level };
+        double r [3] = { 0.5, 0.5, 0.5 };
+        if (index_is_allocated (qb))
+          centre ((Index) {IJKL}, x, r);
+        else {
+          coarse++;
+          double n = (double) (m << (level - 1));
+          for (int a = 0; a < dimension; a++)
+            r [a] = ((X [a] >> 1) + 0.5) / n;
+        }
+        err = fmax (err, fabs (b [c] - linear (r)));
+      }
+    }
+    CHECK (coarse == jumps && err < tol);
+  }
+
+  /* 4. minmod: exact for a linear field too; and no new minimum, where the
+   * linear one undershoots a kink */
+  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_minmod, .boundary = bc_linear });
+  set (z, linear);
+  ghosts_update (z);
+  CHECK (ghost_error (z, linear, 0) < tol);
+  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_minmod });
+  set (z, kink);
+  ghosts_update (z);
+  {
+    double lo = 1;
+    foreach_leaf () {
+      const Real * b = block_data (sblocks, z);
+      block_cells (shape, shape.g) lo = fmin (lo, b [c]);
+    }
+    CHECK (lo >= 0);
+  }
+
+  /* 5. a restriction of one's own: once per parent, by ghosts_update */
+  scalar_set_ops (v, (ScalarOps) { .restriction = restriction_counted });
+  restricted = 0;
+  ghosts_update (v);
+  CHECK (restricted == tree_get_nblocks () - tree_get_nleaves ());
+  restricted = 0;
+  tree_restrict (v);
+  CHECK (restricted == tree_get_nblocks () - tree_get_nleaves ());
+  scalar_set_ops (v, (ScalarOps) {0});
+
+  /* 6. a derived scalar, e = u + 2 u2, computed on the halo from the ghosts
+   * of u and u2, is what filling its own ghosts gives: prolongation and
+   * restriction are linear */
+  scalar_set_ops (u2, (ScalarOps) { .boundary = bc_linear });
+  scalar_set_ops (e, (ScalarOps) { .boundary = bc_linear });
+  set (u, wavy);
+  set (u2, kink);
+  ghosts_update (u, u2);
   foreach_leaf () {
-    Real * b = block_data (sblocks, u);
-    block_cells (store, 0) {
-      int x = i * m + ci, y = 0, z = 0;
-#if dimension > 1
-      y = j * m + cj;
-#endif
-#if dimension > 2
-      z = k * m + ck;
-#endif
-      b [c] = f (level, x, y, z);
-    }
+    Real * be = block_data (sblocks, e);
+    const Real * a = block_data (sblocks, u), * b = block_data (sblocks, u2);
+    block_cells (shape, shape.g) be [c] = a [c] + 2 * b [c];
   }
-  /* parents: the mean of their children, which is f at their centres */
-  tree_restrict (u);
-  double err = 0;
-  morton (TREE_ROOT_INDEX) {
-    Real * b = block_data (sblocks, u);
-    block_cells (store, 0) {
-      int x = i * m + ci, y = 0, z = 0;
-#if dimension > 1
-      y = j * m + cj;
-#endif
-#if dimension > 2
-      z = k * m + ck;
-#endif
-      err = fmax (err, fabs (b [c] - f (level, x, y, z)));
-    }
-  }
-  CHECK (err < 1e-5);
-
-  /* every leaf, gathered with 2 ghosts: interior is its own, ghosts as expected */
-  for (int g = 1; g <= 2; g++) {
-    BlockShape shape = tree_scratch_shape (g);
-    Real * w = malloc (shape.cells * sizeof (Real));
-    double gerr = 0;
-    long ghosts = 0;
-    foreach_leaf () {
-      block_gather (w, shape, (Index) {IJKL}, u);
-      block_cells (shape, g) {
-        int x = ci - shape.ox, y = 0, z = 0;
-#if dimension > 1
-        y = cj - shape.g;
-#endif
-#if dimension > 2
-        z = ck - shape.g;
-#endif
-        int gx = i * m + x, gy = 0, gz = 0;
-#if dimension > 1
-        gy = j * m + y;
-#endif
-#if dimension > 2
-        gz = k * m + z;
-#endif
-        ghosts += !(x >= 0 && x < m && y >= 0 && y < m && z >= 0 && z < m);
-        gerr = fmax (gerr, fabs (w [c] - expected (level, gx, gy, gz)));
-      }
-    }
-    CHECK (gerr < 1e-5);
-    CHECK (ghosts == tree_get_nleaves () * ((long) pow (m + 2 * g, dimension) - (long) pow (m, dimension)));
-    free (w);
-  }
-
-  /* a stencil through foreach_leaf_gathered, against the same through
-   * block_gather by hand; then scatter round trip */
   {
-    BlockShape sh = tree_scratch_shape (1);
-    Real * w2 = malloc (sh.cells * sizeof (Real));
-    double diff = 0;
-    foreach_leaf_gathered (u, 1) {
-      Real * out = block_data (sblocks, v);
-      block_interior (shape)
-        out [o] = cell_at (w, 1
-#if dimension > 1
-                           , 0
-#endif
-#if dimension > 2
-                           , 0
-#endif
-                           ) - cell_at (w, -1
-#if dimension > 1
-                           , 0
-#endif
-#if dimension > 2
-                           , 0
-#endif
-                           );
-    }
-    foreach_leaf () {
-      block_gather (w2, sh, (Index) {IJKL}, u);
-      Real * out = block_data (sblocks, v);
-      block_interior (sh) {
-        Real d = cell_at (w2, 1
-#if dimension > 1
-                          , 0
-#endif
-#if dimension > 2
-                          , 0
-#endif
-                          ) - cell_at (w2, -1
-#if dimension > 1
-                          , 0
-#endif
-#if dimension > 2
-                          , 0
-#endif
-                          );
-        diff = fmax (diff, fabs (out [o] - d));
-      }
-    }
-    CHECK (diff == 0);
-    /* scatter: doubling the interior of w2 doubles the block */
-    foreach_leaf () {
-      block_gather (w2, sh, (Index) {IJKL}, u);
-      block_interior (sh) w2 [c] *= 2;
-      block_scatter ((Index) {IJKL}, u, w2, sh);
-    }
-    double serr = 0;
-    foreach_leaf () {
-      Real * b = block_data (sblocks, u);
-      block_cells (store, 0) {
-        int x = i * m + ci, y = 0, z = 0;
-#if dimension > 1
-        y = j * m + cj;
-#endif
-#if dimension > 2
-        z = k * m + ck;
-#endif
-        serr = fmax (serr, fabs (b [c] - 2 * f (level, x, y, z)));
-      }
-    }
-    CHECK (serr < 1e-5);
-    free (w2);
-  }
-
-  /* the parallel loop gives what the serial one gives, into another
-   * scalar, and scratch blocks are aligned */
-  {
-    scalar ser, par;
+    long n;
+    Real * derived = snapshot (e, &n);
+    ghosts_update (e);
+    Real * filled = snapshot (e, &n);
     double d = 0;
-    foreach_leaf_gathered (u, 2) {
-      CHECK (((size_t) w & 63) == 0);
-      Real * out = block_data (sblocks, ser);
-      block_interior (shape)
-        out [o] = cell_at (w, -2
-#if dimension > 1
-                           , 1
-#endif
-#if dimension > 2
-                           , -1
-#endif
-                           ) + 3 * cell_at (w, 0
-#if dimension > 1
-                           , 0
-#endif
-#if dimension > 2
-                           , 0
-#endif
-                           );
-    }
-    foreach_leaf_gathered_parallel (u, 2) {
-      Real * out = block_data (sblocks, par);
-      block_interior (shape)
-        out [o] = cell_at (w, -2
-#if dimension > 1
-                           , 1
-#endif
-#if dimension > 2
-                           , -1
-#endif
-                           ) + 3 * cell_at (w, 0
-#if dimension > 1
-                           , 0
-#endif
-#if dimension > 2
-                           , 0
-#endif
-                           );
-    }
-    BlockShape store = tree_block_shape ();
-    foreach_leaf () {
-      const Real * a = block_data (sblocks, ser), * b = block_data (sblocks, par);
-      block_cells (store, 0) d = fmax (d, fabs (a [c] - b [c]));
-    }
-    CHECK (d == 0);
-    /* a stored block needs no padding to be aligned: g = 0, m a multiple of V */
-    BlockShape al = block_shape_aligned (tree_get_block_m (), 0, 8);
-    CHECK (al.cells == store.cells && al.ox == 0 && al.nx == tree_get_block_m ());
+    for (long q = 0; q < n; q++)
+      d = fmax (d, fabs (derived [q] - filled [q]));
+    CHECK (d < 10 * tol);
+    free (derived);
+    free (filled);
   }
 
-  /* blocks freed and reused: the hot list, with the same accounting */
+  /* 7. refining and coarsening keep every leaf's ghosts what ghosts_update
+   * gives, without calling it, for every scalar: first coarsening every
+   * family that can be, from values set on the leaves, so that their
+   * prolongation from the parent differs from what they held; then
+   * refining and coarsening at random */
+  set (v, wavy);
+  set (u, linear);
+  ghosts_update_scalars (0);
+  {
+    int coarsened = 0, refined = 0;
+    cache (Index) parents;
+    morton (TREE_ROOT_INDEX)
+      if (tree_has_children (node))
+        cache_push (parents, (Index) {IJKL});
+    foreach (p in parents)              /* children before their parent */
+      coarsened += tree_coarsen (p);
+    double d = kept_against_fresh (v), du = kept_against_fresh (u);
+    printf ("  %d families coarsened: kept against fresh %g, %g\n", coarsened, d, du);
+    CHECK (coarsened > 0 && d < 10 * tol && du < 10 * tol);
+
+    set (v, wavy);
+    ghosts_update_scalars (0);
+    coarsened = 0;
+    srand (11);
+    for (int it = 0; it < 60; it++) {
+      double r [3] = { rand () / (double) RAND_MAX, rand () / (double) RAND_MAX,
+                       rand () / (double) RAND_MAX };
+      Index q = leaf_at (r);
+      if (it % 3 == 2 && q.level > 1) {
+        q.level--;
+        q.i >>= 1;
+#if dimension > 1
+        q.j >>= 1;
+#endif
+#if dimension > 2
+        q.k >>= 1;
+#endif
+        coarsened += tree_coarsen (q);
+      }
+      else
+        refined += tree_refine (q);
+    }
+    d = kept_against_fresh (v), du = kept_against_fresh (u);
+    printf ("  %d refined, %d coarsened: kept against fresh %g, %g\n", refined, coarsened, d, du);
+    CHECK (refined > 0 && d < 10 * tol && du < 10 * tol);
+    /* and a linear field stays exact through it all */
+    CHECK (ghost_error (u, linear, 0) < 10 * tol);
+  }
+
+  /* 8. a freed scalar gives its id back with the default operations */
+  {
+    int id;
+    {
+      scalar t;
+      id = t;
+      scalar_set_ops (t, (ScalarOps) { .prolongation = prolong_injection });
+      CHECK (scalar_get_ops (t).prolongation == prolong_injection);
+    }
+    scalar t2 = scalar_new ();
+    CHECK (t2 == id && scalar_get_ops (t2).prolongation == prolong_linear
+           && scalar_get_ops (t2).boundary == bc_neumann);
+    scalar_free (t2);
+  }
+
+  /* 9. blocks freed and reused: the hot list, with the same accounting */
   {
     long before = grid_scalar_blocks_attached ();
-    { scalar t; (void) t; }               /* blocks for every node, then freed */
-    CHECK (grid_scalar_blocks_attached () == before && grid_scalar_check ());
     { scalar t; (void) t; }
-    CHECK (grid_scalar_check ());
+    CHECK (grid_scalar_blocks_attached () == before && grid_scalar_check ());
     grid_scalar_trim (0);
     CHECK (grid_scalar_check ());
   }
+  printf ("  %d leaves, %ld ghost cells at level jumps\n", tree_get_nleaves (), jumps);
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);
   return fails != 0;

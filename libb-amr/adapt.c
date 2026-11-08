@@ -7,21 +7,30 @@
 
 double block_wavelet (Index p, int s)
 {
-  int m = tree_get_block_m (), h = m / 2, nc = h + 2;
-  assert (GHOSTS >= 2 && m >= 4);
-  BlockShape sh = tree_scratch_shape (2);
-  Real * u = block_scratch_new (sh);
-  block_gather (u, sh, p, s);
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m, h = m / 2, nc = h + 2;
+  assert (sh.g >= 2 && m >= 4 && index_is_allocated (p));
+  const Real * u = block_data (index_node (p)->s, s);
 
   /*
   .. The coarse cells, -1 to h along each axis: the means of 2 x 2 (x 2)
-  .. fine cells, the ghost layer of coarse cells from the two of fine ones.
+  .. fine cells, the ghost layer of coarse cells from the two stored ghost
+  .. layers of fine ones.
   */
   long cs [3] = { 1, dimension > 1 ? nc : 0, dimension > 2 ? (long) nc * nc : 0 };
   long ncells = nc;
   for (int a = 1; a < dimension; a++)
     ncells *= nc;
   RealSum * coarse = malloc ((size_t) ncells * sizeof (RealSum));
+  if (!coarse)
+    abort ();
+  long sub [TREE_NCHILDREN];
+  for (int k = 0; k < TREE_NCHILDREN; k++)
+  {
+    sub [k] = 0;
+    for (int a = 0; a < dimension; a++)
+      sub [k] += ((k >> a) & 1) * block_stride (sh, a);
+  }
   int lo [3] = { -1, dimension > 1 ? -1 : 0, dimension > 2 ? -1 : 0 };
   int hi [3] = { h + 1, dimension > 1 ? h + 1 : 1, dimension > 2 ? h + 1 : 1 };
   int C [3];
@@ -29,15 +38,11 @@ double block_wavelet (Index p, int s)
   for (C [1] = lo [1]; C [1] < hi [1]; C [1]++)
   for (C [0] = lo [0]; C [0] < hi [0]; C [0]++)
   {
+    int x [3] = { 2 * C [0], 2 * C [1], 2 * C [2] };
+    const Real * b = u + block_at (sh, x);
     RealSum sum = 0;
     for (int k = 0; k < TREE_NCHILDREN; k++)
-    {
-      int x [3] = { 0, 0, 0 };
-      for (int a = 0; a < dimension; a++)
-        x [a] = 2 * C [a] + ((k >> a) & 1);
-      sum += u [(x [0] + sh.ox) + (long) (x [1] + sh.g) * sh.sy
-                + (long) (x [2] + sh.g) * sh.sz];
-    }
+      sum += b [sub [k]];
     long q = 0;
     for (int a = 0; a < dimension; a++)
       q += (C [a] + 1) * cs [a];
@@ -58,12 +63,9 @@ double block_wavelet (Index p, int s)
     RealSum pred = coarse [q];
     for (int a = 0; a < dimension; a++)
       pred += (x [a] & 1 ? 1 : -1) * (coarse [q + cs [a]] - coarse [q - cs [a]]) / 8.;
-    Real v = u [(x [0] + sh.ox) + (long) (x [1] + sh.g) * sh.sy
-                + (long) (x [2] + sh.g) * sh.sz];
-    err = fmax (err, fabs (v - pred));
+    err = fmax (err, fabs (u [block_at (sh, x)] - pred));
   }
   free (coarse);
-  free (u);
   return err;
 }
 
@@ -86,9 +88,13 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   if (minlevel < 0)
     minlevel = 0;
 
-  /* the parents, which ghosts read where a neighbour is finer */
-  for (int i = 0; i < n; i++)
-    tree_restrict (s [i]);
+  /*
+  .. The ghosts of every node, parents too, as the wavelet of a parent
+  .. decides its coarsening; and of every scalar, as refining prolongs them
+  .. all from their ghosts. tree_refine () and tree_coarsen () keep them
+  .. valid from then on.
+  */
+  ghosts_update_scalars (1);
 
   /* 1. flags */
   cache (Index) refine;

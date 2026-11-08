@@ -4,54 +4,186 @@
 
 #include "block-ghosts.h"
 
-/* the index of cell (x, y, z) in a stored block of m^dimension cells */
-#if dimension == 1
-# define STORED(m, x, y, z)  (x)
-#elif dimension == 2
-# define STORED(m, x, y, z)  ((x) + (m) * (y))
-#else
-# define STORED(m, x, y, z)  ((x) + (m) * ((y) + (m) * (z)))
-#endif
+/* ---------------------------------------------------------------------- */
+/* the operations of each scalar                                          */
+/* ---------------------------------------------------------------------- */
 
-/*
-.. Where the cell x of a ghost region comes from, along one axis: x is in
-.. the block's own cells (0 to m - 1 inside), d the direction of the region
-.. (-1, 0 or 1), mirror whether that side is outside the domain, and off,
-.. sh where the source block sits: the cell x' of the block in direction d
-.. (or of the block itself, reflected, if mirror) is the cell (off + x') >> sh
-.. of the source block, sh levels coarser.
-*/
-static inline int source_cell (int x, int d, int mirror, int m, int off, int sh)
+static ScalarOps scalar_ops [NSCALAR_MAX];    /* zero: the defaults */
+
+void scalar_set_ops (int s, ScalarOps ops)
 {
-  int xl = mirror ? (d < 0 ? -1 - x : 2 * m - 1 - x) : x - d * m;
-  return (off + xl) >> sh;
+  assert (s >= 0 && s < NSCALAR_MAX);
+  scalar_ops [s] = ops;
 }
 
-/*
-.. The ghosts come by region: one for each of the 3^dimension - 1 directions
-.. around the block, its faces, edges and corners. For each:
-..
-..   - the sides outside the domain are reflected: that component of the
-..     direction becomes 0, and the cells are mirrored, so a corner region
-..     across a wall reads the neighbour along the wall, not the block itself;
-..   - the source is the node in the direction left, at the same level (a
-..     leaf, or a parent holding the mean of its children: tree_restrict ())
-..     or else the nearest coarser node covering it: found once per region,
-..     not once per cell;
-..   - each row of the region is then copied, with memcpy where it is a run
-..     of the same level not reflected along i.
-*/
-void block_gather (Real * w, BlockShape shape, Index p, int s)
+ScalarOps scalar_get_ops (int s)
 {
-  int m = tree_get_block_m (), l = p.level, g = shape.g, nb = 1 << l;
-  assert (shape.m == m && g <= m && index_is_allocated (p));
-  const Real * own = block_data (index_node (p)->s, s);
+  assert (s >= 0 && s < NSCALAR_MAX);
+  ScalarOps o = scalar_ops [s];
+  if (!o.prolongation)
+    o.prolongation = prolong_linear;
+  if (!o.restriction)
+    o.restriction = restriction_mean;
+  if (!o.boundary)
+    o.boundary = bc_neumann;
+  return o;
+}
 
-  /* the block's own cells */
-  block_interior (shape)
-    w [c] = own [o];
-  if (!g)
-    return;
+void scalar_ops_reset (int s)
+{
+  assert (s >= 0 && s < NSCALAR_MAX);
+  scalar_ops [s] = (ScalarOps) {0};
+}
+
+/* ---------------------------------------------------------------------- */
+/* prolongations, restriction, boundary conditions                        */
+/* ---------------------------------------------------------------------- */
+
+void prolong_linear (const Prolongation * pr)
+{
+  const Real * u = pr->coarse;
+  long st [3];
+  for (int a = 0; a < 3; a++)
+    st [a] = block_stride (pr->shape, a);
+  prolong_cells (pr)
+  {
+    RealSum v = u [cc];
+    for (int a = 0; a < dimension; a++)
+      v += sgn [a] * (u [cc + st [a]] - u [cc - st [a]]) / 8.;
+    pr->fine [f] = (Real) v;
+  }
+}
+
+static inline RealSum minmod (RealSum a, RealSum b)
+{
+  return a * b <= 0 ? 0 : a > 0 ? (a < b ? a : b) : (a > b ? a : b);
+}
+
+void prolong_minmod (const Prolongation * pr)
+{
+  const Real * u = pr->coarse;
+  long st [3];
+  for (int a = 0; a < 3; a++)
+    st [a] = block_stride (pr->shape, a);
+  prolong_cells (pr)
+  {
+    RealSum v = u [cc];
+    for (int a = 0; a < dimension; a++)
+      v += sgn [a] * minmod ((RealSum) u [cc + st [a]] - u [cc],
+                             (RealSum) u [cc] - u [cc - st [a]]) / 4.;
+    pr->fine [f] = (Real) v;
+  }
+}
+
+void prolong_injection (const Prolongation * pr)
+{
+  prolong_cells (pr)
+    pr->fine [f] = pr->coarse [cc];
+}
+
+void restriction_mean (Index p, int s)
+{
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m, h = m / 2;
+  assert (index_is_allocated (p) && tree_has_children (index_node (p)));
+  Real * parent = block_data (index_node (p)->s, s);
+  const Real * child [TREE_NCHILDREN];
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+    child [c] = block_data (index_node (index_child (p, c))->s, s);
+  /* the 2^dimension fine cells of a coarse one, from the first */
+  long sub [TREE_NCHILDREN];
+  for (int k = 0; k < TREE_NCHILDREN; k++)
+  {
+    sub [k] = 0;
+    for (int a = 0; a < dimension; a++)
+      sub [k] += ((k >> a) & 1) * block_stride (sh, a);
+  }
+  /* child c fills the parent's cells c's half along each axis: by rows */
+  int hy = dimension > 1 ? h : 1, hz = dimension > 2 ? h : 1;
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+    for (int Z = 0; Z < hz; Z++)
+    for (int Y = 0; Y < hy; Y++)
+    {
+      int px [3] = { (c & 1) * h, ((c >> 1) & 1) * h + Y, ((c >> 2) & 1) * h + Z };
+      int fx [3] = { 0, 2 * Y, 2 * Z };
+      Real * prow = parent + block_at (sh, px);
+      const Real * frow = child [c] + block_at (sh, fx);
+      for (int X = 0; X < h; X++)
+      {
+        RealSum sum = 0;
+        for (int k = 0; k < TREE_NCHILDREN; k++)
+          sum += frow [2 * X + sub [k]];
+        prow [X] = (Real) (sum / TREE_NCHILDREN);
+      }
+    }
+}
+
+void bc_neumann (const Boundary * bc)
+{
+  boundary_cells (bc)
+    bc->b [ghost] = bc->b [inner];
+}
+
+void bc_odd (const Boundary * bc)
+{
+  boundary_cells (bc)
+    bc->b [ghost] = - bc->b [inner];
+}
+
+/* ---------------------------------------------------------------------- */
+/* refining and coarsening one node                                       */
+/* ---------------------------------------------------------------------- */
+
+void block_prolong (Index p, int s)
+{
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m;
+  assert (index_is_allocated (p) && tree_has_children (index_node (p)));
+  ScalarOps o = scalar_get_ops (s);
+  Prolongation pr = {
+    .coarse = block_data (index_node (p)->s, s),
+    .shape = sh, .coarse_index = p, .s = s,
+  };
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
+    pr.fine_index = index_child (p, c);
+    pr.fine = block_data (index_node (pr.fine_index)->s, s);
+    for (int a = 0; a < 3; a++)
+    {
+      int in = a < dimension;
+      pr.off [a] = in ? ((c >> a) & 1) * m : 0;
+      pr.lo [a] = 0;
+      pr.hi [a] = in ? m : 1;
+    }
+    o.prolongation (&pr);
+  }
+}
+
+void block_restrict (Index p, int s)
+{
+  scalar_get_ops (s).restriction (p, s);
+}
+
+/* ---------------------------------------------------------------------- */
+/* the ghosts of one node                                                 */
+/* ---------------------------------------------------------------------- */
+
+/*
+.. The regions around the block: one for each of the 3^dimension - 1
+.. directions, its faces, edges and corners. Those that reach outside the
+.. domain are left to the boundary conditions, which come last, one axis
+.. after the other: a corner across a wall then mirrors the ghosts along the
+.. wall, filled already. Each region inside comes from one node: the one of
+.. the same level in that direction, rows copied; or, if there is none,
+.. the leaf one level coarser covering it, prolonged.
+*/
+void block_ghosts (Index p, int s)
+{
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m, g = sh.g, l = p.level, nb = 1 << l;
+  assert (index_is_allocated (p));
+  Real * own = block_data (index_node (p)->s, s);
+  ScalarOps o = scalar_get_ops (s);
 
   int P [3] = { p.i, 0, 0 }, ndir = 1;
   #if dimension > 1
@@ -65,175 +197,173 @@ void block_gather (Real * w, BlockShape shape, Index p, int s)
 
   for (int dir = 0; dir < ndir; dir++)
   {
-    int d [3] = { 0, 0, 0 }, mirror [3] = { 0, 0, 0 }, q [3] = { 0, 0, 0 };
-    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 }, t = dir, centre = 1;
+    int d [3] = { 0, 0, 0 }, q [3] = { 0, 0, 0 };
+    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 }, t = dir;
+    int centre = 1, outside = 0;
     for (int a = 0; a < dimension; a++)
     {
       d [a] = t % 3 - 1;
       t /= 3;
       centre &= d [a] == 0;
       q [a] = P [a] + d [a];
-      if (q [a] < 0 || q [a] >= nb)       /* outside: reflect */
-      {
-        mirror [a] = 1;
-        q [a] = P [a];
-      }
+      outside |= q [a] < 0 || q [a] >= nb;
       lo [a] = d [a] < 0 ? -g : d [a] == 0 ? 0 : m;
       hi [a] = d [a] < 0 ? 0 : d [a] == 0 ? m : m + g;
     }
-    if (centre)
+    if (centre || outside)
       continue;
 
-    /* the source: the node at q, or the nearest coarser one covering it */
-    const Real * src = NULL;
-    int sh = 0, off [3] = { 0, 0, 0 };
-    for (int L = l; L >= 0 && !src; L--)
-    {
-      sh = l - L;
-      Index b = { q [0] >> sh,
+    Index b = { q [0],
   #if dimension > 1
-                  q [1] >> sh,
+                q [1],
   #endif
   #if dimension > 2
-                  q [2] >> sh,
+                q [2],
   #endif
-                  L };
-      if (index_is_allocated (b))
-      {
-        src = block_data (index_node (b)->s, s);
-        /* where q's cells start in it, in cells of level l */
-        for (int a = 0; a < dimension; a++)
-          off [a] = q [a] * m - (((q [a] >> sh) * m) << sh);
-      }
-    }
-    assert (src);                       /* the root covers the domain */
-
-    int run = !mirror [0] && sh == 0;   /* rows contiguous in both */
-    for (int z = lo [2]; z < hi [2]; z++)
-    for (int y = lo [1]; y < hi [1]; y++)
+                l };
+    if (index_is_allocated (b))
     {
-      int sy = source_cell (y, d [1], mirror [1], m, off [1], sh);
-      int sz = source_cell (z, d [2], mirror [2], m, off [2], sh);
-      (void) sy, (void) sz;
-      const Real * srow = src + STORED (m, 0, sy, sz);
-      Real * drow = w + shape.ox + (y + g) * shape.sy + (z + g) * shape.sz;
-      if (run)
-        memcpy (drow + lo [0], srow + lo [0] - d [0] * m,
-                (size_t) (hi [0] - lo [0]) * sizeof (Real));
-      else
-        for (int x = lo [0]; x < hi [0]; x++)
-          drow [x] = srow [source_cell (x, d [0], mirror [0], m, off [0], sh)];
+      /* the same level: rows copied, cell x from cell x - d m of b */
+      const Real * src = block_data (index_node (b)->s, s);
+      size_t len = (size_t) (hi [0] - lo [0]) * sizeof (Real);
+      int x [3] = { lo [0], 0, 0 }, y [3];
+      for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+      for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+      {
+        for (int a = 0; a < 3; a++)
+          y [a] = x [a] - d [a] * m;
+        memcpy (own + block_at (sh, x), src + block_at (sh, y), len);
+      }
+      continue;
     }
+
+    /* one level coarser, 2:1 balance: the leaf covering b */
+    assert (l > 0);
+    Index C = b;
+    C.level = l - 1;
+    C.i >>= 1;
+  #if dimension > 1
+    C.j >>= 1;
+  #endif
+  #if dimension > 2
+    C.k >>= 1;
+  #endif
+    assert (index_is_allocated (C));
+    int Cq [3] = { C.i, 0, 0 };
+  #if dimension > 1
+    Cq [1] = C.j;
+  #endif
+  #if dimension > 2
+    Cq [2] = C.k;
+  #endif
+    Prolongation pr = {
+      .coarse = block_data (index_node (C)->s, s), .fine = own, .shape = sh,
+      .coarse_index = C, .fine_index = p, .s = s,
+    };
+    for (int a = 0; a < 3; a++)
+    {
+      pr.off [a] = a < dimension ? (P [a] - 2 * Cq [a]) * m : 0;
+      pr.lo [a] = lo [a];
+      pr.hi [a] = hi [a];
+    }
+    o.prolongation (&pr);
   }
+
+  /* the walls, one axis after the other */
+  for (int a = 0; a < dimension; a++)
+    for (int side = 0; side < 2; side++)
+      if (side ? P [a] == nb - 1 : P [a] == 0)
+      {
+        Boundary bc = { own, sh, a, side, p, s };
+        o.boundary (&bc);
+      }
 }
 
-void block_scatter (Index p, int s, const Real * w, BlockShape shape)
-{
-  assert (shape.m == tree_get_block_m () && index_is_allocated (p));
-  Real * own = block_data (index_node (p)->s, s);
-  block_interior (shape)
-    own [o] = w [c];
-}
-
-/* the scratch index of cell x [] of a block, interior-relative */
-static inline long scratch_index (BlockShape b, const int x [3])
-{
-  return (x [0] + b.ox) + (long) (x [1] + b.g) * b.sy
-         + (long) (x [2] + b.g) * b.sz;
-}
-
-/* the stride of axis a in a scratch block */
-static inline long scratch_stride (BlockShape b, int a)
-{
-  return a == 0 ? 1 : a == 1 ? b.sy : b.sz;
-}
+/* ---------------------------------------------------------------------- */
+/* every node, level by level                                             */
+/* ---------------------------------------------------------------------- */
 
 /*
-.. Linear prolongation, which keeps the mean: the fine cell at offset
-.. sgn = -1 or +1 from the centre of its coarse cell C, along each axis, is
-..
-..   u (C) + sum over axes of sgn / 8 * (u (C + 1) - u (C - 1))
-..
-.. (a quarter of a coarse cell times the central gradient). The 2^d fine
-.. cells of C have offsets of both signs on every axis, so their mean is
-.. u (C). The coarse values come with one ghost layer, from block_gather ().
+.. The nodes, by level: at [first [l] .. first [l + 1]) those of level l,
+.. leaves only, or parents too. Each in Morton order.
 */
-void block_prolong (Index p, int s)
+typedef struct
 {
-  int m = tree_get_block_m ();
-  assert (index_is_allocated (p) && tree_has_children (index_node (p)));
-  BlockShape sh = tree_scratch_shape (1);
-  Real * u = block_scratch_new (sh);
-  block_gather (u, sh, p, s);
-  int c = 0;
-  children_of (p)
-  {
-    Real * fine = block_data (sblocks, s);
-    int cb [3] = { c & 1, (c >> 1) & 1, (c >> 2) & 1 };
-    int hi [3] = { m, dimension > 1 ? m : 1, dimension > 2 ? m : 1 };
-    int x [3];
-    for (x [2] = 0; x [2] < hi [2]; x [2]++)
-    for (x [1] = 0; x [1] < hi [1]; x [1]++)
-    for (x [0] = 0; x [0] < hi [0]; x [0]++)
-    {
-      int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
-      for (int a = 0; a < dimension; a++)
-      {
-        int f = cb [a] * m + x [a];         /* in the parent's fine cells */
-        C [a] = f >> 1;
-        sgn [a] = f & 1 ? 1 : -1;
-      }
-      long k = scratch_index (sh, C);
-      RealSum v = u [k];
-      for (int a = 0; a < dimension; a++)
-      {
-        long st = scratch_stride (sh, a);
-        v += sgn [a] * (u [k + st] - u [k - st]) / 8.;
-      }
-      fine [STORED (m, x [0], x [1], x [2])] = (Real) v;
-    }
-    c++;
-  }
-  free (u);
+  Index * at;
+  int first [BAMR_MAX_DEPTH + 2];
+  int depth;
+} Levels;
+
+static Levels levels_new (int parents)
+{
+  Levels L = { .depth = tree_get_depth () };
+  int count [BAMR_MAX_DEPTH + 1] = {0};
+  morton (TREE_ROOT_INDEX)
+    if (parents || (node->flags & BAMR_NODE_LEAF))
+      count [level]++;
+  L.first [0] = 0;
+  for (int l = 0; l <= L.depth; l++)
+    L.first [l + 1] = L.first [l] + count [l];
+  L.at = malloc ((size_t) (L.first [L.depth + 1] + 1) * sizeof (Index));
+  if (!L.at)
+    abort ();
+  int next [BAMR_MAX_DEPTH + 1];
+  for (int l = 0; l <= L.depth; l++)
+    next [l] = L.first [l];
+  morton (TREE_ROOT_INDEX)
+    if (parents || (node->flags & BAMR_NODE_LEAF))
+      L.at [next [level]++] = (Index) {IJKL};
+  return L;
 }
 
-/* the parent p: the mean of its children's cells */
-void block_restrict (Index p, int s)
-{
-  int m = tree_get_block_m (), h = m / 2;
-  assert (index_is_allocated (p) && tree_has_children (index_node (p)));
-  Real * parent = block_data (index_node (p)->s, s);
-  const Real * child [TREE_NCHILDREN];
-  for (int c = 0; c < TREE_NCHILDREN; c++)
-    child [c] = block_data (index_node (index_child (p, c))->s, s);
-  int hi [3] = { m, dimension > 1 ? m : 1, dimension > 2 ? m : 1 };
-  int x [3];
-  for (x [2] = 0; x [2] < hi [2]; x [2]++)
-  for (x [1] = 0; x [1] < hi [1]; x [1]++)
-  for (x [0] = 0; x [0] < hi [0]; x [0]++)
-  {
-    /* the child holding this cell, and the first of its 2^d fine cells */
-    int c = 0, f [3] = { 0, 0, 0 };
-    for (int a = 0; a < dimension; a++)
-    {
-      c |= (x [a] >= h) << a;
-      f [a] = 2 * (x [a] & (h - 1));
-    }
-    RealSum sum = 0;
-    for (int k = 0; k < TREE_NCHILDREN; k++)
-      sum += child [c] [STORED (m, f [0] + (k & 1), f [1] + ((k >> 1) & 1),
-                                f [2] + ((k >> 2) & 1))];
-    parent [STORED (m, x [0], x [1], x [2])] = (Real) (sum / TREE_NCHILDREN);
-  }
-}
-
-/*
-.. morton () visits children before their parent, so each parent is
-.. averaged from children already up to date: one pass from the leaves up.
-*/
+/* each parent, finest first: in Morton order a parent comes after its
+.. children, so one pass from the leaves up */
 void tree_restrict (int s)
 {
+  void (* restriction) (Index, int) = scalar_get_ops (s).restriction;
   morton (TREE_ROOT_INDEX)
     if (tree_has_children (node))
-      block_restrict ((Index) {IJKL}, s);
+      restriction ((Index) {IJKL}, s);
+}
+
+void ghosts_update_list (int n, const int * s, int parents)
+{
+  if (n <= 0)
+    return;
+  Levels L = levels_new (1);
+  ScalarOps * o = malloc ((size_t) n * sizeof (ScalarOps));
+  if (!o)
+    abort ();
+  for (int q = 0; q < n; q++)
+    o [q] = scalar_get_ops (s [q]);
+
+  /* 1. restriction, finest first; within a level, at once */
+  for (int l = L.depth - 1; l >= 0; l--)
+  {
+    BLOCK_PRAGMA (omp parallel for schedule (dynamic))
+    for (int b = L.first [l]; b < L.first [l + 1]; b++)
+      if (tree_has_children (index_node (L.at [b])))
+        for (int q = 0; q < n; q++)
+          o [q].restriction (L.at [b], s [q]);
+  }
+
+  /* 2. the ghosts, coarsest first; within a level, at once */
+  for (int l = 0; l <= L.depth; l++)
+  {
+    BLOCK_PRAGMA (omp parallel for schedule (dynamic))
+    for (int b = L.first [l]; b < L.first [l + 1]; b++)
+      if (parents || (index_node (L.at [b])->flags & BAMR_NODE_LEAF))
+        for (int q = 0; q < n; q++)
+          block_ghosts (L.at [b], s [q]);
+  }
+  free (o);
+  free (L.at);
+}
+
+void ghosts_update_scalars (int parents)
+{
+  int list [NSCALAR_MAX], n = 0;
+  foreach_scalar (s)
+    list [n++] = s;
+  ghosts_update_list (n, list, parents);
 }

@@ -25,18 +25,10 @@ static Pool * pool_node = NULL;       /* the root, which has no siblings */
 static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
 
 /*
-.. cells a block stores: m^dimension, m = 2^blockdepth, and no ghost cells.
-.. Code that needs ghosts fills a scratch block of its own from the
-.. neighbours: block_gather () in block-ghosts.h.
+.. Interior cells per block side, m = 2^blockdepth. A block stores them and
+.. GHOSTS layers around: tree_block_shape ().cells Reals (block-loops.h).
 */
 #define bm           (1 << G (blockdepth))
-#if dimension == 1
-# define block_size()     (bm)
-#elif dimension == 2
-# define block_size()     (bm * bm)
-#else
-# define block_size()     (bm * bm * bm)
-#endif
 
 #define is_leaf()   (node->flags & BAMR_NODE_LEAF)
 #define is_pruned() (node->flags & BAMR_NODE_IS_PRUNED)
@@ -139,9 +131,18 @@ static int divide_leaf (int IJKLargs)
   G (nleaves) [level + 1] += TREE_NCHILDREN;
   G (nlb) += TREE_NCHILDREN - 1;
   update_depthmin ();
-  /* the children's values: linear prolongation, which keeps the mean */
+  /*
+  .. The children's interiors: each scalar's prolongation from this node,
+  .. its interior and ghosts. Then their ghosts: from their siblings, the
+  .. nodes of their level around, and the leaves of this level, whose
+  .. ghosts are valid. The leaves around that read this node's cells, by a
+  .. copy or a prolongation, read the same values from the children now.
+  */
   foreach_scalar (s)
     block_prolong ((Index) {IJKL}, s);
+  children_of ((Index) {IJKL})
+    foreach_scalar (s)
+      block_ghosts ((Index) {IJKL}, s);
   return 1;
 }
 
@@ -229,6 +230,19 @@ int tree_refine (Index p)
   return count;
 }
 
+/* does the node q, one level finer than p, touch p? */
+static int touches (Index p, Index q)
+{
+  int t = q.i >= 2 * p.i - 1 && q.i <= 2 * p.i + 2;
+  #if dimension > 1
+  t &= q.j >= 2 * p.j - 1 && q.j <= 2 * p.j + 2;
+  #endif
+  #if dimension > 2
+  t &= q.k >= 2 * p.k - 1 && q.k <= 2 * p.k + 2;
+  #endif
+  return t;
+}
+
 int tree_coarsen (Index p)
 {
   if (!index_is_allocated (p) || !tree_has_children (index_node (p)))
@@ -242,11 +256,27 @@ int tree_coarsen (Index p)
       children_of ((Index) {IJKL})
         if (tree_has_children (node))
           return 0;
-  /* p gets the mean of its children, then they go */
+  /* p gets the restriction of its children, then they go */
   foreach_scalar (s)
     block_restrict (p, s);
-  INDEX_UNPACK (p);
-  remove_children (IJKL);
+  {
+    INDEX_UNPACK (p);
+    remove_children (IJKL);
+  }
+  /*
+  .. The ghosts of p, a leaf now; then of the leaves one level finer that
+  .. touch p, which copied p's children and now prolong p. The leaves of
+  .. p's level read p, its restriction as before, and the coarser ones
+  .. p's parent, unchanged.
+  */
+  foreach_scalar (s)
+    block_ghosts (p, s);
+  neighbors_of (p, 1)
+    if (node && tree_has_children (node))
+      children_of ((Index) {IJKL})
+        if ((node->flags & BAMR_NODE_LEAF) && touches (p, (Index) {IJKL}))
+          foreach_scalar (s)
+            block_ghosts ((Index) {IJKL}, s);
   return 1;
 }
 
@@ -262,9 +292,10 @@ static int grid_init (int depthmax, int blockdepth)
   G (depthmin)   = 0;
   G (blockdepth) = blockdepth;
 
+  assert (GHOSTS >= 1 && 2 * GHOSTS <= bm);
   pool_node = pool_new (sizeof (BAMRNode));
   pool_family = pool_new (TREE_NCHILDREN * sizeof (BAMRNode));
-  grid_scalar_init (block_size ());
+  grid_scalar_init ((size_t) tree_block_shape ().cells);
 
   Index root = {TREE_ROOT};
   INDEX_UNPACK (root);
@@ -284,10 +315,9 @@ int tree (int depthmax, int blockdepth)
   depthmax = depthmax > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH :
     depthmax <= 0 ? 1 : depthmax;
   /*
-  .. A block has (2^blockdepth)^dimension Reals, and a scratch block with
-  .. ghosts (2^blockdepth + 2 GHOSTS)^dimension, so the largest blockdepth
-  .. shrinks with the dimension: 3D at 6 is already 64^3 doubles, 2 MiB a
-  .. block. fixme : tune better
+  .. A block has (2^blockdepth + 2 GHOSTS)^dimension Reals, so the largest
+  .. blockdepth shrinks with the dimension: 3D at 6 is already 68^3
+  .. doubles, 2.4 MiB a block. fixme : tune better
   */
   #if dimension == 1
   enum { blockdepth_max = 16 };

@@ -16,8 +16,20 @@
   #ifndef BAMR_MAX_DEPTH
   #define BAMR_MAX_DEPTH   20
   #endif
+  /*
+  .. Every block stores GHOSTS ghost layers on each side, kept up to date by
+  .. ghosts_update () (block-ghosts.h). At least 2: adapt_wavelet () reads
+  .. two layers. At most m / 2.
+  ..
+  .. BAMR_ALIGN: the vector width, in Reals, that every interior row of a
+  .. stored block starts on (block_shape_aligned () in block-loops.h). 1, the
+  .. default, is the compact layout, no padding.
+  */
   #ifndef GHOSTS
     # define GHOSTS 2
+  #endif
+  #ifndef BAMR_ALIGN
+    # define BAMR_ALIGN 1
   #endif
 
   /* children of a node */
@@ -233,9 +245,10 @@
   int  tree_get_depth_min (void);   /* the coarsest level of a leaf    */
   int  tree_get_nblocks (void);     /* nodes, leaves or not            */
   int  tree_get_nleaves (void);     /* leaf nodes                      */
-  int  tree_get_block_m (void);     /* cells per block side: 2^blockdepth;
-                                       a block stores m^dimension, no
-                                       ghosts */
+  int  tree_get_block_m (void);     /* interior cells per block side,
+                                       2^blockdepth; a block stores them
+                                       and GHOSTS layers around:
+                                       tree_block_shape () */
 
   /*
   .. Refining and coarsening, keeping the tree 2:1 balanced: two leaves that
@@ -252,10 +265,15 @@
   ..
   .. The children of a node are allocated together, nodes and blocks: one
   .. object of TREE_NCHILDREN nodes, and for each scalar one object of
-  .. TREE_NCHILDREN blocks. A refinement fills the children by linear
-  .. prolongation from p and its neighbours, which keeps the mean: so their
-  .. blocks are not zeroed first. A coarsening gives p the mean of its
-  .. children. See block-ghosts.h for both.
+  .. TREE_NCHILDREN blocks. A refinement fills the children's interiors by
+  .. each scalar's prolongation from p, its interior and ghosts, then the
+  .. children's ghosts: so their blocks are not zeroed first. A coarsening
+  .. gives p each scalar's restriction of its children, then fills the
+  .. ghosts of p and of the leaves beside it that read p's children.
+  ..
+  .. So both keep every leaf's ghosts valid, if they were before: call
+  .. ghosts_update () after changing values and before refining. See
+  .. block-ghosts.h.
   */
   int  tree_refine (Index p);
   int  tree_coarsen (Index p);

@@ -5,6 +5,7 @@
 #include "grid-scalar.h"
 #include "morton-curve.h"
 #include "pool.h"
+#include "block-ghosts.h"
 
 /* the precision this library is built with: see real.h */
 const int BAMR_REAL_TAG = 1;
@@ -25,6 +26,7 @@ static size_t block_reals = 0;     /* Reals in a block                 */
 */
 static void grid_scalar_new (scalar s)
 {
+  scalar_ops_reset (s);
   grid_scalar_alloc_blocks (s);
 }
 
@@ -35,6 +37,7 @@ static void grid_scalar_new (scalar s)
 static void grid_scalar_free (scalar s)
 {
   grid_scalar_free_blocks (s);
+  scalar_ops_reset (s);
 }
 
 /*

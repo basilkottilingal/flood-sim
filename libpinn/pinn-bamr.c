@@ -71,16 +71,18 @@ static void cell_points (const PinnGrid * g, const int * b, const int * cell,
   }
 }
 
-/* the block indices of the leaf IJKL, and of a cell, as arrays */
+/* the block indices of the leaf IJKL, and the interior coordinates of a
+.. cell (0 to m - 1: its storage indices less the ghost layers), as arrays,
+.. in a block_cells () loop, which gives shape */
 #if dimension == 1
   #define BLOCK_IJK(b)   int b [1] = { i }
-  #define CELL_IJK(c)    int c [1] = { ci }
+  #define CELL_IJK(c)    int c [1] = { ci - shape.ox }
 #elif dimension == 2
   #define BLOCK_IJK(b)   int b [2] = { i, j }
-  #define CELL_IJK(c)    int c [2] = { ci, cj }
+  #define CELL_IJK(c)    int c [2] = { ci - shape.ox, cj - shape.g }
 #else
   #define BLOCK_IJK(b)   int b [3] = { i, j, k }
-  #define CELL_IJK(c)    int c [3] = { ci, cj, ck }
+  #define CELL_IJK(c)    int c [3] = { ci - shape.ox, cj - shape.g, ck - shape.g }
 #endif
 
 static long block_cells_count (void)

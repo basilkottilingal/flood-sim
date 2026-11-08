@@ -62,20 +62,20 @@ static void layout (BlockShape shape)
     CHECK (!memcmp (vs [0], ref, n * sizeof (Real)) && !memcmp (vs [1], ref, n * sizeof (Real)));
     free (vs [0]); free (vs [1]);
   }
-  /* block_interior: c in this shape, o in a stored block */
+  /* block_at: from interior coordinates, ghosts included, to c */
   long ok = 0, cells = 0;
-  block_interior (shape) {
-    long want = ci - shape.ox;
+  block_cells (shape, shape.g) {
+    int x [3] = { ci - shape.ox, 0, 0 };
 #if dimension > 1
-    want += (long) (cj - shape.g) * shape.m;
+    x [1] = cj - shape.g;
 #endif
 #if dimension > 2
-    want += (long) (ck - shape.g) * shape.m * shape.m;
+    x [2] = ck - shape.g;
 #endif
-    ok += o == want;
+    ok += block_at (shape, x) == c;
     cells++;
   }
-  CHECK (ok == cells && cells == ipow (shape.m, dimension));
+  CHECK (ok == cells && cells == ipow (shape.m + 2 * shape.g, dimension));
   long k = 0;
   block_cells (shape, 0) { if (k == 3) break; k++; }
   CHECK (k == 3);
@@ -91,9 +91,11 @@ int main (void)
     for (int vl = 2; vl <= 8; vl *= 2)
       layout (block_shape_aligned (m, 2, vl));
   }
-  /* the leaf loops, on stored blocks: no ghosts */
+  /* the leaf loops, on stored blocks, which hold GHOSTS layers */
   tree (3, 4);
-  BlockShape store = block_shape (tree_get_block_m (), 0);
+  BlockShape store = tree_block_shape ();
+  CHECK (store.g == GHOSTS && store.m == tree_get_block_m ());
+  CHECK (store.ox % BAMR_ALIGN == 0 && store.nx % BAMR_ALIGN == 0);
   int leaves = 0, par = 0;
   foreach_leaf () {
     Real * u = block_data (sblocks, s);

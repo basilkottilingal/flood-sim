@@ -10,8 +10,9 @@
   .. Blocks, groups and tables come from pools (pool.h).
   ..
   .. grid_scalar_init () sets scalar_new_hook and scalar_free_hook: a scalar
-  .. made while the tree exists gets a block in every node, and freeing a
-  .. scalar frees its blocks. Scalars that exist when tree () runs get theirs
+  .. made while the tree exists gets a block in every node, zeroed, ghosts
+  .. included, and the default ScalarOps (block-ghosts.h); freeing a scalar
+  .. frees its blocks and resets its ScalarOps. Scalars that exist when tree () runs get theirs
   .. as the nodes are made.
   */
 
@@ -19,7 +20,8 @@
   # define SCALAR_ARRAY_WIDTH   8
 
   /* api */
-  void    grid_scalar_init (size_t blocksize);  /* Reals per block */
+  void    grid_scalar_init (size_t blocksize);  /* Reals per block,
+                                                   ghosts included */
   void    grid_scalar_destroy (void);           /* frees every block */
   void *** grid_scalar_table_new (void);    /* a node's table, empty */
   void    grid_scalar_root_blocks (void *** t);  /* the root: a block of

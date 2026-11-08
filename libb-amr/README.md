@@ -1,5 +1,84 @@
 # block based amr
 
+## Ghost cells
+
+Every block stores its m^d interior cells and `GHOSTS` (default 2) ghost
+layers around them, as PARAMESH/FLASH, Athena++ and Parthenon do. A stencil
+reads its neighbours in place:
+
+```c
+ghosts_update (u);                     /* block-ghosts.h */
+BlockShape shape = tree_block_shape ();
+foreach_leaf_parallel () {
+  const Real * a = block_data (sblocks, u);
+  Real * b = block_data (sblocks, v);
+  block_cells_simd (shape, 0)
+    b [c] = cell_at (a, 1, 0) + cell_at (a, -1, 0) + cell_at (a, 0, 1)
+          + cell_at (a, 0, -1) - 4 * cell_at (a, 0, 0);
+}
+```
+
+`ghosts_update (s, ...)`:
+1. **restricts**, finest level first, every parent from its children;
+2. **fills the ghosts**, coarsest level first, each block's from
+   - the node of its own level beside it (a leaf, or a restricted parent):
+     rows copied;
+   - otherwise the leaf one level coarser (2:1 balance), by the scalar's
+     prolongation. That reads the coarse leaf's interior and first ghost
+     layer, which are already valid because that level was done first;
+   - outside the domain, the scalar's boundary condition, one axis after
+     the other, so that corners come out right.
+
+Within a level the blocks are independent and run on all threads.
+`ghosts_update_levels ()` fills parents too, for coarse-level stencils.
+
+**Per-scalar operations** (`ScalarOps`, `scalar_set_ops ()`): a
+prolongation, a restriction and a boundary condition. `NULL` takes the
+default: `prolong_linear`, `restriction_mean`, `bc_neumann`. Also given:
+`prolong_minmod` (no new extrema, for a water depth), `prolong_injection`
+and `bc_odd`. One prolongation fills both the children of a refined block
+and the ghosts at a level jump, so the two agree. Callbacks are written with
+`prolong_cells ()` and `boundary_cells ()`, and may read other scalars of
+the same nodes, for coupled operators such as `h` with `zb`.
+
+**Derived scalars** are not prolonged. Fill the ghosts of the scalars they
+come from, then compute them on the halo, `block_cells (shape, GHOSTS)`, as
+Parthenon's `FillDerived` does.
+
+**Refining and coarsening keep ghosts valid.**
+- `tree_refine ()` prolongs the children from the parent (interior and
+  ghosts), then fills the children's ghosts.
+- `tree_coarsen ()` fills the ghosts of the new leaf, and of the finer
+  leaves that touch it, which read its children before.
+
+Every other leaf reads the same values as before. So a balance cascade
+never reads a stale halo, as long as the ghosts were valid before. Call
+`ghosts_update ()` after changing values; `adapt_wavelet ()` does it for
+every scalar first.
+
+**Layout:** compact by default; `-DBAMR_ALIGN=V` starts every interior row
+on a multiple of V Reals, for aligned vector loads. Code that needs the
+interior coordinates of a cell takes `ci - shape.ox`, `cj - shape.g`, and
+`block_at ()` goes the other way.
+
+**Cost** (3D, m = 16, g = 2, 568 leaves with one level jump; serial, -O2,
+on a loaded machine, so rough):
+
+| | stored halos | gather (before) |
+|---|---|---|
+| fill, restriction included | 23–31 µs/leaf | 14–23 µs/leaf (restriction only) |
+| 7-point stencil sweep | 12–16 µs/leaf | 16–25 µs/leaf, gather included |
+| one fill + one sweep | 35–46 µs/leaf | 30–47 µs/leaf |
+
+The fill costs about what the gather did, and buys linear (not piecewise
+constant) ghosts at level jumps. Every further sweep that reads the same
+ghosts then runs at stencil speed. The price is memory: 1.95× the interior
+in 3D for m = 16 (1.42× for m = 32).
+
+Not done yet: periodic boundaries, and flux correction (refluxing) at
+coarse-fine faces, which conservation needs whichever way ghosts are
+stored.
+
 ## Tests
 
     sh tests/run.sh
@@ -11,13 +90,26 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
 - `test_tree.c`: counts, the scalar hooks, Morton order, refinement, and the
   loops of `tree.h`;
 - `test_blocks.c`: every loop of `block-loops.h` against `block_cells`, in
-  both layouts and every halo;
-- `test_ghosts.c`: restriction, ghost cells at level jumps and at the
-  boundary, and scattering back.
+  both layouts and every halo, and `block_at ()`;
+- `test_ghosts.c`:
+  - a linear field, extrapolated at the walls: every ghost is exact, at
+    level jumps, walls and corners, and on parents with
+    `ghosts_update_levels ()`;
+  - `bc_neumann` and `bc_odd` mirror over every wall;
+  - injection gives the covering coarse cell;
+  - minmod is exact for a linear field and stays positive at a kink;
+  - a custom restriction runs once per parent;
+  - a derived scalar computed on the halo matches filling its ghosts;
+  - refining and coarsening keep every leaf's ghosts equal to a fresh
+    `ghosts_update ()`;
+  - a freed id gets the default operations back.
 - `test_adapt.c`: families allocated at once, prolongation (exact for a
   linear field, and keeping the mean), coarsening, 2:1 balance through
   random refining and coarsening, and `adapt_wavelet ()` on a front: it
   settles, keeps the integral, and coarsens a constant field to minlevel.
+
+It also runs `blocks`, `ghosts` and `adapt` with OpenMP (2D, 3D) and with
+`-DBAMR_ALIGN=4` (1D to 3D).
 
 
 
@@ -88,24 +180,18 @@ family's object.
 
 ### 3. Ghost cells are a large share of memory in 3D
 
-**Done, the first option.** Blocks store m^d cells. `block-ghosts.h` fills a
-scratch block with ghosts (`block_gather ()`), from the same level, from a
-coarser level (the coarse value), or by reflection at the boundary, and
-`tree_restrict ()` keeps parents the mean of their children.
-`foreach_leaf_gathered ()` does it for every leaf, and `block_interior ()`
-gives each cell its index in the scratch block and in the stored one.
+**Tried, then reverted: blocks are stored with their ghosts again** (see
+[Ghost cells](#ghost-cells)).
 
-What remains:
-- **Interpolation at coarse neighbours.** A ghost next to a coarser block
-  takes the coarse cell's value as it is. A linear interpolation would make
-  second-order stencils second order there too.
-- **Speed: done.** `block_gather ()` finds the source of each face, edge
-  and corner region once, and copies rows, with `memcpy` where they are
-  runs of the same level. With 2 ghost layers, against a tree search per
-  ghost cell: 2.9× faster in 2D, 4.7× in 3D (12 µs a block with m = 16),
-  with the same values bit for bit.
-
-The reasoning, as planned:
+For a while, blocks stored m^d cells, and `block_gather ()` filled a
+scratch block with ghosts before every stencil. It halved memory in 3D. It
+was reverted because:
+- each sweep repeated the gather, and a coarse-neighbour ghost had to be
+  rebuilt every time it was read;
+- interpolating at level jumps, which second-order stencils need, made that
+  repeated work larger;
+- custom prolongations and derived scalars fit a single fill per step much
+  better.
 
 Storage per block, relative to the interior alone:
 
@@ -115,17 +201,12 @@ Storage per block, relative to the interior alone:
 | 2D | 1.56× | 1.27× |
 | 3D | **1.95×** | 1.42× |
 
-In 3D with m = 16, nearly half of every block is ghost cells, and every sweep
-carries them through the cache. The options:
-- **No ghosts in storage.** Blocks store m^d cells. Before computing on a
-  block, a thread copies the block and its neighbours' faces into a scratch
-  block with ghosts, which stays in cache. It computes there, then writes the
-  interior back. That copy is the ghost filling that is needed anyway. This
-  halves memory in 3D, and the bandwidth spent on ghosts, but touches every
-  kernel.
-- **Smaller ghost regions.** A 5- or 7-point stencil never reads edge or
-  corner ghosts. Storing only face ghosts saves less, but changes less.
-- **Larger m.** Cheaper ghosts, but coarser refinement.
+Ways to reduce it, if memory becomes the limit:
+- **Larger m**: cheaper ghosts, but coarser refinement.
+- **Fewer ghost layers** for scalars whose stencils need only one: a
+  per-scalar g would need a block pool per size.
+- **Face ghosts only**: a 5- or 7-point stencil never reads edge or corner
+  ghosts.
 
 ### 4. Huge pages
 
@@ -209,7 +290,7 @@ per-thread free lists, or a lock around `pool_alloc` and `pool_free`.
 | 3 | huge pages, aligned chunks | small | moderate |
 | 4 | children allocated as a group | medium | moderate (locality, fewer allocations) |
 | 5 | Morton-ordered slabs, renumbered at each regrid | medium | large for a GPU and for prefetching |
-| 6 | blocks without stored ghosts | large | ~2× memory and ghost bandwidth in 3D |
+| 6 | ~~blocks without stored ghosts~~ | large | tried and reverted: see 3 |
 
 **Measure before changing anything:** time a stencil sweep, and a refine and
 coarsen cycle. Use `grid_scalar_check ()` and `pool_used ()` to make sure no
