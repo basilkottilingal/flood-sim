@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <assert.h>
 
 #include "tree.h"
@@ -9,17 +10,26 @@
 
 #define G(x) grid_info_##x
 
+/* the levels that hold terminal cells are the bits of a uint32_t */
+#if BAMR_MAX_DEPTH >= 32
+# error "BAMR_MAX_DEPTH must be below 32: tree.c keeps levels as bits of a uint32_t"
+#endif
+
 static double G(x0) = 0.;     /* left corner of domain            */
 static double G(y0) = 0.;     /* bottom corner of domain          */
 static double G(z0) = 0.;
 static double G(h0) = 1.;     /* domain [x0, x0+h] x [y0, y0+h]   */
 static int G(nb) = 0;         /* number of blocks                 */
 static int G(nlb) = 0;        /* number of leaf blocks            */
-static int G(depth) = 0;      /* depth of the current bAMR        */
-static int G(depthmin) = 0;   /* min {level of leaves}            */
 static int G(depthmax) = 1;   /* max depth forced by user         */
 static int G(blockdepth) = 1; /* 2^blockdepth cells per block side */
-static int G(nleaves) [BAMR_MAX_DEPTH + 1];   /* leaves per level */
+/*
+.. Terminal cells, leaves (or pruned cells, with MPI), per level, and as
+.. bits: bit l of level_bits is set while level l has any. The coarsest
+.. level of a leaf is then the lowest bit, and the depth the highest.
+*/
+static int G(nleaves) [BAMR_MAX_DEPTH + 1];
+static uint32_t G(level_bits) = 0;
 struct _Memindex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;       /* the root, which has no siblings */
 static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
@@ -30,16 +40,49 @@ static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
 */
 #define bm           (1 << G (blockdepth))
 
-#define is_leaf()   (node->flags & BAMR_NODE_LEAF)
-#define is_pruned() (node->flags & BAMR_NODE_IS_PRUNED)
-#define is_parent() (node->flags & BAMR_NODE_HAS_CHILDREN)
+#define is_leaf()    (node->flags & BAMR_NODE_LEAF)
+#define is_pruned()  (node->flags & BAMR_NODE_IS_PRUNED)
+#define is_parent()  (node->flags & BAMR_NODE_HAS_CHILDREN)
 
-static void update_depthmin (void)
+/*
+.. n terminal cells more (or fewer, n < 0) at level l: every change of the
+.. counts goes through here, so that level_bits follows them. Code that
+.. prunes cells (MPI) counts them here too.
+*/
+static void terminal_add (int l, int n)
 {
+  assert (l >= 0 && l <= BAMR_MAX_DEPTH);
+  G(nleaves) [l] += n;
+  assert (G(nleaves) [l] >= 0);
+  if (G(nleaves) [l])
+    G(level_bits) |= (uint32_t) 1 << l;
+  else
+    G(level_bits) &= ~((uint32_t) 1 << l);
+}
+
+/* the lowest and highest set bits of b, not 0 */
+static inline int lowest_bit (uint32_t b)
+{
+#if defined (__GNUC__) || defined (__clang__)
+  return __builtin_ctz (b);
+#else
   int l = 0;
-  while (l < G(depth) && !G(nleaves) [l])
+  while (!(b & 1))
+    b >>= 1, l++;
+  return l;
+#endif
+}
+
+static inline int highest_bit (uint32_t b)
+{
+#if defined (__GNUC__) || defined (__clang__)
+  return 31 - __builtin_clz (b);
+#else
+  int l = 0;
+  while (b >>= 1)
     l++;
-  G(depthmin) = l;
+  return l;
+#endif
 }
 
 void tree_destroy (void)
@@ -63,8 +106,7 @@ void tree_destroy (void)
   G(h0) = 1.;
   G(nb) = 0;
   G(nlb) = 0;
-  G(depth) = 0;
-  G(depthmin) = 0;
+  G(level_bits) = 0;
   G(depthmax) = 1;
   G(blockdepth) = 1;
 }
@@ -78,24 +120,14 @@ static BAMRNode * allocate_root (void)
   return node;
 }
 
-/* recount the deepest and coarsest levels of leaves */
-static void update_depth (void)
-{
-  while (G(depth) > 0 && !G(nleaves) [G(depth)])
-    G(depth)--;
-  update_depthmin ();
-}
-
 static int add_children (int IJKLargs)
 {
-  assert (level >= G(depthmin));
+  assert (level >= tree_get_depth_min ());
   if (level >= G(depthmax))
     return 0;
   BAMR_NODE_ENV ();
   assert (node && !is_parent ());
   node->flags |= BAMR_NODE_HAS_CHILDREN;
-  if (level == G (depth))
-    G (depth)++;
   Memindex m = & G (layers) [level + 1];
   int len = 1 << (level + 1);
   /*
@@ -127,10 +159,9 @@ static int divide_leaf (int IJKLargs)
   node->flags &= ~BAMR_NODE_LEAF;
   children_of ((Index) {IJKL})
     node->flags |= BAMR_NODE_LEAF;
-  G (nleaves) [level]--;
-  G (nleaves) [level + 1] += TREE_NCHILDREN;
+  terminal_add (level, -1);
+  terminal_add (level + 1, TREE_NCHILDREN);
   G (nlb) += TREE_NCHILDREN - 1;
-  update_depthmin ();
   /*
   .. The children's interiors: each scalar's prolongation from this node,
   .. its interior and ghosts. Then their ghosts: from their siblings, the
@@ -167,9 +198,8 @@ static void remove_children (int IJKLargs)
   parent->flags = (parent->flags & ~BAMR_NODE_HAS_CHILDREN) | BAMR_NODE_LEAF;
   G (nb) -= TREE_NCHILDREN;
   G (nlb) -= TREE_NCHILDREN - 1;
-  G (nleaves) [level + 1] -= TREE_NCHILDREN;
-  G (nleaves) [level]++;
-  update_depth ();
+  terminal_add (level + 1, - TREE_NCHILDREN);
+  terminal_add (level, 1);
 }
 
 /* is q inside the domain at its level? */
@@ -288,8 +318,7 @@ static int grid_init (int depthmax, int blockdepth)
     exit (-1);
   }
   G (depthmax)   = depthmax;
-  G (depth)      = 0;
-  G (depthmin)   = 0;
+  G (level_bits) = 0;
   G (blockdepth) = blockdepth;
 
   assert (GHOSTS >= 1 && 2 * GHOSTS <= bm);
@@ -305,7 +334,7 @@ static int grid_init (int depthmax, int blockdepth)
   mem_assign (m, IJK, 1 << level, node);
   G (nb)  = 1;
   G (nlb) = 1;
-  G (nleaves) [level] = 1;
+  terminal_add (level, 1);
   divide_leaf (IJKL);
   return 0;
 }
@@ -340,7 +369,7 @@ void tree_shift_resize (double x0, double y0, double z0, double h0)
 
 int tree_get_depth (void)
 {
-  return G(depth);
+  return G(level_bits) ? highest_bit (G(level_bits)) : 0;
 }
 
 int tree_get_depth_max (void)
@@ -350,7 +379,7 @@ int tree_get_depth_max (void)
 
 int tree_get_depth_min (void)
 {
-  return G(depthmin);
+  return G(level_bits) ? lowest_bit (G(level_bits)) : 0;
 }
 
 int tree_get_nblocks (void)

@@ -18,6 +18,16 @@ static int nblocks (int s)
   return n;
 }
 
+/* the levels holding leaves, by a traversal: what level_bits must be */
+static uint32_t scan_bits (void)
+{
+  uint32_t bits = 0;
+  morton (TREE_ROOT_INDEX)
+    if (node->flags & BAMR_NODE_LEAF)
+      bits |= (uint32_t) 1 << level;
+  return bits;
+}
+
 int main (void)
 {
   int nc = TREE_NCHILDREN;
@@ -71,8 +81,9 @@ int main (void)
     }
     { INDEX_UNPACK (p); CHECK (!divide_leaf (IJKL)); }    /* depthmax */
     CHECK (tree_get_depth () == 4 && tree_get_nblocks () == 1 + 4 * nc);
-    CHECK (tree_get_nleaves () == 1 + 4 * (nc - 1) && G (depthmin) == 1);
+    CHECK (tree_get_nleaves () == 1 + 4 * (nc - 1) && tree_get_depth_min () == 1);
     CHECK (nblocks (a) == tree_get_nblocks () && grid_scalar_check ());
+    CHECK (G (level_bits) == scan_bits () && G (level_bits) == 0x1e);
 
     /* children_of, neighborhood_of, neighbors_of */
     int n = 0;
@@ -86,7 +97,24 @@ int main (void)
     n = 0;
     neighborhood_of (centre, 1) { if (n == 2) break; n++; }
     CHECK (n == 2);
+
+    /* coarsening the chain back: depth follows the highest bit */
+    Index q = p;
+    for (int l = 3; l >= 1; l--) {
+      q.level--;
+      q.i >>= 1;
+#if dimension > 1
+      q.j >>= 1;
+#endif
+#if dimension > 2
+      q.k >>= 1;
+#endif
+      CHECK (tree_coarsen (q) == 1);
+      CHECK (G (level_bits) == scan_bits () && tree_get_depth () == l
+             && tree_get_depth_min () == 1);
+    }
     tree_destroy ();
+    CHECK (G (level_bits) == 0 && tree_get_depth () == 0 && tree_get_depth_min () == 0);
   }
   CHECK (!cur && !stack && !m && !c);
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);

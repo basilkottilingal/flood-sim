@@ -53,6 +53,14 @@ for d in 1 2 3; do
   run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $src
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
 done
+# levels are the bits of a uint32_t: BAMR_MAX_DEPTH 32 must not build
+if "$cwrap" -dimension=2 $flags -DBAMR_MAX_DEPTH=32 -c "$lib/tree.c" -o "$dir/t.o" 2> "$dir/log"; then
+  echo "FAIL tree.c built with BAMR_MAX_DEPTH=32"; fails=$((fails + 1))
+elif grep -q "BAMR_MAX_DEPTH must be below 32" "$dir/log"; then
+  echo "ok   tree.c refuses BAMR_MAX_DEPTH=32"
+else
+  echo "FAIL tree.c with BAMR_MAX_DEPTH=32: not the #error"; cat "$dir/log"; fails=$((fails + 1))
+fi
 # the tree on a pool that gives memory back with MADV_FREE
 for d in 2 3; do
   run ghosts $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_ghosts.c "$lib/tree.c" $src

@@ -240,9 +240,13 @@
   int  tree (int depthmax, int blockdepth);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
   void tree_destroy (void);
-  int  tree_get_depth (void);       /* deepest level with a node       */
+  int  tree_get_depth (void);       /* the finest level of a leaf: the
+                                       deepest with a node             */
   int  tree_get_depth_max (void);   /* the depth tree () was given     */
   int  tree_get_depth_min (void);   /* the coarsest level of a leaf    */
+                                    /* both from a bit set of the levels
+                                       with leaves, O(1): BAMR_MAX_DEPTH
+                                       must be below 32 */
   int  tree_get_nblocks (void);     /* nodes, leaves or not            */
   int  tree_get_nleaves (void);     /* leaf nodes                      */
   int  tree_get_block_m (void);     /* interior cells per block side,
