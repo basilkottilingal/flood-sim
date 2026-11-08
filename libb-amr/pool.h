@@ -37,7 +37,47 @@
   ..
   .. Alignment: 16 bytes, 64 (a cache line) from 64 bytes up, a page for large
   .. objects. Not thread safe: one pool, one thread at a time.
+  ..
+  ..
+  .. Releasing memory: _BAMR_MADV_DONTNEED_RECOMMENDED_
+  .. ---------------------------------------------------
+  ..
+  .. 1 (MADV_DONTNEED): as above. A large object over the hot limit goes
+  ..   cold at once: its pages go back to the system, and it reads as zero.
+  ..   Its first page faults back in at once, as the free list's link is
+  ..   written into it.
+  ..
+  .. 0 (MADV_FREE, Linux 4.5 on): a third list between the two,
+  ..
+  ..   muzzy  large objects over the hot limit, given back lazily: all but
+  ..          the first page (which holds the list's link) are advised
+  ..          MADV_FREE. The system takes those pages only if it runs short
+  ..          of memory; until then a write keeps a page, with no fault.
+  ..          Each page reads as what it held, or as zero if the system took
+  ..          it, and may turn to zero until it is written.
+  ..
+  ..   pool_alloc ()         a cold object, or a hot or muzzy one cleared with
+  ..                         memset, or a fresh one: never a muzzy one as it is
+  ..   pool_alloc_uninit ()  a hot one, or a muzzy one (no fault unless the
+  ..                         system took its pages), or a cold or fresh one
+  ..   pool_set_hot_max ()   hot objects over the limit go muzzy
+  ..   pool_trim ()          hot objects beyond keep, and every muzzy one, go
+  ..                         cold: memory really given back, and out of the
+  ..                         resident size (RSS), which counts muzzy pages
+  ..                         until the system takes them
+  ..
+  ..   For blocks that are written in full before being read, as a refinement
+  ..   writes its children: reuse costs no fault while memory is plentiful,
+  ..   and the memory still goes back when it is not. Without MADV_FREE in
+  ..   <sys/mman.h>, or if the kernel refuses it, objects go cold instead.
+  ..
+  .. The default is 1, the behaviour before the choice existed; build with
+  .. -D_BAMR_MADV_DONTNEED_RECOMMENDED_=0 to try MADV_FREE.
   */
+
+  #ifndef _BAMR_MADV_DONTNEED_RECOMMENDED_
+  #define _BAMR_MADV_DONTNEED_RECOMMENDED_  1
+  #endif
 
   #ifndef POOL_LARGE
   #define POOL_LARGE  (16 * 1024)
@@ -66,6 +106,9 @@
   size_t pool_used         (const Pool * p);  /* handed out, not freed     */
   size_t pool_hot          (const Pool * p);  /* freed, still in memory    */
   size_t pool_cold         (const Pool * p);  /* freed, pages given back   */
+  size_t pool_muzzy        (const Pool * p);  /* freed, pages given back
+                                                 lazily: 0 with
+                                                 MADV_DONTNEED            */
   size_t pool_size         (const Pool * p);  /* bytes per object, rounded */
 
 #endif

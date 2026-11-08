@@ -22,9 +22,14 @@ run () {   # name, dimension, extra flags, sources...
   fi
 }
 
-gcc -O2 -Wall -Wextra -I"$lib" tests/test_pool.c "$lib/pool.c" -o "$dir/pool" && "$dir/pool" > "$dir/pool.log"
-if [ $? = 0 ]; then echo "ok   pool: $(tail -1 "$dir/pool.log")"; sed 's/^/       /' "$dir/pool.log" | head -3
-else echo "FAIL pool"; cat "$dir/pool.log"; fails=$((fails + 1)); fi
+# the pool, giving memory back either way: MADV_DONTNEED (1) or MADV_FREE (0)
+for madv in 1 0; do
+  def="-D_BAMR_MADV_DONTNEED_RECOMMENDED_=$madv"
+  if gcc -O2 -Wall -Wextra -Werror $def -I"$lib" tests/test_pool.c "$lib/pool.c" -o "$dir/pool" 2> "$dir/pool.log" &&
+     "$dir/pool" > "$dir/pool.log" 2>&1; then
+    echo "ok   pool $def: $(tail -1 "$dir/pool.log")"; sed 's/^/       /' "$dir/pool.log" | sed -n 2,4p
+  else echo "FAIL pool $def"; cat "$dir/pool.log"; fails=$((fails + 1)); fi
+done
 
 for prec in "" "-DBAMR_SINGLE"; do
   for d in 1 2 3; do
@@ -47,6 +52,11 @@ for d in 1 2 3; do
   run blocks $d "-DBAMR_ALIGN=4" tests/test_blocks.c "$lib/tree.c" $src
   run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $src
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
+done
+# the tree on a pool that gives memory back with MADV_FREE
+for d in 2 3; do
+  run ghosts $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_ghosts.c "$lib/tree.c" $src
+  run adapt  $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_adapt.c "$lib/tree.c" $src
 done
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

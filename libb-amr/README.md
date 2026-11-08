@@ -135,9 +135,30 @@ How allocation works now:
 `tests/test_pool.c`, reusing 62 KiB blocks: about 26 µs a block before (15
 page faults each), 2.4 µs zeroed and 1.3 µs uninitialised now.
 
-What remains: blocks are still allocated zeroed, as no code fills a new block
-in full yet. Once refinement fills children from their parent, those blocks
-can use `pool_alloc_uninit ()`.
+Refinement fills children in full, so their blocks use
+`pool_alloc_uninit ()`.
+
+**Lazy release, to be decided** (`_BAMR_MADV_DONTNEED_RECOMMENDED_` in
+`pool.h`):
+- **1, the default:** objects over the hot limit go cold with
+  `MADV_DONTNEED`.
+- **0:** they go to a "muzzy" list with `MADV_FREE`, all pages but the first
+  (which holds the list's link). The system takes those pages only under
+  memory pressure, so reuse costs no fault while memory is plentiful.
+  `pool_trim ()` still gives everything back for real. The drawback: muzzy
+  pages count in the RSS until the system takes them.
+
+Measured by `tests/test_pool.c` (62 KiB blocks, over the hot limit, then
+reused uninitialised):
+
+| | faults on reuse | free | alloc |
+|---|---|---|---|
+| `MADV_DONTNEED` | 15 per block | 8.6 µs | 27.5 µs |
+| `MADV_FREE` | 0 | 6.3 µs | 3.9 µs |
+
+That is without memory pressure. Under pressure (a cgroup with a small
+`memory.max`), `MADV_FREE` should fault like `MADV_DONTNEED`; this has not
+been measured yet.
 
 The reasoning, as planned:
 
