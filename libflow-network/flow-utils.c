@@ -1,6 +1,7 @@
 #include "flow-utils.h"
 #include "libview/pgm.h"
 #include "liballoc/grid.h"
+#include "libutils/bits.h"
 
 #include <stdio.h>
 #include <float.h>
@@ -11,32 +12,10 @@
 #include <assert.h>
 #include <math.h>
 
-# if defined(__GNUC__) || defined(__clang__)
-#   if defined(__has_builtin)
-#     if __has_builtin(__builtin_ctz)
-#       define HAVE_CTZ
-#     endif
-#   endif
-# endif
-
+/* the lowest set bit of *v, cleared from it; -1 if none: libutils/bits.h */
 int pop_bit (uint8_t * v)
 {
-  if (*v == 0)
-    return -1;
-
-  #ifdef HAVE_CTZ
-  int idx = __builtin_ctz ((unsigned int)*v);
-  #else
-  static const int8_t debruijn_table[8] =
-    {
-      0, 1, 6, 2, 7, 5, 4, 3
-    };
-  uint8_t isolated = (uint8_t) (*v & (-(int8_t)*v));
-  int idx = debruijn_table [(uint8_t)(isolated * 0x1DU) >> 5];
-  #endif
-
-  *v = (uint8_t)(*v & (*v - 1));
-  return idx;
+  return bits_pop_lowest_u8 (v);
 }
 
 /*

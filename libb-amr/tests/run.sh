@@ -6,8 +6,9 @@ cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
 lib=$(pwd)
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c"
-flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib"
+# libutils (bits.h) is a sibling of libb-amr: included as "libutils/bits.h"
+src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
+flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib -I$lib/.."
 fails=0
 
 run () {   # name, dimension, extra flags, sources...

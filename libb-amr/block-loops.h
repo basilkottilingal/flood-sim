@@ -175,6 +175,7 @@
   #include "tree.h"
   #include "grid-scalar.h"
   #include "morton-curve.h"
+  #include "libutils/bits.h"
 
   /* the shape of a block: see 1. Layout */
   typedef struct
@@ -195,7 +196,7 @@
   /* vectors of v Reals: 1 gives the compact layout */
   static inline BlockShape block_shape_aligned (int m, int g, int v)
   {
-    assert (m > 0 && (m & (m - 1)) == 0 && g >= 0 && v > 0);
+    assert (m > 0 && bits_is_pow2_u32 ((uint32_t) m) && g >= 0 && v > 0);
     BlockShape b;
     b.m = m;
     b.g = g;

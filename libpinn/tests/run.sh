@@ -10,8 +10,8 @@ lib=$(pwd)
 amr=$lib/../libb-amr
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-src="$amr/tree.c $amr/grid-scalar.c $amr/morton-curve.c $amr/memindex.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
-flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -I$lib -I$amr"
+src="$amr/tree.c $amr/grid-scalar.c $amr/morton-curve.c $amr/memindex.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c $lib/../libutils/bits.c"
+flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -I$lib -I$amr -I$lib/.."
 pyc="$($py-config --includes)"
 pyl="$($py-config --ldflags --embed)"
 export PYTHONPATH="$lib/tests${PYTHONPATH:+:$PYTHONPATH}"

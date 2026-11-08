@@ -22,7 +22,7 @@ pinn.o: pinn.c pinn.h Makefile
 	$(CC) $(CFLAGS) $(PY_CFLAGS) -DPINN_PYDIR='"$(PYDIR)"' -c $< -o $@
 
 pinn-bamr.o: pinn-bamr.c pinn-bamr.h pinn.h Makefile
-	$(CWRAP) -dimension=$(DIMENSION) $(CFLAGS) -I. -I../libb-amr -c $< -o $@
+	$(CWRAP) -dimension=$(DIMENSION) $(CFLAGS) -I. -I.. -I../libb-amr -c $< -o $@
 
 print-ldlibs:
 	@echo $(PINN_LDLIBS)
