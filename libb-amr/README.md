@@ -124,6 +124,12 @@ the same values (checksum). Results and their reading are in
 The sparse cases need about 1.5 GB for memindex. Cache and dTLB misses are
 printed only if `kernel.perf_event_paranoid` is 2 or less.
 
+    sh tests/bench_balanced.sh [RAW]
+
+It does the same on 2:1 balanced trees, built as `tree.c` builds them. It
+times a depth-first Morton traversal, a pass over a level list, and the
+neighbour box of every leaf. Results are in `tests/bench_balanced.md`.
+
 
 
 # Future plans
@@ -356,7 +362,12 @@ steps, in order:
 2. **Use cursors in the hot loops.** `block-ghosts` gathers neighbours and
    `adapt` checks 2:1 balance: both visit nearby indices, so one cursor per
    level makes most lookups a single load. Cursors must be reset after a
-   `vmem_free ()`, so reset them at the end of each regrid pass.
+   `vmem_free ()`, so reset them at the end of each regrid pass. Each OpenMP
+   thread needs its own cursors.
+   - For the neighbour box, add a box cursor that holds the up to 2^d bottom
+     nodes a leaf's box can touch. On balanced trees the box is the one place
+     where memindex is still faster, by up to 36% (see On 2:1 balanced
+     trees).
 3. **Compact nodes for sparse levels.** A node holds a 64-bit mask and only
    its occupied children, found by rank (`popcount` from libutils/bits.h).
    - It would cut the 2–4 kB per isolated point by up to 8 times.
@@ -549,6 +560,43 @@ blocks, and `block-ghosts` gathers each block's neighbourhood once. So the
 slower lookups of voxel are mostly off the hot path, while its memory and
 build costs are on it, at every regrid. Confirming that needs voxel wired into
 `tree.c` (see Future plans).
+
+### On 2:1 balanced trees
+
+The random cases above have isolated points, which a 2:1 balanced tree never
+has. In such a tree, families are whole and lie inside one bottom node, and
+every refined cell has neighbours around it. `tests/bench_balanced.sh` builds
+balanced trees as `tree.c` does, each level in its own array, and times what
+libb-amr actually does with them. The full table is in
+`tests/bench_balanced.md`.
+
+| case (nodes) | B/node mem / voxel | Morton dfs ns/node: mem / voxel / voxel+cursor | neighbour box ns/leaf: mem / voxel / voxel+cursor |
+|---|--:|--:|--:|
+| 2D uniform, depth 10 (1.4M) | 9 / 8 | 5.5 / 8.1 / 4.7 | 38 / 61 / 52 |
+| 2D circle, depth 15 (0.64M) | 615 / 25 | 20.4 / 13.8 / 7.1 | 106 / 101 / 77 |
+| 2D river, depth 15 (1.3M) | 234 / 23 | 11.7 / 12.5 / 6.6 | 71 / 92 / 73 |
+| 3D uniform, depth 6 (0.3M) | 77 / 8 | 32.9 / 25.2 / 7.3 | 272 / 310 / 274 |
+| 3D sphere, depth 9 (2.3M) | 252 / 14 | 44.5 / 28.3 / 8.5 | 310 / 462 / 392 |
+| 3D river, depth 10 (0.37M) | 446 / 18 | 38.9 / 28.7 / 8.6 | 321 / 472 / 393 |
+
+- **Morton traversal.** With a cursor per level, voxel is faster in every
+  case: 1.2x on the uniform 2D tree, 1.8-2.9x on the 2D fronts, and 4.5-5.3x
+  in 3D. A family's children are in one voxel node, while memindex reads them
+  from 2 (2D) or 4 (3D) rows. Over a level list, as `ghosts_update ()` walks,
+  voxel with a cursor is 1.2-3x faster.
+- **Neighbour box** (3^d - 1 neighbours per leaf, about a fifth of them
+  falling back to a coarser level). memindex keeps an edge here. With
+  cursors, voxel ranges from 28% faster (2D circle) to 36% slower (2D
+  uniform), and is up to 26% slower in 3D. The worst gap is about 80 ns per
+  leaf. That is an estimated percent or less of the ghost copies that
+  follow, for blocks of 16^3.
+- **Memory and build** are as above: 10-25x less memory, and 12-25x faster
+  builds, on every non-uniform tree.
+
+So in a Morton-ordered pass over a balanced tree, voxel's slower lookups do
+not show; they show only in the neighbour box, and there by less than the
+work done per block. A box cursor would narrow that gap: it would hold the
+up to 2^d bottom nodes that a leaf's box can touch, fetched once per leaf.
 
 ## Recommendation
 
