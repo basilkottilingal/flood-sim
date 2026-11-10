@@ -1,7 +1,8 @@
 #!/bin/sh
-# memindex against voxel-memindex: run from libb-amr:  sh tests/bench_memindex.sh [RAW]
-# Each case runs once per implementation, in its own process. The two
-# must agree (checksum). RAW, if given, keeps the key=value lines.
+# memindex against voxel-memindex and nano-vdb (dense and compact):
+# run from libb-amr:  sh tests/bench_memindex.sh [RAW]
+# Each case runs once per implementation, in its own process. All must
+# agree (checksum). RAW, if given, keeps the key=value lines.
 # Cache and dTLB misses need kernel.perf_event_paranoid <= 2, e.g.
 #   sudo sysctl kernel.perf_event_paranoid=1
 # The sparse cases cost memindex a page and a page-table page per row
@@ -12,10 +13,13 @@ trap 'rm -rf "$dir"' EXIT
 raw=${1:-$dir/raw}
 : > "$raw"
 
+# twice: nano-vdb's dense nodes, and its compact ones (-DNVDB_COMPACT)
 for d in 2 3; do
-  gcc -O2 -std=gnu11 -Wall -Wextra -Werror -Ddimension=$d -D_GNU_SOURCE -I"$lib" \
-    tests/bench_memindex.c memindex.c voxel-memindex.c pool.c -lm \
-    -o "$dir/bench$d" || exit 1
+  for c in "" "-DNVDB_COMPACT"; do
+    gcc -O2 -mpopcnt -std=gnu11 -Wall -Wextra -Werror -Ddimension=$d -D_GNU_SOURCE \
+      -I"$lib" $c tests/bench_memindex.c memindex.c voxel-memindex.c nano-vdb.c pool.c -lm \
+      -o "$dir/bench$d${c:+c}" || exit 1
+  done
 done
 
 # dimension pattern level [N]
@@ -35,8 +39,15 @@ cases="
 
 echo "$cases" | while read d pat lev n; do
   [ -z "$d" ] && continue
-  for impl in mem voxel; do
-    if ! "$dir/bench$d" $impl $pat $lev $n >> "$raw" 2> "$dir/err"; then
+  for impl in mem voxel nvdb nvdb-compact; do
+    bin="$dir/bench$d" name=$impl
+    [ $impl = nvdb-compact ] && bin="$dir/bench${d}c" name=nvdb
+    # nano-vdb's dense nodes on scattered 3D points: about 300 KB a point
+    if [ $impl = nvdb ] && [ $d = 3 ] && [ $pat = random ]; then
+      echo "skip nvdb ${d}D $pat L$lev: dense VDB nodes, ~300 KB per isolated point"
+      continue
+    fi
+    if ! "$bin" $name $pat $lev $n >> "$raw" 2> "$dir/err"; then
       # memindex runs out of memory first on the large sparse cases
       echo "FAIL $impl ${d}D $pat L$lev $n (killed: out of memory?)"; cat "$dir/err"
     fi

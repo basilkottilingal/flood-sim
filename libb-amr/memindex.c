@@ -70,6 +70,9 @@ The `mem_destroy()` function frees all the memory allocated by a given
 
 void mem_destroy (Memindex m, int len)
 {
+  (void) len;                 /* 1D: the rows are m->b alone */
+  if (!m->b)
+    return;                   /* nothing was ever assigned */
 #if dimension > 1
   for (int i = 0; i < len; i++)
     if (m->b[i]) {

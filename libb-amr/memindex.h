@@ -71,6 +71,47 @@
   #endif // dimension == 3
 
   Memindex mem_new (int len);
-  void mem_destroy (Memindex m, int len);
+  void mem_destroy (Memindex m, int len);     /* an empty index is fine */
+
+  /*
+  .. The interface shared with voxel-memindex.h and nano-vdb.h (see
+  .. level-index.h): mem_get () is the pointer at an index, or NULL, out of
+  .. range too. memindex finds an index by arithmetic alone, so its cursor
+  .. holds nothing and mem_get_cursor () is mem_get ().
+  */
+  typedef struct { int unused; } MemCursor;
+
+  #if dimension == 1
+  static inline void * mem_get (Memindex m, int i)
+  {
+    return mem_allocated (m, i) ? m->b[i] : NULL;
+  }
+  static inline void * mem_get_cursor (Memindex m, MemCursor * c, int i)
+  {
+    (void) c;
+    return mem_get (m, i);
+  }
+  #elif dimension == 2
+  static inline void * mem_get (Memindex m, int i, int j)
+  {
+    return mem_allocated (m, i, j) ? m->b[i][j] : NULL;
+  }
+  static inline void * mem_get_cursor (Memindex m, MemCursor * c, int i, int j)
+  {
+    (void) c;
+    return mem_get (m, i, j);
+  }
+  #else
+  static inline void * mem_get (Memindex m, int i, int j, int k)
+  {
+    return mem_allocated (m, i, j, k) ? m->b[i][j][k] : NULL;
+  }
+  static inline void * mem_get_cursor (Memindex m, MemCursor * c, int i, int j,
+                                       int k)
+  {
+    (void) c;
+    return mem_get (m, i, j, k);
+  }
+  #endif
 
 #endif

@@ -108,17 +108,28 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   random refining and coarsening, and `adapt_wavelet ()` on a front: it
   settles, keeps the integral, and coarsens a constant field to minlevel.
 
-It also runs `blocks`, `ghosts` and `adapt` with OpenMP (2D, 3D) and with
-`-DBAMR_ALIGN=4` (1D to 3D).
+- `test_index.c`: the three level indices side by side (memindex,
+  voxel-memindex, nano-vdb, dense and compact) against a reference hash
+  map: random assigns, overwrites and frees, clustered and scattered; every
+  entry and the indices around it, by get and by cursor, out of range too;
+  emptying (nano-vdb gives back every node), destroying and reusing; levels
+  on both sides of nano-vdb's hashed root (above 4096).
 
-### Benchmark: memindex against voxel-memindex
+It also runs `blocks`, `ghosts` and `adapt` with OpenMP (2D, 3D) and with
+`-DBAMR_ALIGN=4` (1D to 3D), and `tree`, `blocks`, `ghosts` and `adapt` on
+the other level indices: `-DBAMR_INDEX=2` (voxel-memindex), `3` (nano-vdb)
+and `3 -DNVDB_COMPACT` (2D, 3D).
+
+### Benchmark: the level indices
 
     sh tests/bench_memindex.sh [RAW]
 
 It builds `tests/bench_memindex.c` with gcc, in 2D and 3D, and runs each case
-(dense, shell, river, random) once per implementation, each in its own
-process. It prints a table, and checks that the two implementations return
-the same values (checksum). Results and their reading are in
+(dense, shell, river, random) once per implementation (memindex,
+voxel-memindex, nano-vdb, nano-vdb compact), each in its own process. It
+prints a table, and checks that every implementation returns the same values
+as memindex (checksum). nano-vdb's dense nodes skip the scattered 3D cases:
+about 300 KB per isolated point. Results and their reading are in
 `tests/bench_memindex.md`, summed up below in
 [Measured: memindex against voxel-memindex](#measured-memindex-against-voxel-memindex).
 The sparse cases need about 1.5 GB for memindex. Cache and dTLB misses are
@@ -131,6 +142,53 @@ times a depth-first Morton traversal, a pass over a level list, and the
 neighbour box of every leaf. Results are in `tests/bench_balanced.md`.
 
 
+## Level index: memindex, voxel-memindex, nano-vdb
+
+Each level of the tree has an index: a sparse (2^level)^d array of node
+pointers. `level-index.h` picks the implementation when compiling, and
+`tree.c` and `tree.h` use only its interface:
+
+| `-DBAMR_INDEX=` | files | structure |
+|---|---|---|
+| `1` (default) | `memindex.[ch]` | per-level virtual arrays, as Basilisk: `d` loads, the system commits pages as they are written |
+| `2` | `voxel-memindex.[ch]` | a tree of 64-way nodes (4^3, 8^2, 2^6), 512 bytes each, from a pool |
+| `3` | `nano-vdb.[ch]` | a VDB tree: root hash, upper 32^d, lower 16^d, leaf 8^d nodes, each with a mask of its occupied slots; `-DNVDB_COMPACT` stores only the occupied children, found by rank (`popcount`) |
+
+The interface, for a `LevelIndex * m` (IJK: `i`, `j`, `k` as the dimension
+has them; `len`: `1 << level`):
+
+| | |
+|---|---|
+| `lidx_get (m, IJK)` | the pointer, or `NULL`, out of range too: one walk |
+| `lidx_allocated (m, IJK)` | `lidx_get () != NULL` |
+| `lidx_assign (m, IJK, len, p)` | `p`, not `NULL`, at IJK |
+| `lidx_free (m, IJK, len, p)` | IJK empty again; empty nodes go back at once |
+| `lidx_destroy (m)` | everything freed; `m` empty and reusable |
+| `lidx_get_cursor (m, &c, IJK)` | `lidx_get ()` through a `LevelCursor c` |
+
+A cursor makes nearby lookups cheaper, and is reset (`{0}`) after any
+`lidx_free ()` or `lidx_destroy ()` of its index:
+- memindex: nothing to keep, `mem_get ()`;
+- voxel-memindex: the last bottom node (an index in the same 64 is one
+  load);
+- nano-vdb: the last leaf, lower and upper node, as VDB's `ValueAccessor`
+  (the same leaf is one load, the same lower node two).
+
+Each implementation also keeps its own names (`mem_`, `vmem_`, `nvdb_`),
+so that the three can be used side by side, as `tests/test_index.c` and the
+benchmarks do. `BAMR_INDEX_NAME` names the one chosen.
+
+**nano-vdb, in short.** An index's bits are cut as VDB cuts a coordinate:
+bits 2..0 pick a leaf slot, 6..3 a lower-node slot, 11..7 an upper-node slot,
+the first index most significant. While `len <= 4096` there is a single
+upper node; above, the root is a hash table of upper nodes keyed by the
+indices `>> 12` (open addressing, deletion by backward shift). Dense nodes
+are tables of every slot, as OpenVDB's internal nodes: one load per level,
+but 32^3 slots (256 KiB) for a 3D upper node. Compact nodes hold a mask, a
+running count of set bits per 64-bit word, and only the occupied children;
+slot s is at `prefix [s/64] + popcount (mask [s/64] & ((1 << s%64) - 1))`.
+Build compact nodes with `-mpopcnt` or `-march=native`: otherwise gcc calls
+a library function for each popcount.
 
 # Future plans
 
@@ -351,14 +409,13 @@ change leaks blocks.
 beat memindex on memory and build time for every level that is not full. Next
 steps, in order:
 
-1. **Wire it into `tree.c` behind a switch** (`-DBAMR_VOXEL_MEMINDEX`).
-   - `grid_info_layers` becomes an array of `struct _VMemindex`.
-   - `tree_destroy ()` calls `vmem_destroy ()`.
-   - `BAMR_NODE_ENV ()` makes a single `vmem_get ()` instead of
-     `tree_is_allocated ()` followed by `tree_node ()`.
-   - Then run `tests/run.sh`, and time `adapt` and `ghosts_update ()` on a
-     sparse 3D case, with each backend. That is the measure that decides,
-     rather than isolated lookups.
+1. **Wire it into `tree.c` behind a switch.** Done, with nano-vdb too:
+   `-DBAMR_INDEX=2` or `3` (see
+   [Level index](#level-index-memindex-voxel-memindex-nano-vdb)).
+   `BAMR_NODE_ENV ()` makes a single lookup. The tests pass on every index.
+   What remains: time `adapt` and `ghosts_update ()` on a sparse 3D case
+   with each index. That is the measure that decides, rather than isolated
+   lookups.
 2. **Use cursors in the hot loops.** `block-ghosts` gathers neighbours and
    `adapt` checks 2:1 balance: both visit nearby indices, so one cursor per
    level makes most lookups a single load. Cursors must be reset after a
@@ -501,6 +558,7 @@ families are copied into Morton order.
 | D. hashed | O(1) expected | poor alone | none | O(1) | fair |
 | E. families + compaction | walk the tree | good after compaction | none | O(1) | fair |
 | F. 64-way node tree (`voxel-memindex`) | ceil(L/B) loads; one with a cursor | good | per node of 64 | O(depth) | fair |
+| G. VDB tree (`nano-vdb`) | 4 loads (root hash, upper, lower, leaf); one with the accessor | good | dense: 32^d-slot tables; compact: masks only | O(1) per level; compact: a shift in a node | good (fixed depth) |
 
 ## Measured: memindex against voxel-memindex
 
@@ -516,10 +574,12 @@ not wired into `tree.c` or the `Makefile`.
     index in the same group of 64 costs a single load.
 - Empty nodes go back to the pool as soon as their last entry is freed.
 
-`tests/bench_memindex.sh` compares the two (see Tests). The numbers below come
+`tests/bench_memindex.sh` compares them (see Tests). The numbers below come
 from an i7-8650U laptop with about 2.3 GB free, Linux 6.8, transparent huge
-pages set to `[madvise]`, and memindex with `MADV_NOHUGEPAGE`. Each case ran
-once. The full table is in `tests/bench_memindex.md`.
+pages set to `[madvise]`, and memindex with `MADV_NOHUGEPAGE`, on a quiet
+machine (2026-11-08). Each case ran once. `tests/bench_memindex.md` now holds
+the later run with nano-vdb too (see
+[With nano-vdb](#with-nano-vdb)).
 
 | case (points) | B/point mem / voxel | build ns/point mem / voxel | shuffled lookup ns mem / voxel | neighbours ns mem / voxel+cursor | absent entry ns mem / voxel |
 |---|--:|--:|--:|--:|--:|
@@ -567,8 +627,9 @@ The random cases above have isolated points, which a 2:1 balanced tree never
 has. In such a tree, families are whole and lie inside one bottom node, and
 every refined cell has neighbours around it. `tests/bench_balanced.sh` builds
 balanced trees as `tree.c` does, each level in its own array, and times what
-libb-amr actually does with them. The full table is in
-`tests/bench_balanced.md`.
+libb-amr actually does with them. The table below is from 2026-11-09, on a
+quiet machine; `tests/bench_balanced.md` now holds the later run with
+nano-vdb too.
 
 | case (nodes) | B/node mem / voxel | Morton dfs ns/node: mem / voxel / voxel+cursor | neighbour box ns/leaf: mem / voxel / voxel+cursor |
 |---|--:|--:|--:|
@@ -597,6 +658,37 @@ So in a Morton-ordered pass over a balanced tree, voxel's slower lookups do
 not show; they show only in the neighbour box, and there by less than the
 work done per block. A box cursor would narrow that gap: it would hold the
 up to 2^d bottom nodes that a leaf's box can touch, fetched once per leaf.
+
+### With nano-vdb
+
+Both benchmarks were run again (2026-11-10) with nano-vdb, dense and compact
+(`-DNVDB_COMPACT`), all built with `-mpopcnt`. A browser was busy on the
+machine, so the times are slower than above; compare implementations within a
+case. Full tables and readings: `tests/bench_memindex.md`,
+`tests/bench_balanced.md`.
+
+| balanced tree (nodes) | B/node mem / voxel / nvdb / nvdb-compact | dfs+cursor ns/node mem / voxel / nvdb / compact | neighbour box+cursor ns/leaf mem / voxel / nvdb / compact |
+|---|--:|--:|--:|
+| 2D circle, depth 15 (0.64M) | 615 / 25 / 30 / 13 | 54 / 11.6 / 9.8 / 11.4 | 228 / 135 / 103 / 107 |
+| 2D river, depth 15 (1.3M) | 234 / 23 / 28 / 13 | 46 / 10.3 / 12.5 / 10.5 | 207 / 95 / 100 / 98 |
+| 3D sphere, depth 9 (2.3M) | 252 / 14 / 26 / 12 | 53 / 20.7 / 27.2 / 25.0 | 629 / 614 / 561 / 604 |
+| 3D river, depth 10 (0.37M) | 446 / 18 / 44 / 14 | 45 / 21.0 / 26.7 / 24.5 | 657 / 624 / 587 / 612 |
+
+(memindex has no cursor: its dfs and box columns are plain lookups.)
+
+- **Compact nano-vdb takes the least memory** on every non-uniform tree,
+  12-14 B per node, and on sparse single levels (12-22 B per point on
+  shells and rivers). Its one weak case is scattered 3D points on deep
+  levels (7.4 KB a point at level 20: the 4 KiB of mask bits of a 3D upper
+  node), which a balanced tree does not have.
+- **Dense nano-vdb** costs 26-44 B per node (its 32^3-slot upper tables),
+  frees fastest, and is hopeless for scattered 3D points (about 300 KB
+  each).
+- **The whole-path accessor makes nano-vdb the fastest on the 3D neighbour
+  box**: 11-19% faster than memindex, where voxel's bottom-only cursor is
+  2-13% faster.
+- **Traversal** with cursors: the three trees are close (voxel usually
+  first), all 1.7-5.5 times faster than memindex.
 
 ## Recommendation
 

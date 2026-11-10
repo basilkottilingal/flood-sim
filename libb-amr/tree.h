@@ -1,7 +1,7 @@
 #ifndef _BAMR_H_
 #define _BAMR_H_
 
-  #include "memindex.h"
+  #include "level-index.h"
   #include "real.h"
 
   /*
@@ -51,7 +51,7 @@
   #define IJKL             IJK, level
   #define IJKLargs         IJKargs, int level
 
-  extern struct _Memindex grid_info_layers [BAMR_MAX_DEPTH + 1];
+  extern LevelIndex grid_info_layers [BAMR_MAX_DEPTH + 1];
 
   typedef struct
   {
@@ -80,24 +80,28 @@
     void *** s;     /* s [id/w][id%w]: the block of scalar id, or NULL */
   } BAMRNode;
 
+  /*
+  .. tree_node (IJKL): the node there, or NULL. tree_is_allocated (IJKL):
+  .. whether there is one. Both through the level's index (level-index.h).
+  */
   #if dimension == 1
     #define tree_node(i, level)                                   \
-      ((BAMRNode *) mem_data (&grid_info_layers [level], i))
+      ((BAMRNode *) lidx_get (&grid_info_layers [level], i))
     #define tree_is_allocated(i, level)                           \
       ((level) <= BAMR_MAX_DEPTH &&                               \
-        mem_allocated (&grid_info_layers [level], i))
+        lidx_allocated (&grid_info_layers [level], i))
   #elif dimension == 2
     #define tree_node(i, j, level)                                \
-      ((BAMRNode *) mem_data (&grid_info_layers [level], i, j))
+      ((BAMRNode *) lidx_get (&grid_info_layers [level], i, j))
     #define tree_is_allocated(i, j, level)                        \
       ((level) <= BAMR_MAX_DEPTH &&                               \
-        mem_allocated (&grid_info_layers [level], i, j))
+        lidx_allocated (&grid_info_layers [level], i, j))
   #else
     #define tree_node(i, j, k, level)                             \
-      ((BAMRNode *) mem_data (&grid_info_layers [level], i, j, k))
+      ((BAMRNode *) lidx_get (&grid_info_layers [level], i, j, k))
     #define tree_is_allocated(i, j, k, level)                     \
       ((level) <= BAMR_MAX_DEPTH &&                               \
-        mem_allocated (&grid_info_layers [level], i, j, k))
+        lidx_allocated (&grid_info_layers [level], i, j, k))
   #endif
 
   #define tree_has_children(n)                                    \
@@ -112,8 +116,8 @@
   .. node, the node there or NULL, and sblocks, its scalar blocks or NULL.
   */
   #define BAMR_NODE_ENV()                                         \
-      BAMRNode * node = TREE_CALL (tree_is_allocated, IJKL) ?     \
-        TREE_CALL (tree_node, IJKL) : NULL;                       \
+      BAMRNode * node = level <= BAMR_MAX_DEPTH ?                 \
+        TREE_CALL (tree_node, IJKL) : NULL;     /* one lookup */  \
       void *** sblocks = node ? node->s : NULL;                   \
       (void) sblocks;
 

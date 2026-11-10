@@ -1,7 +1,8 @@
 #!/bin/sh
-# memindex against voxel-memindex on 2:1 balanced trees: run from libb-amr:
+# memindex against voxel-memindex and nano-vdb (dense and compact) on 2:1
+# balanced trees: run from libb-amr:
 #   sh tests/bench_balanced.sh [RAW]
-# Each case runs once per implementation, in its own process; the two must
+# Each case runs once per implementation, in its own process; all must
 # agree (checksum). RAW, if given, keeps the key=value lines. memindex
 # needs up to about 1 GB for the cases below.
 lib=$(pwd)
@@ -10,10 +11,13 @@ trap 'rm -rf "$dir"' EXIT
 raw=${1:-$dir/raw}
 : > "$raw"
 
+# twice: nano-vdb's dense nodes, and its compact ones (-DNVDB_COMPACT)
 for d in 2 3; do
-  gcc -O2 -std=gnu11 -Wall -Wextra -Werror -Ddimension=$d -D_GNU_SOURCE -I"$lib" \
-    tests/bench_balanced.c memindex.c voxel-memindex.c pool.c -lm \
-    -o "$dir/bench$d" || exit 1
+  for c in "" "-DNVDB_COMPACT"; do
+    gcc -O2 -mpopcnt -std=gnu11 -Wall -Wextra -Werror -Ddimension=$d -D_GNU_SOURCE \
+      -I"$lib" $c tests/bench_balanced.c memindex.c voxel-memindex.c nano-vdb.c pool.c -lm \
+      -o "$dir/bench$d${c:+c}" || exit 1
+  done
 done
 
 # dimension pattern depth
@@ -29,8 +33,10 @@ cases="
 
 echo "$cases" | while read d pat depth; do
   [ -z "$d" ] && continue
-  for impl in mem voxel; do
-    if ! "$dir/bench$d" $impl $pat $depth >> "$raw" 2> "$dir/err"; then
+  for impl in mem voxel nvdb nvdb-compact; do
+    bin="$dir/bench$d" name=$impl
+    [ $impl = nvdb-compact ] && bin="$dir/bench${d}c" name=nvdb
+    if ! "$bin" $name $pat $depth >> "$raw" 2> "$dir/err"; then
       echo "FAIL $impl ${d}D $pat depth $depth (killed: out of memory?)"; cat "$dir/err"
     fi
   done

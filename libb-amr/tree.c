@@ -31,7 +31,7 @@ static int G(depthmax) = 1;   /* max depth forced by user         */
 static int G(blockdepth) = 1; /* 2^blockdepth cells per block side */
 static int G(nleaves) [BAMR_MAX_DEPTH + 1];
 static uint32_t G(level_bits) = 0;
-struct _Memindex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
+LevelIndex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;       /* the root, which has no siblings */
 static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
 
@@ -65,10 +65,7 @@ void tree_destroy (void)
 {
   for (int l = 0; l <= BAMR_MAX_DEPTH; ++l)
   {
-    Memindex m = & G(layers) [l];
-    if (m->b)
-      mem_destroy (m, m->len);
-    *m = (struct _Memindex) {0};
+    lidx_destroy (& G(layers) [l]);
     G(nleaves) [l] = 0;
   }
   /* every node and block goes with its pool */
@@ -104,7 +101,7 @@ static int add_children (int IJKLargs)
   BAMR_NODE_ENV ();
   assert (node && !is_parent ());
   node->flags |= BAMR_NODE_HAS_CHILDREN;
-  Memindex m = & G (layers) [level + 1];
+  LevelIndex * m = & G (layers) [level + 1];
   int len = 1 << (level + 1);
   /*
   .. The family at once: its nodes in one object, child c the c-th, and for
@@ -120,7 +117,7 @@ static int add_children (int IJKLargs)
   children_of ((Index) {IJKL})
   {
     assert (!node);
-    mem_assign (m, IJK, len, &family [c++]);
+    lidx_assign (m, IJK, len, &family [c++]);
   }
   G (nb) += TREE_NCHILDREN;
   return 1;
@@ -167,7 +164,7 @@ static void remove_children (int IJKLargs)
     if (!c)
       family = node;                  /* child 0 starts the family's object */
     t [c++] = node->s;
-    mem_free (& G (layers) [level], IJK, 1 << level, node);
+    lidx_free (& G (layers) [level], IJK, 1 << level, node);
   }
   grid_scalar_family_free (t);
   pool_free (pool_family, family);
@@ -304,10 +301,10 @@ static int grid_init (int depthmax, int blockdepth)
 
   Index root = {TREE_ROOT};
   INDEX_UNPACK (root);
-  Memindex m = & G (layers) [level];
+  LevelIndex * m = & G (layers) [level];
   BAMRNode * node = allocate_root ();
   node->flags |= BAMR_NODE_LEAF;
-  mem_assign (m, IJK, 1 << level, node);
+  lidx_assign (m, IJK, 1 << level, node);
   G (nb)  = 1;
   G (nlb) = 1;
   terminal_add (level, 1);

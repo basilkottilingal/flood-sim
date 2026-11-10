@@ -6,7 +6,7 @@
 .. being refined first (tree_refine () and covering () in tree.c).
 ..
 ..   bench_balanced IMPL PATTERN DEPTH
-..     IMPL     mem | voxel
+..     IMPL     mem | voxel | nvdb (nano-vdb; -DNVDB_COMPACT: nvdb-compact)
 ..     PATTERN  shell   a circle (2D) or sphere (3D) of radius 0.35
 ..              river   a meandering line (2D) or tube (3D), two finest cells wide
 ..              dense   every cell refined: a uniform tree
@@ -25,11 +25,12 @@
 ..             each falling back to the coarser node covering it
 ..             (block_ghosts () and covering ())
 ..   free      every node, children first
-.. For voxel, dfs, list and nbr run again with one cursor per level
+.. For voxel and nvdb, dfs, list and nbr run again with one cursor (voxel)
+.. or accessor (nano-vdb) per level
 .. (dfscur, listcur, nbrcur). One line of key=value pairs out:
 .. tests/bench_balanced.sh tabulates.
 .. Build: gcc -O2 -Ddimension=D -D_GNU_SOURCE -I. tests/bench_balanced.c
-..        memindex.c voxel-memindex.c pool.c -lm
+..        memindex.c voxel-memindex.c nano-vdb.c pool.c -lm [-DNVDB_COMPACT]
 */
 
 #include <stdio.h>
@@ -42,6 +43,7 @@
 
 #include "memindex.h"
 #include "voxel-memindex.h"
+#include "nano-vdb.h"
 
 #define D    dimension
 #define NCH  (1 << D)
@@ -65,37 +67,53 @@ typedef struct { int flags; int id; } Rec;      /* flags & 1: a leaf */
 
 /* ---- the measured index, one array per level ------------------------ */
 
-static int use_voxel;
+enum { MEM, VOXEL, NVDB };
+static int impl;
 static struct _Memindex mi [MAXL + 1];
 static struct _VMemindex vi [MAXL + 1];
+static struct _NanoVDB ni [MAXL + 1];
+
+#ifdef NVDB_COMPACT
+# define NVDB_NAME "nvdb-compact"
+#else
+# define NVDB_NAME "nvdb"
+#endif
 
 static inline Rec * get (Node p)
 {
-  if (use_voxel)
-    return vmem_get (&vi [p.l], P (p));
-  return mem_allocated (&mi [p.l], P (p)) ?
-    (Rec *) CALL (mem_data, &mi [p.l], P (p)) : NULL;
+  switch (impl) {
+  case VOXEL: return vmem_get (&vi [p.l], P (p));
+  case NVDB:  return nvdb_get (&ni [p.l], P (p));
+  default:    return mem_get (&mi [p.l], P (p));
+  }
 }
 
-static inline Rec * get_cursor (Node p, VMemCursor * cur)
+/* one cursor per level: voxel's bottom node, or nano-vdb's accessor */
+typedef struct { VMemCursor v; NvdbCursor n; } Cursor;
+
+static inline Rec * get_cursor (Node p, Cursor * cur)
 {
-  return vmem_get_cursor (&vi [p.l], &cur [p.l], P (p));
+  if (impl == NVDB)
+    return nvdb_get_cursor (&ni [p.l], &cur [p.l].n, P (p));
+  return vmem_get_cursor (&vi [p.l], &cur [p.l].v, P (p));
 }
 
 static void assign (Node p, void * b)
 {
-  if (use_voxel)
-    vmem_assign (&vi [p.l], P (p), 1 << p.l, b);
-  else
-    mem_assign (&mi [p.l], P (p), 1 << p.l, b);
+  switch (impl) {
+  case VOXEL: vmem_assign (&vi [p.l], P (p), 1 << p.l, b); break;
+  case NVDB:  nvdb_assign (&ni [p.l], P (p), 1 << p.l, b); break;
+  default:    mem_assign (&mi [p.l], P (p), 1 << p.l, b);
+  }
 }
 
 static void release (Node p)
 {
-  if (use_voxel)
-    vmem_free (&vi [p.l], P (p), 1 << p.l, NULL);
-  else
-    mem_free (&mi [p.l], P (p), 1 << p.l, NULL);
+  switch (impl) {
+  case VOXEL: vmem_free (&vi [p.l], P (p), 1 << p.l, NULL); break;
+  case NVDB:  nvdb_free (&ni [p.l], P (p), 1 << p.l, NULL); break;
+  default:    mem_free (&mi [p.l], P (p), 1 << p.l, NULL);
+  }
 }
 
 /* ---- nodes ------------------------------------------------------------ */
@@ -296,7 +314,7 @@ static size_t N;
 static size_t dfs (int cursor, uintptr_t * sum)
 {
   static Node stack [MAXL * NCH + 1];
-  VMemCursor cur [MAXL + 1];
+  Cursor cur [MAXL + 1];
   memset (cur, 0, sizeof cur);
   size_t visited = 0;
   int sp = 0;
@@ -315,7 +333,7 @@ static size_t dfs (int cursor, uintptr_t * sum)
 
 static void list (int cursor, uintptr_t * sum)
 {
-  VMemCursor cur [MAXL + 1];
+  Cursor cur [MAXL + 1];
   memset (cur, 0, sizeof cur);
   for (size_t q = 0; q < N; q++) {
     Rec * r = cursor ? get_cursor (order [q], cur) : get (order [q]);
@@ -327,7 +345,7 @@ static void list (int cursor, uintptr_t * sum)
 static void nbr (int cursor, Node * leaves, size_t nleaves, uintptr_t * sum,
                  size_t * lookups, size_t * coarser)
 {
-  VMemCursor cur [MAXL + 1];
+  Cursor cur [MAXL + 1];
   memset (cur, 0, sizeof cur);
   for (size_t q = 0; q < nleaves; q++)
     for (int m = 0; m < BOX; m++) {
@@ -350,10 +368,12 @@ static void nbr (int cursor, Node * leaves, size_t nleaves, uintptr_t * sum,
 int main (int argc, char ** argv)
 {
   if (argc < 4) {
-    fprintf (stderr, "usage: %s mem|voxel shell|river|dense DEPTH\n", argv [0]);
+    fprintf (stderr, "usage: %s mem|voxel|nvdb shell|river|dense DEPTH\n",
+             argv [0]);
     return 1;
   }
-  use_voxel = !strcmp (argv [1], "voxel");
+  impl = !strcmp (argv [1], "voxel") ? VOXEL : !strcmp (argv [1], "nvdb") ? NVDB :
+    MEM;
   pattern = !strcmp (argv [2], "shell") ? 0 : !strcmp (argv [2], "river") ? 1 :
     !strcmp (argv [2], "dense") ? 2 : -1;
   depth = atoi (argv [3]);
@@ -403,7 +423,8 @@ int main (int argc, char ** argv)
   }
 
   printf ("impl=%s dim=%d pattern=%s depth=%d nodes=%zu leaves=%zu "
-          "finest=%zu", argv [1], D, argv [2], depth, N, nleaves,
+          "finest=%zu", impl == NVDB ? NVDB_NAME : argv [1], D, argv [2],
+          depth, N, nleaves,
           perlevel [depth]);
   long rss0 = status_kb ("VmRSS"), pte0 = status_kb ("VmPTE");
 
@@ -419,7 +440,7 @@ int main (int argc, char ** argv)
           1024. * (rss + pte) / N);
 
   uintptr_t check = 0;
-  for (int cursor = 0; cursor <= use_voxel; cursor++) {
+  for (int cursor = 0; cursor <= (impl != MEM); cursor++) {
     const char * suffix = cursor ? "cur" : "";
     uintptr_t sum = 0;
     int r = reps (N);

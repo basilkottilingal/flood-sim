@@ -1,8 +1,19 @@
-# memindex vs voxel-memindex on 2:1 balanced trees
+# memindex vs voxel-memindex vs nano-vdb on 2:1 balanced trees
 
-`sh tests/bench_balanced.sh` (2026-11-09). Intel i7-8650U, 8 GB (about
-3 GB free), Linux 6.8, gcc 11.4 -O2, THP `[madvise]`, memindex with
-MADV_NOHUGEPAGE. Second of two runs; the first agreed within ~10%.
+`sh tests/bench_balanced.sh`. Intel i7-8650U laptop, 8 GB, Linux 6.8, gcc 11.4 `-O2 -mpopcnt`, THP
+`[madvise]`, memindex with `MADV_NOHUGEPAGE`. Run on 2026-11-10 with a
+browser busy in the background (load about 1.5), so absolute times are
+slower and noisier than the earlier runs; compare implementations within a
+case, where they ran back to back. Cache and dTLB miss counters were not
+available (`perf_event_paranoid` = 4).
+
+Implementations: `mem` (memindex), `voxel` (voxel-memindex, 64-way nodes),
+`nvdb` (nano-vdb, dense VDB nodes), `nvdb-compact` (nano-vdb with masks and
+popcount rank, `-DNVDB_COMPACT`). Cursors: voxel's bottom node, nano-vdb's
+whole-path accessor. Every implementation returned the same values as
+memindex (checksums).
+
+Second of two runs; the first agreed within about 15%.
 
 The trees are built as `tree.c` builds them: cells touching a front
 (circle/sphere of radius 0.35, or a meandering river two finest cells wide)
@@ -18,63 +29,59 @@ inserted in pre-order (Morton order, parents first).
 - nbr: for every leaf, its 3^d - 1 neighbours at its level, each falling
   back to the covering coarser node (`block_ghosts ()`); ns per leaf, and
   per lookup. About 20% of the lookups fall back to a coarser level.
-- +cur: voxel with one `VMemCursor` per level.
+- +cur: one cursor (voxel) or accessor (nano-vdb) per level.
 
 | case | impl | nodes (leaves) | B/node | build ns | dfs ns | dfs+cur ns | list ns | list+cur ns | nbr ns/leaf | nbr+cur ns/leaf | ns/lookup (+cur) | free ns |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 2D dense depth 10 | mem | 1398101 (1048576) | 9 | 14.5 | 5.5 | - | 3.7 | - | 38 | - | 4.8 (-) | 12.6 |
-| 2D dense depth 10 | voxel | 1398101 (1048576) | 8 | 12.5 | 8.1 | 4.7 | 7.7 | 3.0 | 61 | 51.8 | 7.7 (6.5) | 11.9 |
-| 2D shell depth 15 | mem | 638149 (478612) | 615 | 568.6 | 20.4 | - | 14.2 | - | 106 | - | 10.5 (-) | 420.0 |
-| 2D shell depth 15 | voxel | 638149 (478612) | 25 | 22.6 | 13.8 | 7.1 | 11.1 | 4.7 | 101 | 76.8 | 10.0 (7.6) | 28.9 |
-| 2D river depth 15 | mem | 1286501 (964876) | 234 | 261.8 | 11.7 | - | 8.2 | - | 71 | - | 7.2 (-) | 238.3 |
-| 2D river depth 15 | voxel | 1286501 (964876) | 23 | 21.6 | 12.5 | 6.6 | 8.9 | 4.0 | 92 | 72.6 | 9.3 (7.3) | 21.0 |
-| 3D dense depth 6 | mem | 299593 (262144) | 77 | 97.8 | 32.9 | - | 8.4 | - | 272 | - | 10.8 (-) | 37.0 |
-| 3D dense depth 6 | voxel | 299593 (262144) | 8 | 13.8 | 25.2 | 7.3 | 8.7 | 4.4 | 310 | 274.2 | 12.3 (10.9) | 12.3 |
-| 3D shell depth 8 | mem | 576009 (504008) | 263 | 362.0 | 45.9 | - | 12.8 | - | 371 | - | 11.6 (-) | 177.1 |
-| 3D shell depth 8 | voxel | 576009 (504008) | 15 | 19.2 | 27.9 | 8.7 | 10.9 | 5.5 | 431 | 380.1 | 13.5 (11.9) | 17.9 |
-| 3D river depth 10 | mem | 374513 (327699) | 446 | 548.2 | 38.9 | - | 9.6 | - | 321 | - | 9.5 (-) | 327.7 |
-| 3D river depth 10 | voxel | 374513 (327699) | 18 | 21.9 | 28.7 | 8.6 | 12.1 | 5.0 | 472 | 393.2 | 14.0 (11.7) | 20.6 |
-| 3D shell depth 9 | mem | 2287433 (2001504) | 252 | 317.5 | 44.5 | - | 11.9 | - | 310 | - | 9.7 (-) | 209.3 |
-| 3D shell depth 9 | voxel | 2287433 (2001504) | 14 | 19.3 | 28.3 | 8.5 | 12.5 | 5.0 | 462 | 392.1 | 14.4 (12.3) | 20.4 |
+| 2D dense depth 10 | mem | 1398101 (1048576) | 9 | 17.2 | 18.0 | - | 7.4 | - | 109 | - | 13.6 (-) | 12.8 |
+| 2D dense depth 10 | voxel | 1398101 (1048576) | 8 | 15.7 | 17.2 | 6.7 | 8.7 | 3.8 | 140 | 67.2 | 17.5 (8.4) | 12.9 |
+| 2D dense depth 10 | nvdb | 1398101 (1048576) | 9 | 15.0 | 18.8 | 10.5 | 6.8 | 5.8 | 151 | 76.6 | 18.9 (9.6) | 8.5 |
+| 2D dense depth 10 | nvdb-compact | 1398101 (1048576) | 9 | 38.9 | 34.5 | 9.1 | 16.5 | 6.9 | 214 | 76.3 | 26.8 (9.6) | 21.4 |
+| 2D shell depth 15 | mem | 638149 (478612) | 615 | 736.3 | 54.3 | - | 19.3 | - | 228 | - | 22.6 (-) | 427.3 |
+| 2D shell depth 15 | voxel | 638149 (478612) | 25 | 26.3 | 23.7 | 11.6 | 13.1 | 5.7 | 221 | 135.1 | 21.9 (13.4) | 40.2 |
+| 2D shell depth 15 | nvdb | 638149 (478612) | 30 | 30.3 | 27.4 | 9.8 | 11.2 | 8.2 | 248 | 102.8 | 24.6 (10.2) | 14.1 |
+| 2D shell depth 15 | nvdb-compact | 638149 (478612) | 13 | 55.8 | 33.5 | 11.4 | 18.3 | 8.4 | 268 | 107.2 | 26.6 (10.6) | 32.2 |
+| 2D river depth 15 | mem | 1286501 (964876) | 234 | 310.7 | 46.1 | - | 21.3 | - | 207 | - | 20.8 (-) | 315.6 |
+| 2D river depth 15 | voxel | 1286501 (964876) | 23 | 33.3 | 24.3 | 10.3 | 12.4 | 5.7 | 213 | 95.2 | 21.4 (9.6) | 25.4 |
+| 2D river depth 15 | nvdb | 1286501 (964876) | 28 | 48.6 | 30.7 | 12.5 | 16.9 | 6.3 | 226 | 99.8 | 22.7 (10.0) | 16.1 |
+| 2D river depth 15 | nvdb-compact | 1286501 (964876) | 13 | 40.7 | 32.3 | 10.5 | 20.4 | 8.0 | 264 | 97.5 | 26.6 (9.8) | 39.3 |
+| 3D dense depth 6 | mem | 299593 (262144) | 77 | 118.7 | 37.9 | - | 9.6 | - | 531 | - | 21.1 (-) | 45.0 |
+| 3D dense depth 6 | voxel | 299593 (262144) | 8 | 15.4 | 25.7 | 19.6 | 9.1 | 5.7 | 537 | 460.8 | 21.3 (18.3) | 12.5 |
+| 3D dense depth 6 | nvdb | 299593 (262144) | 9 | 13.1 | 26.1 | 21.5 | 7.3 | 5.9 | 535 | 428.4 | 21.2 (17.0) | 9.7 |
+| 3D dense depth 6 | nvdb-compact | 299593 (262144) | 9 | 37.9 | 31.1 | 22.8 | 11.1 | 6.3 | 661 | 483.9 | 26.3 (19.2) | 33.4 |
+| 3D shell depth 8 | mem | 576009 (504008) | 263 | 343.4 | 50.4 | - | 15.6 | - | 653 | - | 20.5 (-) | 168.4 |
+| 3D shell depth 8 | voxel | 576009 (504008) | 15 | 22.3 | 28.0 | 20.8 | 11.5 | 6.8 | 712 | 600.9 | 22.3 (18.8) | 18.4 |
+| 3D shell depth 8 | nvdb | 576009 (504008) | 27 | 22.2 | 33.3 | 25.2 | 12.0 | 10.4 | 679 | 560.5 | 21.3 (17.6) | 17.5 |
+| 3D shell depth 8 | nvdb-compact | 576009 (504008) | 12 | 41.0 | 33.2 | 23.7 | 14.7 | 8.4 | 806 | 597.3 | 25.2 (18.7) | 34.1 |
+| 3D river depth 10 | mem | 374513 (327699) | 446 | 560.1 | 45.3 | - | 12.8 | - | 657 | - | 19.5 (-) | 291.7 |
+| 3D river depth 10 | voxel | 374513 (327699) | 18 | 21.4 | 29.1 | 21.0 | 14.4 | 6.5 | 788 | 623.5 | 23.4 (18.5) | 22.2 |
+| 3D river depth 10 | nvdb | 374513 (327699) | 44 | 29.0 | 31.9 | 26.7 | 12.2 | 8.9 | 716 | 587.4 | 21.3 (17.4) | 11.5 |
+| 3D river depth 10 | nvdb-compact | 374513 (327699) | 14 | 41.7 | 32.6 | 24.5 | 11.5 | 7.1 | 837 | 611.9 | 24.9 (18.2) | 33.3 |
+| 3D shell depth 9 | mem | 2287433 (2001504) | 252 | 329.1 | 52.8 | - | 13.3 | - | 629 | - | 19.7 (-) | 215.8 |
+| 3D shell depth 9 | voxel | 2287433 (2001504) | 14 | 20.1 | 29.3 | 20.7 | 13.6 | 6.4 | 747 | 614.4 | 23.4 (19.2) | 20.0 |
+| 3D shell depth 9 | nvdb | 2287433 (2001504) | 26 | 22.0 | 32.8 | 27.2 | 11.3 | 10.5 | 672 | 561.1 | 21.0 (17.6) | 10.4 |
+| 3D shell depth 9 | nvdb-compact | 2287433 (2001504) | 12 | 40.6 | 32.3 | 25.0 | 12.3 | 8.0 | 796 | 603.6 | 24.9 (18.9) | 34.6 |
 
 ## Reading it
 
-- **Morton traversal (dfs).** Without a cursor, voxel is slower than
-  memindex only on the uniform 2D tree (8.1 against 5.5 ns per node). It is
-  about equal on the 2D river, and faster on the 2D circle (13.8 against
-  20.4) and in 3D (25-29 against 33-46). With a cursor per level, voxel is
-  faster in every case:
-  - 1.2x on the uniform 2D tree;
-  - 1.8-2.9x on the 2D fronts;
-  - 4.5-5.3x in 3D (8.5 against 44.5 ns per node on the sphere at depth 9).
-
-  memindex reads a family's children from 2 rows (2D) or 4 rows (3D), each
-  on a different page. voxel finds all 2^d children in one bottom node.
-- **Over a level list (list).** Without a cursor, memindex is 2x faster on
-  the uniform 2D tree and within about 25% either way elsewhere. With a
-  cursor, voxel is 1.2-3x faster in every case.
-- **Neighbours (nbr).** This is where memindex keeps an edge. With cursors,
-  voxel compares as follows:
-  - 28% faster on the 2D circle;
-  - equal (within 2%) on the 2D river, the uniform 3D tree and the 3D
-    sphere at depth 8;
-  - 22-26% slower on the 3D river and the 3D sphere at depth 9;
-  - 36% slower on the uniform 2D tree.
-
-  Without cursors, voxel is up to 1.6x slower (equal on the 2D circle). The
-  cursor helps less here for two reasons. The box around a leaf on the edge
-  of its 4x4x4 (3D) or 8x8 (2D) group spills into the next bottom node. And
-  a fifth of the lookups fall back to a coarser level, each through that
-  level's own cursor.
-- **What the difference costs.** The largest gap is about 80 ns per leaf,
-  for its whole box of 26 neighbours (3D). `block_ghosts ()` then copies
-  the block's ghost layers from those neighbours: thousands of cells, an
-  estimated few microseconds per scalar for 16^3 blocks. So the gap would
-  be around a percent of a ghost update or less. This is an estimate, not
-  a measurement; timing `ghosts_update ()` with voxel wired in would
-  confirm it.
-- **Memory, build, free.** On every non-uniform tree, voxel takes 10-25x
-  less memory (14-25 against 234-615 B per node). It builds 12-25x faster
-  and frees 10-16x faster. On the uniform trees both are close, except in
-  3D, where voxel uses 10x less memory, builds 7x faster and frees 3x
-  faster.
+- **Memory.** On every non-uniform tree: nano-vdb compact 12-14 B per node,
+  voxel 14-25, nano-vdb dense 26-44, memindex 234-615. On the uniform trees
+  every implementation is at 8-9 B, but memindex at 77 B in 3D.
+- **Build and free.** On the non-uniform trees, the trees build 6-28 times
+  faster than memindex; compact nodes cost 1.4-2.9 times dense ones (except
+  the 2D river, where they were faster). nano-vdb dense frees fastest in
+  every case.
+- **Morton traversal (dfs).** With cursors, the trees take 6.7-27 ns per
+  node, voxel usually the fastest, against 18-54 ns for memindex: 1.7-5.5
+  times faster.
+- **Over a level list.** With cursors, 4-11 ns per node for every tree,
+  against 7-21 for memindex.
+- **Neighbour box.** With cursors, every tree beats memindex. In 2D by
+  30-55%, the three trees alike. In 3D by 11-19% for nano-vdb's dense
+  accessor, 4-9% for its compact one, and 2-13% for voxel's bottom-only
+  cursor. The accessor helps where a box spills into the next leaf: it
+  restarts from the cached lower node, not from the root.
+- In these runs memindex's neighbour box was slower, relative to the trees,
+  than in the earlier runs of 2026-11-09 on a quiet machine, where it led
+  voxel by up to 36%. Rerun on a quiet machine before weighing differences
+  of a few tens of percent.

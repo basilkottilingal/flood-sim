@@ -7,7 +7,7 @@ lib=$(pwd)
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 # libutils (bits.h) is a sibling of libb-amr: included as "libutils/bits.h"
-src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
+src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
 flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib -I$lib/.."
 fails=0
 
@@ -53,6 +53,21 @@ for d in 1 2 3; do
   run blocks $d "-DBAMR_ALIGN=4" tests/test_blocks.c "$lib/tree.c" $src
   run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $src
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
+done
+# the level indices side by side: memindex, voxel-memindex, nano-vdb
+isrc="$lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c"
+for d in 1 2 3; do
+  run index $d "" tests/test_index.c $isrc
+  run index $d "-DNVDB_COMPACT" tests/test_index.c $isrc
+done
+# the tree on the other level indices (level-index.h): voxel, nano-vdb
+for idx in "2" "3" "3 -DNVDB_COMPACT"; do
+  for d in 2 3; do
+    run tree   $d "-DBAMR_INDEX=$idx" tests/test_tree.c $src
+    run blocks $d "-DBAMR_INDEX=$idx" tests/test_blocks.c "$lib/tree.c" $src
+    run ghosts $d "-DBAMR_INDEX=$idx" tests/test_ghosts.c "$lib/tree.c" $src
+    run adapt  $d "-DBAMR_INDEX=$idx" tests/test_adapt.c "$lib/tree.c" $src
+  done
 done
 # levels are the bits of a uint32_t: BAMR_MAX_DEPTH 32 must not build
 if "$cwrap" -dimension=2 $flags -DBAMR_MAX_DEPTH=32 -c "$lib/tree.c" -o "$dir/t.o" 2> "$dir/log"; then
