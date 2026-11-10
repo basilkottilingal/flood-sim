@@ -1514,6 +1514,56 @@ static int loop_gives (const struct loop_def *def, const char *name)
 
 static int stencil_serial;
 
+/* In foreach (), x, y, z and Delta are the cell's: the coordinates of its
+ * centre and its size, as in Basilisk. */
+static const char *const stencil_reserved[] = { "x", "y", "z", "Delta" };
+#define NRESERVED 4
+
+/* Counts in uses[] the names under n that mean the cell's x, y, z or Delta:
+ * spelled so, where a variable could be (not u.x), and not declared in the
+ * body itself. With clear, their tokens forget the declaration they saw, as
+ * they now name cwrap's. Returns how many. */
+static int reserved_uses (struct ast *n, const struct ast *body, int uses[],
+                          int clear)
+{
+  int found = 0;
+
+  if (n->kind != AST_TOKEN) {
+    for (n = n->child; n; n = n->next)
+      found += reserved_uses (n, body, uses, clear);
+    return found;
+  }
+  struct token *t = &((struct ast_leaf *)n)->tok;
+
+  if (t->kind != T_IDENTIFIER || !names_ordinary (n)
+      || (t->binding && t->binding->decl && is_under (t->binding->decl, body)))
+    return 0;
+  for (int r = 0; r < NRESERVED; r++)
+    if (strcmp (t->text, stencil_reserved[r]) == 0) {
+      uses[r]++;
+      if (clear)
+        t->binding = NULL;
+      return 1;
+    }
+  return 0;
+}
+
+/* The loops' names that the cell's x, y, z and Delta are computed from. */
+static int loops_give_position (const struct loop_def *leaf,
+                                const struct loop_def *cell)
+{
+  static const char *const leaf_names[] = { "level", "i", "j", "k" };
+  static const char *const cell_names[] = { "ci", "cj", "ck" };
+
+  for (int a = 0; a <= dimension; a++)
+    if (!loop_gives (leaf, leaf_names[a]))
+      return 0;
+  for (int a = 0; a < dimension; a++)
+    if (!loop_gives (cell, cell_names[a]))
+      return 0;
+  return 1;
+}
+
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct loop_def *leaf,
                               const struct loop_def *cell, struct ast *kw,
@@ -1525,12 +1575,32 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   struct ast *args, *items, *open, *close, *kids[3], *cells;
   const char *sblocks, *c, *shape;
   int nblocks = 0, serial = ++stencil_serial, inner, outer;
+  int uses[NRESERVED] = { 0 }, position = 0;
 
   if (!leaf || !cell || !loop_gives (leaf, "sblocks") || !loop_gives (cell, "c")
       || !loop_gives (cell, "shape")) {
     stencil_error (rejected, kw, "foreach () needs the @loops foreach_leaf, "
                    "which gives sblocks, and foreach_cell, which gives c and "
                    "shape: include <block-loops.h>");
+    return body;
+  }
+  /* x, y, z and Delta are the cell's, and cannot name a scalar here */
+  for (int a = 0; a < loop->naccess; a++) {
+    int none[NRESERVED] = { 0 };
+    struct ast *scalar = loop->access[a]->child;
+
+    if (reserved_uses (scalar, body, none, 0))
+      stencil_error (rejected, scalar, "'%s[...]': in foreach (), x, y, z and "
+                     "Delta are the cell's, not a scalar",
+                     expression_text (scalar));
+  }
+  if (*rejected)
+    return body;
+  position = reserved_uses (body, body, uses, 1) > 0;
+  if (position && !loops_give_position (leaf, cell)) {
+    stencil_error (rejected, kw, "x, y, z and Delta in foreach () need "
+                   "foreach_leaf to give level, i, j, k and foreach_cell ci, "
+                   "cj, ck");
     return body;
   }
   if (*rejected)
@@ -1599,6 +1669,41 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     ast_replace (access, e);
   }
 
+  /* { const double x = ..., Delta = ...; body }: those the body uses, at
+   * each cell, from what each leaf gives once */
+  if (position) {
+    static const char *const cijk[] = { "ci", "cj", "ck" };
+    static const char *const first[] = { "ox", "g", "g" };
+    struct ast *cell_items = ast_new (AST_BLOCK_ITEMS), *wrap[3];
+
+    for (int r = 0; r < NRESERVED; r++) {
+      const char *text;
+      struct ast *decl;
+
+      if (!uses[r])
+        continue;
+      if (r == 3)
+        text = arena_printf ("const double Delta = __cwrap_Delta_%d;", serial);
+      else if (r >= dimension)
+        text = arena_printf ("const double %s = 0;", stencil_reserved[r]);
+      else
+        text = arena_printf ("const double %s = __cwrap_%s_%d + (%s - %s.%s) "
+                             "* __cwrap_Delta_%d;", stencil_reserved[r],
+                             stencil_reserved[r], serial,
+                             STENCIL_NAME (cell->name, cijk[r], inner), shape,
+                             first[r], serial);
+      decl = parse_stencil_item (text);
+      each_leaf (decl, flatten_leaf, (void *)at);
+      ast_add (cell_items, decl);
+    }
+    mark_token (first_token (body));
+    ast_add (cell_items, body);
+    wrap[0] = new_token ('{', "{", at);
+    wrap[1] = cell_items;
+    wrap[2] = new_token ('}', "}", last_token (body));
+    body = ast_node (AST_COMPOUND_STATEMENT, wrap, 3);
+  }
+
   /* foreach_cell (tree_block_shape (), 0) body */
   args = parse_stencil_item ("g (tree_block_shape (), 0);")->child->child->next->next;
   args->parent = args->next = NULL;
@@ -1607,6 +1712,32 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
 
   /* { the blocks; foreach_cell ... }, the block of foreach_leaf () */
   items = ast_new (AST_BLOCK_ITEMS);
+  if (position) {
+    /* Delta, and the centre of the leaf's first interior cell */
+    static const char *const ijk[] = { "i", "j", "k" };
+    const char *level = STENCIL_NAME (leaf->name, "level", outer);
+    const char *text = arena_printf (
+      "const double __cwrap_Delta_%d = tree_get_size () / ((double) "
+      "tree_get_block_m () * (double) (1L << %s));", serial, level);
+
+    for (int a = 0; a < dimension && a < 3; a++)
+      if (uses[a])
+        text = arena_printf ("%s const double __cwrap_%s_%d = tree_get_origin "
+                             "(%d) + ((double) %s * tree_get_block_m () + 0.5) "
+                             "* __cwrap_Delta_%d;", text, stencil_reserved[a],
+                             serial, a, STENCIL_NAME (leaf->name, ijk[a], outer),
+                             serial);
+    text = arena_printf ("%s (void) __cwrap_Delta_%d;", text, serial);
+    for (struct ast *fn = parse_snippet (arena_printf (
+           "typedef int Real; void f (void) { %s }", text))->next,
+         *item = fn->child->next->next->child->next->child, *next;
+         item; item = next) {
+      next = item->next;
+      item->parent = item->next = NULL;
+      each_leaf (item, flatten_leaf, (void *)at);
+      ast_add (items, item);
+    }
+  }
   for (int b = 0; b < nblocks; b++) {
     struct ast *decl = parse_stencil_item (arena_printf (
       "%sReal *const __cwrap_block_%d_%d = block_data (%s, (__cwrap_s));",

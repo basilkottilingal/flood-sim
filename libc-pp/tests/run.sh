@@ -309,8 +309,8 @@ check "@loop: each misuse is an error, and the file never reaches gcc" $?
 check "@loop: errors in the block, in an argument and after the use keep their lines" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra stencil_run.c -o stencil_run 2> stencil_run.log &&
-  [ "$(./stencil_run)" = "48 672 24" ] && [ ! -s stencil_run.log ]
-check "foreach (): every cell of every leaf, s[i,j] offsets, a vector, the body's own names" $?
+  [ "$(./stencil_run)" = "48 672 24 18 9 336 99" ] && [ ! -s stencil_run.log ]
+check "foreach (): every cell of every leaf, s[i,j] offsets, a vector, the body's own names, x, y, Delta" $?
 
 "$cwrap" -dimension=2 -translate stencil_run.c -o stencil_run.out &&
   [ "$(grep -c '[^t] Real \* const __cwrap_block_2_0 = block_data ( __cwrap_foreach_leaf_sblocks_[0-9]* , ( s ) )' stencil_run.out)" = 1 ] &&
@@ -325,7 +325,8 @@ check "foreach (): errors in the body and after it keep their lines" $?
 
 "$cwrap" -dimension=2 -c stencil_bad.c -o stencil_bad.o 2> stencil_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_bad.o ] &&
-  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 " ] &&
+  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 13 " ] &&
+  grep -q "^stencil_bad.c:13: error: 'Delta\[...\]': in foreach (), x, y, z and Delta are the cell's" stencil_bad.log &&
   grep -q "^stencil_bad.c:7: error: 'a\[\]', but 'a' is not a scalar" stencil_bad.log &&
   grep -q "^stencil_bad.c:8: error: 's\[1,2,3\]' has 3 offsets, in 2 dimensions" stencil_bad.log
 check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nesting" $?
@@ -333,6 +334,10 @@ check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nestin
 "$cwrap" -dimension=2 -c stencil_noloops.c -o stencil_noloops.o 2> stencil_noloops.log
 [ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () needs the @loops" stencil_noloops.log
 check "foreach (): without foreach_leaf and foreach_cell, an error" $?
+
+"$cwrap" -dimension=2 -c stencil_nopos.c -o stencil_nopos.o 2> stencil_nopos.log
+[ $? -ne 0 ] && grep -q "^stencil_nopos.c:6: error: x, y, z and Delta in foreach () need" stencil_nopos.log
+check "foreach (): x without the leaf's and the cell's indices, an error" $?
 
 "$cwrap" -dimension=2 -Wall stencil_call.c -o stencil_call 2> stencil_call.log &&
   [ "$(./stencil_call)" = 2 ] && [ ! -s stencil_call.log ]

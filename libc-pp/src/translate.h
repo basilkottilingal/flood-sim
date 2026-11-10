@@ -161,7 +161,11 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
  *
  * Only the scalars that the body reads or writes get a block, once each, and
  * those it only reads a const one. The names the two loops declare (sblocks,
- * c, shape, i, j, level, ...) are renamed, so the body sees none of them. */
+ * c, shape, i, j, level, ...) are renamed, so the body sees none of them.
+ *
+ * x, y, z and Delta, unless the body declares them, are the centre and size
+ * of the cell, as in Basilisk, from the leaf's i, j, k and level and the
+ * cell's ci, cj, ck; only those the body uses are declared. */
 
 struct stencil_loop {
   struct stencil_loop *outer;   /* the foreach () around this one, or NULL */

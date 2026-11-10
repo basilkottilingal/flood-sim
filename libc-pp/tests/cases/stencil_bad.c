@@ -9,3 +9,5 @@ void f (void)
   foreach () foreach () s[] = 0;
   foreach () a[1] = s[];
 }
+scalar Delta;
+void g (void) { foreach () Delta[] = 0; }

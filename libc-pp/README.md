@@ -640,6 +640,30 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
 - **A scalar the body may change is found at every cell instead,** as
   `block_data (sblocks, list[k])[...]`: one that uses a name declared in the
   body, such as a loop index, or a name the body assigns.
+- **`x`, `y`, `z` and `Delta` are the cell's,** as in Basilisk: the
+  coordinates of its centre and its size, on the domain that
+  `tree_shift_resize ()` sets. `y` and `z` beyond the dimension are 0.
+
+      foreach ()
+        h[] = exp (-(x*x + y*y)/(Delta*Delta));
+
+  - **They hide any outer `x`, `y`, `z` or `Delta`** inside the body, while a
+    name the body declares itself (`double x = ...;`) is its own. `u.x` is a
+    member, not the coordinate.
+  - **Only those the body uses are computed:** `Delta` and the centre of the
+    leaf's first cell once per leaf, then one multiply-add per cell and
+    coordinate:
+
+        const double __cwrap_Delta_1 = tree_get_size () / ((double) tree_get_block_m ()
+                                         * (double) (1L << level));
+        const double __cwrap_x_1 = tree_get_origin (0) + ((double) i * tree_get_block_m ()
+                                     + 0.5) * __cwrap_Delta_1;
+        ...
+          const double x = __cwrap_x_1 + (ci - shape.ox) * __cwrap_Delta_1;
+
+  - **They cannot name a scalar** in `foreach ()`: `Delta[]` is an error.
+  - **They need `foreach_leaf` to give `level`, `i`, `j`, `k`, and
+    `foreach_cell` to give `ci`, `cj`, `ck`,** as in `<block-loops.h>`.
 - **The body sees none of the loops' names.** `c`, `shape`, `sblocks`, `node`,
   `level`, `i`, `j`, `k`, ... are renamed in the expansion, so the body's
   own, or those around the loop, keep their meaning.
@@ -735,7 +759,7 @@ on it. The tests cover:
 - `@loop`: running uses of it, every error, line numbers around an expansion,
   and its translation
 - `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
-  the body's own names, a block per scalar used, `const` when only read,
+  the body's own names, `x`, `y` and `Delta`, a block per scalar used, `const` when only read,
   line numbers, every error, and a function named `foreach`. libb-amr's
   `tests/test_stencil.c` checks it on the real tree against `cell_at`.
 - nested `@loop`: 24 self-checking cases (`loop_nest.c`), each against the
@@ -771,7 +795,6 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
   that is not a cache uses `__auto_type` rather than the real element type.
 - **Scalars in a struct** (`p.h[]`, with `struct { scalar h; } p`) are not
   followed: the tag table has no members.
-- **`foreach ()` gives no cell position yet** (Basilisk's `x`, `y`, `Delta`).
 - **In a `@loop` body:**
   - **Labels are not renamed,** so a loop with a label can be used once per
     function. GNU's `__label__` declarations make them local.

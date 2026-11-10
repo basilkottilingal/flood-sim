@@ -243,6 +243,8 @@
   */
   int  tree (int depthmax, int blockdepth);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
+  double tree_get_origin (int axis); /* x0, y0, z0: the domain's corner  */
+  double tree_get_size (void);       /* h0: its side                     */
   void tree_destroy (void);
   int  tree_get_depth (void);       /* the finest level of a leaf: the
                                        deepest with a node             */

@@ -163,6 +163,50 @@ int main (void)
   }
   CHECK (diff (s, t) == 0);
 
+  /* 5. x, y, z and Delta: the centre and size of the cell, on a moved and
+   * resized domain, with two levels of leaves; y and z are 0 beyond the
+   * dimension, an outer x is hidden, the body's own x is its own */
+  {
+    Index first = { 0 };
+    int got = 0;
+    foreach_leaf ()
+      if (!got)
+        first = (Index) {IJKL}, got = 1;
+    CHECK (tree_refine (first) > 0);
+  }
+  tree_shift_resize (-1, 2, 0.5, 4);
+  double x = 99;
+  foreach ()
+    s[] = x + 10 * y + 100 * z + 1000 * Delta;
+  foreach_leaf () {
+    Real * b = block_data (sblocks, q);
+    double D = 4. / ((double) shape.m * (double) (1L << level));
+    block_cells (shape, 0) {
+      double X = -1 + ((double) i * shape.m + (ci - shape.ox) + 0.5) * D, Y = 0, Z = 0;
+#if dimension > 1
+      Y = 2 + ((double) j * shape.m + (cj - shape.g) + 0.5) * D;
+#endif
+#if dimension > 2
+      Z = 0.5 + ((double) k * shape.m + (ck - shape.g) + 0.5) * D;
+#endif
+      b [c] = (Real) (X + 10 * Y + 100 * Z + 1000 * D);
+    }
+  }
+  CHECK (diff (s, q) < (sizeof (Real) == 4 ? 1e-3 : 1e-10));
+  CHECK (x == 99);
+  double dmin = 1e30, dmax = 0;          /* the refined leaf: Delta / 2 */
+  foreach () {
+    dmin = fmin (dmin, Delta);
+    dmax = fmax (dmax, Delta);
+  }
+  CHECK (dmax == 2 * dmin);
+  foreach () {
+    double x = 7;
+    s[] = x;
+  }
+  set_all (q, 7);
+  CHECK (diff (s, q) == 0);
+
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);
   return fails != 0;

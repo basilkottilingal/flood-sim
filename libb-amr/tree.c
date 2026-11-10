@@ -340,6 +340,17 @@ void tree_shift_resize (double x0, double y0, double z0, double h0)
   G(x0) = x0, G(y0) = y0, G(z0) = z0, G (h0) = h0;
 }
 
+double tree_get_origin (int axis)
+{
+  assert (axis >= 0 && axis < 3);
+  return axis == 0 ? G(x0) : axis == 1 ? G(y0) : G(z0);
+}
+
+double tree_get_size (void)
+{
+  return G(h0);
+}
+
 int tree_get_depth (void)
 {
   int l = bits_highest_u32 (G(level_bits));     /* -1: no tree */
