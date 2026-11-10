@@ -956,6 +956,7 @@ struct rename {
   const struct loop_def *def;
   int expansion;
   const struct var *const *given;
+  int hide;               /* the names given to the block are renamed too */
 };
 
 /* The body's own names, where declared and where used, get a name of their
@@ -964,16 +965,24 @@ static void rename_leaf (struct ast *leaf, void *arg)
 {
   const struct rename *r = arg;
   struct token *t = &((struct ast_leaf *)leaf)->tok;
+  int given = 0;
 
-  /* a name the block sees: the declaration the block saw stands for it */
+  /* a name the block sees: the declaration the block saw stands for it. A
+   * hidden argument of a loop used in the body (`__cwrap_..._arg0_1`) keeps
+   * its name either way. */
   for (int i = 0; t->binding && i < r->def->ninject; i++)
     if (t->binding == r->def->inject[i].var) {
-      t->binding = r->given[i];
+      if (r->hide && strcmp (t->text, r->def->inject[i].name) == 0) {
+        given = 1;
+        break;
+      }
+      if (r->given)
+        t->binding = r->given[i];
       return;
     }
   if ((t->kind != T_IDENTIFIER && t->kind != T_TYPE_NAME)
-      || !t->binding || t->binding->loop != r->def->serial
-      || injected (r->def, t->text) || !names_ordinary (leaf))
+      || !t->binding || (!given && t->binding->loop != r->def->serial)
+      || (!r->hide && injected (r->def, t->text)) || !names_ordinary (leaf))
     return;
   t->text = arena_printf ("__cwrap_%s_%s_%d", r->def->name, t->text,
                           r->expansion);
@@ -1058,14 +1067,17 @@ static struct ast *find_kind (struct ast *n, enum ast_kind kind)
   return NULL;
 }
 
-struct ast *loop_expand (const struct loop_def *def, struct ast *name,
-                         struct ast *args, struct ast *block,
-                         const struct var *const *given, int *rejected)
+/* With hide, the block sees none of the loop's names: they are renamed like
+ * the rest, to __cwrap_<loop>_<name>_<expansion>. */
+static struct ast *expand_loop (const struct loop_def *def, struct ast *name,
+                                struct ast *args, struct ast *block,
+                                const struct var *const *given, int hide,
+                                int *rejected)
 {
   const struct token *at = ast_token (name);
   struct ast *ps[MAX_LOOP_PARAMS], *vs[MAX_LOOP_PARAMS];
   int np = loop_params (def, ps, MAX_LOOP_PARAMS), nv = 0;
-  struct rename r = { def, ++loop_expansions, given };
+  struct rename r = { def, ++loop_expansions, given, hide };
   struct ast *items, *body, *placeholder, *open, *close, *kids[3];
   struct token *after, *end;
 
@@ -1131,6 +1143,488 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
   kids[1] = items;
   kids[2] = close;
   return ast_node (AST_COMPOUND_STATEMENT, kids, 3);
+}
+
+struct ast *loop_expand (const struct loop_def *def, struct ast *name,
+                         struct ast *args, struct ast *block,
+                         const struct var *const *given, int *rejected)
+{
+  return expand_loop (def, name, args, block, given, 0, rejected);
+}
+
+/* Stencils: foreach () and s[...] */
+
+int stencil_enabled (void)
+{
+  return dimension > 0;
+}
+
+/* The pointers and arrays a declarator wraps around its name: how many
+ * subscripts or `*` go from the variable to its type. -1 for a function. */
+static int declarator_indirections (const struct ast *d)
+{
+  int n = 0;
+
+  switch (d->kind) {
+  case AST_DECL_NAME:
+    return 0;
+  case AST_POINTER:
+    for (const struct ast *k = d->child; k; k = k->next)
+      if (k->kind == AST_TOKEN)
+        n++;                              /* '*' */
+      else if (k->kind == AST_POINTER)
+        n += declarator_indirections (k);
+    return n;
+  case AST_DECLARATOR: case AST_PAREN_DECLARATOR: case AST_SUFFIXED_DECLARATOR:
+  case AST_ATTRIBUTED_DECLARATOR:
+    for (const struct ast *k = d->child; k; k = k->next) {
+      int m;
+
+      switch (k->kind) {
+      case AST_ARRAY_SUFFIX:
+        n++;
+        break;
+      case AST_FUNCTION_SUFFIX:
+        return -1;
+      case AST_DECL_NAME: case AST_POINTER: case AST_DECLARATOR:
+      case AST_PAREN_DECLARATOR: case AST_SUFFIXED_DECLARATOR:
+        if ((m = declarator_indirections (k)) < 0)
+          return -1;
+        n += m;
+        break;
+      default:
+        break;
+      }
+    }
+    return n;
+  default:
+    return -1;
+  }
+}
+
+/* The specifiers of the declaration or parameter that declares d, whatever
+ * its declarator, or NULL. */
+static const struct ast *declarator_specs (const struct ast *d)
+{
+  for (const struct ast *n = d->parent; n; n = n->parent) {
+    if (n->kind == AST_DECLARATION || n->kind == AST_PARAMETER)
+      return n->child;
+    if (n->kind != AST_ATTRIBUTED_DECLARATOR && n->kind != AST_INIT_DECLARATOR
+        && n->kind != AST_INIT_DECLARATOR_LIST)
+      return NULL;
+  }
+  return NULL;
+}
+
+/* What e is, of cwrap's types: *depth 0 for a scalar, 1 a vector, 2 a tensor,
+ * and *ind the subscripts or `*` still to go, for an array of them or a
+ * pointer. Returns 0 if e is none of these, or not an expression cwrap can
+ * follow: a name, (e), e.x, e->x, e[i] and *e. */
+static int scalar_shape (const struct ast *e, int *depth, int *ind)
+{
+  const struct token *t;
+  const struct ast *specs;
+  const char *type;
+
+  switch (e->kind) {
+  case AST_TOKEN:
+    t = ast_token (e);
+    if (t->kind != T_IDENTIFIER && t->kind != T_FOREACH && t->kind != T_CACHE)
+      return 0;
+    if (!t->binding || t->binding->kind != SCOPE_VARIABLE || !t->binding->decl
+        || !(specs = declarator_specs (t->binding->decl))
+        || !(type = scalar_type (specs)) || has_token (specs, T_TYPEDEF, NULL)
+        || (*ind = declarator_indirections (t->binding->decl)) < 0)
+      return 0;
+    *depth = strcmp (type, "scalar") == 0 ? 0 : strcmp (type, "vector") == 0 ? 1 : 2;
+    return 1;
+  case AST_PAREN_EXPRESSION:
+    return scalar_shape (e->child->next, depth, ind);
+  case AST_MEMBER:
+    if (!scalar_shape (e->child, depth, ind) || *depth == 0)
+      return 0;
+    if (strcmp (ast_token (e->child->next)->text, "->") == 0) {
+      if (*ind != 1)
+        return 0;
+      *ind = 0;
+    } else if (*ind != 0)
+      return 0;
+    --*depth;
+    return 1;
+  case AST_SUBSCRIPT:
+    if (!scalar_shape (e->child, depth, ind) || *ind == 0)
+      return 0;
+    --*ind;
+    return 1;
+  case AST_UNARY_OP:
+    if (strcmp (ast_token (e->child)->text, "*") != 0
+        || !scalar_shape (e->child->next, depth, ind) || *ind == 0)
+      return 0;
+    --*ind;
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static int is_scalar_expression (const struct ast *e)
+{
+  int depth, ind;
+
+  return scalar_shape (e, &depth, &ind) && depth == 0 && ind == 0;
+}
+
+/* The offsets of s[a, b, c], a comma expression, into os; returns how many. */
+static int stencil_offsets (struct ast *e, struct ast **os, int max)
+{
+  int n = 0;
+
+  if (!e)
+    return 0;
+  if (e->kind == AST_COMMA)
+    n = stencil_offsets (e->child, os, max), e = e->last;
+  if (n < max)
+    os[n] = e;
+  return n + 1;
+}
+
+static void stencil_error (int *rejected, const struct ast *at,
+                           const char *format, ...)
+{
+  const struct token *t = ast_first_token (at);
+  char *msg;
+  va_list ap;
+  int n;
+
+  va_start (ap, format);
+  n = vsnprintf (NULL, 0, format, ap);
+  va_end (ap);
+  msg = allocate ((size_t)n + 1);
+  va_start (ap, format);
+  vsnprintf (msg, (size_t)n + 1, format, ap);
+  va_end (ap);
+  diag (t->file, t->line, DIAG_ERROR, "%s", msg);
+  (*rejected)++;
+}
+
+struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
+                                         struct ast *kw, int *rejected)
+{
+  struct stencil_loop *loop = allocate (sizeof (*loop));
+
+  if (outer) {
+    stencil_error (rejected, kw, "foreach () inside foreach ()");
+    diag (outer->at->file, outer->at->line, DIAG_NOTE, "the outer foreach () "
+          "is here");
+  }
+  loop->outer = outer;
+  loop->at = ast_token (kw);
+  return loop;
+}
+
+struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
+                            struct ast *open, struct ast *offsets,
+                            struct ast *close, int *rejected)
+{
+  struct ast *os[4], *node;
+  int n;
+
+  if (!is_scalar_expression (base)) {
+    if (offsets)
+      return NULL;
+    stencil_error (rejected, base, "'%s[]', but '%s' is not a scalar",
+                   expression_text (base), expression_text (base));
+    node = ast_new (AST_SUBSCRIPT);
+    ast_add (ast_add (ast_add (node, base), open), close);
+    return node;
+  }
+  node = ast_new (AST_STENCIL_ACCESS);
+  ast_add (ast_add (ast_add (ast_add (node, base), open), offsets), close);
+  if (!loop) {
+    stencil_error (rejected, base, "'%s[...]', a cell of scalar '%s', outside "
+                   "foreach ()", expression_text (base), expression_text (base));
+    return node;
+  }
+  n = stencil_offsets (offsets, os, 4);
+  if (n > dimension)
+    stencil_error (rejected, base, "'%s' has %d offsets, in %d dimension%s",
+                   expression_text (node), n, dimension, dimension == 1 ? "" : "s");
+  if (loop->naccess == loop->cap) {
+    struct ast **a = allocate ((size_t)(loop->cap = 2 * loop->cap + 8) * sizeof (*a));
+
+    if (loop->naccess)
+      memcpy (a, loop->access, (size_t)loop->naccess * sizeof (*a));
+    loop->access = a;
+  }
+  loop->access[loop->naccess++] = node;
+  return node;
+}
+
+/* Is n under root? */
+static int is_under (const struct ast *n, const struct ast *root)
+{
+  for (; n; n = n->parent)
+    if (n == root)
+      return 1;
+  return 0;
+}
+
+/* The variable whose storage e changes, in e = ..., e++, &e: through (e),
+ * members and subscripts down to its name. NULL if it is not a name. */
+static const struct var *changed_variable (const struct ast *e)
+{
+  for (;;) {
+    if (e->kind == AST_PAREN_EXPRESSION)
+      e = e->child->next;
+    else if (e->kind == AST_MEMBER || e->kind == AST_SUBSCRIPT)
+      e = e->child;
+    else
+      break;
+  }
+  return e->kind == AST_TOKEN ? ast_token (e)->binding : NULL;
+}
+
+/* The operand that n changes, if n is an assignment, ++, -- or &; else NULL. */
+static const struct ast *changed_operand (const struct ast *n)
+{
+  switch (n->kind) {
+  case AST_ASSIGNMENT: case AST_POSTFIX_OP:
+    return n->child;
+  case AST_PREFIX_OP:
+    return n->child->next;
+  case AST_UNARY_OP:
+    return strcmp (ast_token (n->child)->text, "&") == 0 ? n->child->next : NULL;
+  default:
+    return NULL;
+  }
+}
+
+/* Does anything under n change v? */
+static int changes_variable (const struct ast *n, const struct var *v)
+{
+  const struct ast *target;
+
+  if (n->kind == AST_TOKEN)
+    return 0;
+  if ((target = changed_operand (n)) && changed_variable (target) == v)
+    return 1;
+  for (n = n->child; n; n = n->next)
+    if (changes_variable (n, v))
+      return 1;
+  return 0;
+}
+
+/* Can the block of scalar e be found once per leaf, before the cells? Only if
+ * e is made of names declared outside the body, which it does not change, and
+ * of constants: s, u.x, list[2], list[n]. */
+static int stencil_invariant (const struct ast *e, const struct ast *body)
+{
+  if (e->kind == AST_TOKEN) {
+    const struct token *t = ast_token (e);
+
+    if (t->kind == T_CONSTANT)
+      return 1;
+    if (t->kind != T_IDENTIFIER && t->kind != T_FOREACH && t->kind != T_CACHE)
+      return strchr ("()[].*+-", t->text[0]) != NULL
+             || strcmp (t->text, "->") == 0;
+    return t->binding && t->binding->kind == SCOPE_VARIABLE && t->binding->decl
+           && !is_under (t->binding->decl, body)
+           && !changes_variable (body, t->binding);
+  }
+  switch (e->kind) {
+  case AST_MEMBER:                        /* the member's name is no variable */
+    return stencil_invariant (e->child, body);
+  case AST_PAREN_EXPRESSION: case AST_SUBSCRIPT: case AST_UNARY_OP: case AST_ADDITIVE: case AST_MULTIPLICATIVE:
+    break;
+  default:
+    return 0;
+  }
+  for (e = e->child; e; e = e->next)
+    if (!stencil_invariant (e, body))
+      return 0;
+  return 1;
+}
+
+/* Does the access write its cell: s[] = ..., s[] += ..., s[]++, &s[]? */
+static int stencil_writes (const struct ast *access)
+{
+  const struct ast *n = access, *p;
+
+  while ((p = n->parent) && p->kind == AST_PAREN_EXPRESSION)
+    n = p;
+  return p && changed_operand (p) == n;
+}
+
+/* The first leaf under n spelled text, or NULL. */
+static struct ast *find_leaf (struct ast *n, const char *text)
+{
+  if (n->kind == AST_TOKEN)
+    return strcmp (ast_token (n)->text, text) == 0 ? n : NULL;
+  for (n = n->child; n; n = n->next) {
+    struct ast *found = find_leaf (n, text);
+
+    if (found)
+      return found;
+  }
+  return NULL;
+}
+
+/* Puts e where the placeholder leaf `name` is under n. */
+static void fill_placeholder (struct ast *n, const char *name, struct ast *e)
+{
+  struct ast *leaf = find_leaf (n, name);
+
+  if (!leaf)
+    abort ();
+  e->parent = e->next = NULL;
+  ast_replace (leaf, e);
+}
+
+/* The item text, a statement or declaration, as cwrap adds it to a body, with
+ * the type Real known. */
+static struct ast *parse_stencil_item (const char *text)
+{
+  struct ast *fn = parse_snippet (arena_printf ("typedef int Real; "
+                                                "void f (void) { %s }", text))->next;
+  struct ast *item = fn->child->next->next->child->next->child;
+
+  item->parent = item->next = NULL;
+  return item;
+}
+
+/* A scalar whose block is found once per leaf. */
+struct stencil_block {
+  const char *key;          /* the scalar as written: s, u.x */
+  struct ast *scalar;       /* that expression, from its first access */
+  int writes;
+};
+
+#define MAX_STENCIL_BLOCKS 256
+
+/* The names that the expansions of the two loops give what the body needs:
+ * see rename_leaf (). */
+#define STENCIL_NAME(loop, name, expansion) \
+  arena_printf ("__cwrap_%s_%s_%d", loop, name, expansion)
+
+/* Has def a name for its block called name? */
+static int loop_gives (const struct loop_def *def, const char *name)
+{
+  return injected (def, name);
+}
+
+static int stencil_serial;
+
+struct ast *stencil_loop_end (struct stencil_loop *loop,
+                              const struct loop_def *leaf,
+                              const struct loop_def *cell, struct ast *kw,
+                              struct ast *body, int *rejected)
+{
+  static const char *const strides[] = { "", " * %s.sy", " * %s.sz" };
+  const struct token *at = ast_token (kw);
+  struct stencil_block blocks[MAX_STENCIL_BLOCKS];
+  struct ast *args, *items, *open, *close, *kids[3], *cells;
+  const char *sblocks, *c, *shape;
+  int nblocks = 0, serial = ++stencil_serial, inner, outer;
+
+  if (!leaf || !cell || !loop_gives (leaf, "sblocks") || !loop_gives (cell, "c")
+      || !loop_gives (cell, "shape")) {
+    stencil_error (rejected, kw, "foreach () needs the @loops foreach_leaf, "
+                   "which gives sblocks, and foreach_cell, which gives c and "
+                   "shape: include <block-loops.h>");
+    return body;
+  }
+  if (*rejected)
+    return body;
+
+  /* The names the expansions below will have: foreach_cell's first, as it
+   * expands first. */
+  inner = loop_expansions + 1;
+  outer = loop_expansions + 2;
+  sblocks = STENCIL_NAME (leaf->name, "sblocks", outer);
+  c = STENCIL_NAME (cell->name, "c", inner);
+  shape = STENCIL_NAME (cell->name, "shape", inner);
+
+  /* Which scalars get a block, and whether it is written: before any access
+   * is rewritten, which would hide the assignments around them. */
+  int *which = allocate ((size_t)loop->naccess * sizeof (*which) + 1);
+
+  for (int a = 0; a < loop->naccess; a++) {
+    struct ast *scalar = loop->access[a]->child;
+    const char *key = expression_text (scalar);
+    int b;
+
+    which[a] = -1;
+    if (!stencil_invariant (scalar, body))
+      continue;
+    for (b = 0; b < nblocks && strcmp (blocks[b].key, key) != 0; b++)
+      ;
+    if (b == nblocks) {
+      if (nblocks == MAX_STENCIL_BLOCKS)
+        continue;
+      blocks[nblocks].key = key;
+      blocks[nblocks].scalar = ast_copy (scalar);
+      blocks[nblocks++].writes = 0;
+    }
+    blocks[b].writes |= stencil_writes (loop->access[a]);
+    which[a] = b;
+  }
+
+  /* Each s[i, j] becomes block[c + (i) + (j) * shape.sy], where block is the
+   * scalar's, or block_data (sblocks, s) for one that is not invariant. */
+  for (int a = 0; a < loop->naccess; a++) {
+    struct ast *access = loop->access[a], *os[4], *e;
+    struct ast *scalar = access->child, *rbracket = access->last;
+    int n = stencil_offsets (access->child->next->next == rbracket ? NULL
+                             : access->child->next->next, os, 4);
+    const char *index = c, *target;
+    struct token *first;
+
+    for (int k = 0; k < n && k < 3; k++)
+      index = arena_printf ("%s + (__cwrap_o%d)%s", index, k,
+                            arena_printf (strides[k], shape));
+    target = which[a] >= 0 ? arena_printf ("__cwrap_block_%d_%d", serial, which[a])
+                           : arena_printf ("block_data (%s, (__cwrap_s))", sblocks);
+    e = parse_stencil_item (arena_printf ("%s[%s];", target, index))->child;
+    e->parent = e->next = NULL;
+    each_leaf (e, flatten_leaf, (void *)ast_first_token (access));
+    first = first_token (e);
+    first->trivia = ast_first_token (access)->trivia;
+    last_token (e)->trivia = ast_token (rbracket)->trivia;
+    if (which[a] < 0) {
+      first_token (scalar)->trivia = "";   /* the line break went to e */
+      fill_placeholder (e, "__cwrap_s", scalar);
+    }
+    for (int k = 0; k < n && k < 3; k++)
+      fill_placeholder (e, arena_printf ("__cwrap_o%d", k), os[k]);
+    ast_replace (access, e);
+  }
+
+  /* foreach_cell (tree_block_shape (), 0) body */
+  args = parse_stencil_item ("g (tree_block_shape (), 0);")->child->child->next->next;
+  args->parent = args->next = NULL;
+  cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at), args,
+                       body, NULL, 1, rejected);
+
+  /* { the blocks; foreach_cell ... }, the block of foreach_leaf () */
+  items = ast_new (AST_BLOCK_ITEMS);
+  for (int b = 0; b < nblocks; b++) {
+    struct ast *decl = parse_stencil_item (arena_printf (
+      "%sReal *const __cwrap_block_%d_%d = block_data (%s, (__cwrap_s));",
+      blocks[b].writes ? "" : "const ", serial, b, sblocks));
+
+    each_leaf (blocks[b].scalar, flatten_leaf, (void *)at);
+    fill_placeholder (decl, "__cwrap_s", blocks[b].scalar);
+    each_leaf (decl, flatten_leaf, (void *)at);
+    ast_add (items, decl);
+  }
+  ast_add (items, cells);
+  open = new_token ('{', "{", at);
+  close = new_token ('}', "}", last_token (cells));   /* where the body ends */
+  kids[0] = open;
+  kids[1] = items;
+  kids[2] = close;
+  return expand_loop (leaf, kw, NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                      NULL, 1, rejected);
 }
 
 /* The translation itself: rewrite the tree here. */

@@ -1,6 +1,6 @@
 # c wrapper
 
-*Documentation as of 2026-11-06.*
+*Documentation as of 2026-11-10.*
 
 This subdirectory is written with the help of claude-code
 
@@ -24,6 +24,8 @@ On top of C11 with GNU extensions, cwrap adds:
   `n` and `a`
 - **`@loop`**: block macros, written as ordinary code with typed arguments,
   for loops that `#define` cannot express cleanly
+- **`foreach ()` and `s[]`, `s[i,j,k]`**: Basilisk-style stencils, every cell
+  of every leaf block of libb-amr, with `-dimension`
 
 ---
 
@@ -36,12 +38,13 @@ On top of C11 with GNU extensions, cwrap adds:
 5. [Caches](#caches)
 6. [foreach](#foreach)
 7. [@loop: block macros](#loop-block-macros)
-8. [How the translator works](#how-the-translator-works)
-9. [Source layout](#source-layout)
-10. [Tests](#tests)
-11. [Limitations](#limitations)
-12. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
-13. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
+8. [Stencils: foreach () and s[]](#stencils-foreach--and-s)
+9. [How the translator works](#how-the-translator-works)
+10. [Source layout](#source-layout)
+11. [Tests](#tests)
+12. [Limitations](#limitations)
+13. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
+14. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
 
 ---
 
@@ -601,6 +604,59 @@ cwrap stops with an error, and the file never reaches gcc, for:
 
 ---
 
+## Stencils: foreach () and s[]
+
+With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
+
+    foreach ()
+      lap[] = s[1] + s[-1] + s[0,1] + s[0,-1] - 4*s[];
+
+- **`foreach ()` visits every interior cell of every leaf block.** It is two
+  loops, the `@loop`s `foreach_leaf ()` over the leaves, in Morton order, and
+  `foreach_cell (tree_block_shape (), 0)` over the cells of each.
+- **`s[]` is the cell of scalar `s`; `s[i]`, `s[i,j]`, `s[i,j,k]` the cell at
+  that offset.** Offsets left out are 0, so `s[1]` is `s[1,0,0]` in any
+  dimension. More offsets than the dimension is an error. Offsets are any
+  expression; one that reaches past the ghost layers reads past the block.
+- **Only a scalar is expanded.** `s` must be an expression of type `scalar`
+  that cwrap can follow: a scalar name or parameter, a vector's or tensor's
+  member (`u.x[]`, `t.x.y[]`), an element of an array of scalars or of a
+  pointer to them (`list[k][]`, `(*p)[]`). `x[i]` of anything else is the
+  ordinary subscript; `x[]` of anything else is an error.
+- **Each scalar the body reads or writes gets its block once per leaf,** before
+  the cells, and no other scalar does. A scalar the body only reads gets a
+  `const` block:
+
+      foreach_leaf () {
+        Real *const       __cwrap_block_1_0 = block_data (sblocks, lap);
+        const Real *const __cwrap_block_1_1 = block_data (sblocks, s);
+        foreach_cell (tree_block_shape (), 0)
+          __cwrap_block_1_0[c] = __cwrap_block_1_1[c + (1)] + ...
+                               + __cwrap_block_1_1[c + (0) + (1) * shape.sy] ...;
+      }
+
+  `s[] = `, `s[] += `, `s[]++` and `&s[]` count as writes. Two spellings of
+  one scalar (`s` and `u.x` with the same id) get a block each.
+- **A scalar the body may change is found at every cell instead,** as
+  `block_data (sblocks, list[k])[...]`: one that uses a name declared in the
+  body, such as a loop index, or a name the body assigns.
+- **The body sees none of the loops' names.** `c`, `shape`, `sblocks`, `node`,
+  `level`, `i`, `j`, `k`, ... are renamed in the expansion, so the body's
+  own, or those around the loop, keep their meaning.
+- **The loop is serial over the leaves,** and `foreach_cell` vectorises each
+  row as `BLOCK_BACKEND` says (see `block-loops.h`): a sum into a variable
+  is fine; a cell must not be read along i in the row that writes it.
+- **No `break`:** it leaves only the row of cells.
+- **The ghosts are read as they are:** call `ghosts_update ()` first.
+- **`foreach ()` inside `foreach ()` is an error,** and so is `s[]` outside.
+- **`foreach ()` is the loop only while no `foreach` is declared** (a
+  function, a variable). Otherwise `foreach ()` is the call it was.
+- **Errors:** without `foreach_leaf` (giving `sblocks`) and `foreach_cell`
+  (giving `c` and `shape`) defined, `foreach ()` is an error that says to
+  include `<block-loops.h>`.
+
+---
+
 ## How the translator works
 
 1. **Lexer** (`src/lexer.l`, reentrant flex)
@@ -622,6 +678,8 @@ cwrap stops with an error, and the file never reaches gcc, for:
 4. **Translation** (`src/translate.c`)
    - Some rewrites happen while the parser reduces a rule:
      - `foreach`, before the loop's scope closes
+     - `foreach ()`: each `s[...]` of a scalar as it reduces, then the two
+       `@loop` expansions once the body is read
      - each use of a `@loop`, before the scope with the names it gives the
        block closes
      - local scalars and caches, as each declaration in a block is reduced
@@ -676,6 +734,10 @@ on it. The tests cover:
 - colored diagnostics
 - `@loop`: running uses of it, every error, line numbers around an expansion,
   and its translation
+- `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
+  the body's own names, a block per scalar used, `const` when only read,
+  line numbers, every error, and a function named `foreach`. libb-amr's
+  `tests/test_stencil.c` checks it on the real tree against `cell_at`.
 - nested `@loop`: 24 self-checking cases (`loop_nest.c`), each against the
   same computation in plain loops: a loop in its own block, five deep,
   arguments that read an outer loop's names, each argument evaluated once,
@@ -707,6 +769,9 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
   struct is defined. A type defined inside a function does not work.
 - **The tag table does not hold struct members,** so a `foreach` over a struct
   that is not a cache uses `__auto_type` rather than the real element type.
+- **Scalars in a struct** (`p.h[]`, with `struct { scalar h; } p`) are not
+  followed: the tag table has no members.
+- **`foreach ()` gives no cell position yet** (Basilisk's `x`, `y`, `Delta`).
 - **In a `@loop` body:**
   - **Labels are not renamed,** so a loop with a label can be used once per
     function. GNU's `__label__` declarations make them local.

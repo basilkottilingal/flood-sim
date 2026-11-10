@@ -18,6 +18,7 @@
 #include "parser.tab.h"
 #include "lexer.h"
 #include "scope.h"
+#include "translate.h"
 
 #define YY_DECL int yylex (YYSTYPE *lvalp, int *lineno, yyscan_t yyscanner)
 YY_DECL;
@@ -111,6 +112,16 @@ static int cache_word (struct lexer *lx, const char *name, int keyword)
     return identifier_kind (lx, name);
   lx->binding = scope_find (lx->scopes, name);
   return keyword;
+}
+
+/* foreach (): the stencil loop, with -dimension=, unless foreach is declared:
+ * then it is what it was before, as is any other foreach. */
+static int stencil_word (struct lexer *lx)
+{
+  if (!stencil_enabled () || scope_find (lx->scopes, "foreach"))
+    return cache_word (lx, "foreach", T_FOREACH);
+  lx->binding = NULL;
+  return T_FOREACH_CELLS;
 }
 
 /* The leaf for one token, which also takes the trivia gathered before it. */
@@ -217,6 +228,8 @@ PFX     (u8|u|U|L)
 "__builtin_types_compatible_p"  { AST (T_BUILTIN_TYPES_COMPATIBLE); }
 
   /* Ordinary names until <cwrap/cache.h> comes in. */
+  /* foreach (): the stencil loop. The parentheses are read again after it. */
+"foreach"/[ \t\r\f\v\n]*"("[ \t\r\f\v\n]*")"  { AST (stencil_word (yyextra)); }
 "foreach"               { AST (cache_word (yyextra, yytext, T_FOREACH)); }
 "cache"                 { AST (cache_word (yyextra, yytext, T_CACHE)); }
 

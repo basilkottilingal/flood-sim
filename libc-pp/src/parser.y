@@ -53,6 +53,7 @@ struct parse_status {
   struct loop_def *loops; /* @loop definitions, newest first */
   struct loop_def *cur_loop;  /* the one being parsed, or NULL */
   int loop_serial;
+  struct stencil_loop *stencil;  /* the foreach () being parsed, or NULL */
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -297,6 +298,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token STATIC_ASSERT THREAD_LOCAL
 %token ATTRIBUTE EXTENSION ASM TYPEOF INT128 FLOATN REAL IMAG LABEL AUTO_TYPE
 %token FOREACH CACHE
+%token FOREACH_CELLS "foreach ()"
 %token AT_LOOP "@loop" LOOP_NAME
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
@@ -345,7 +347,10 @@ external_declaration:
 function_definition:
     decl_specs_typed specs_done declarator enter_function compound_statement
     leave_function
-                                  { $$ = N (FUNCTION_DEFINITION, $1, $3, $4, $5); }
+                                  /* the name is in scope after the definition
+                                   * too, as `foreach ()` must know */
+                                  { declare (scopes, status, $3, SCOPE_VARIABLE);
+                                    $$ = N (FUNCTION_DEFINITION, $1, $3, $4, $5); }
   ;
 
 /* A block macro: see translate.h. The parameters and the body share a scope,
@@ -967,6 +972,17 @@ iteration_statement:
                                                          $8 != NULL); }
     close_scope
                                   { $$ = N (FOR_EACH_STATEMENT, $10, $7, $11); }
+  /* foreach (), the stencil loop: see translate.h. The body's s[...] are
+   * gathered as they reduce, then the loop is expanded with them. */
+  | FOREACH_CELLS '(' ')'         { status->stencil = stencil_loop_begin (status->stencil, $1,
+                                                                        &status->rejected);
+                                    $$ = NULL; }
+    statement                     { struct stencil_loop *loop = status->stencil;
+                                    status->stencil = loop->outer;
+                                    $$ = stencil_loop_end (loop, find_loop (status, "foreach_leaf"),
+                                                           find_loop (status, "foreach_cell"),
+                                                           $1, $5, &status->rejected);
+                                    (void) $2; (void) $3; (void) $4; }
   /* A use of a block macro. Its statement, the block, is parsed in a scope
    * with the names the loop gives it. */
   | LOOP_NAME '(' ')' open_scope  { loop_open (scopes, status, $1); $$ = NULL; }
@@ -1127,8 +1143,14 @@ generic_association:
 
 postfix_expression:
     primary_expression
+  /* s[...] and s[], when s is a scalar: a cell, in foreach () */
   | postfix_expression '[' expression ']'
-                                  { $$ = N (SUBSCRIPT, $1, $2, $3, $4); }
+                                  { $$ = stencil_access (status->stencil, $1, $2, $3, $4,
+                                                         &status->rejected);
+                                    if (!$$)
+                                      $$ = N (SUBSCRIPT, $1, $2, $3, $4); }
+  | postfix_expression '[' ']'    { $$ = stencil_access (status->stencil, $1, $2, NULL, $3,
+                                                         &status->rejected); }
   | postfix_expression '(' ')'    { $$ = N (CALL, $1, $2, $3); }
   | FOREACH '(' ')'               { $$ = N (CALL, $1, $2, $3); }
   | FOREACH '(' argument_list ')' { $$ = N (CALL, $1, $2, $3, $4); }
@@ -1333,7 +1355,7 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
-  struct parse_status status = { 0, 0, NULL, NULL, 0 };
+  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL };
   int lineno = 1;
   int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 

@@ -38,6 +38,7 @@ for prec in "" "-DBAMR_SINGLE"; do
     run blocks $d "$prec" tests/test_blocks.c "$lib/tree.c" $src
     run ghosts $d "$prec" tests/test_ghosts.c "$lib/tree.c" $src
     run adapt  $d "$prec" tests/test_adapt.c "$lib/tree.c" $src
+    run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
   done
 done
 # with OpenMP: threads, simd and the offload pragmas (run on the host here)
@@ -47,12 +48,14 @@ for d in 2 3; do
   run blocks $d "-fopenmp" tests/test_blocks.c "$lib/tree.c" $src
   run ghosts $d "-fopenmp" tests/test_ghosts.c "$lib/tree.c" $src
   run adapt  $d "-fopenmp" tests/test_adapt.c "$lib/tree.c" $src
+  run stencil $d "-fopenmp" tests/test_stencil.c "$lib/tree.c" $src
 done
 # stored blocks in the aligned layout: rows on 4 Reals
 for d in 1 2 3; do
   run blocks $d "-DBAMR_ALIGN=4" tests/test_blocks.c "$lib/tree.c" $src
   run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $src
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
+  run stencil $d "-DBAMR_ALIGN=4" tests/test_stencil.c "$lib/tree.c" $src
 done
 # the level indices side by side: memindex, voxel-memindex, nano-vdb
 isrc="$lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c"

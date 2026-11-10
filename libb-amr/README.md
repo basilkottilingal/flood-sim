@@ -79,6 +79,19 @@ Not done yet: periodic boundaries, and flux correction (refluxing) at
 coarse-fine faces, which conservation needs whichever way ghosts are
 stored.
 
+**The same stencil with cwrap's `foreach ()`** (see `../libc-pp/README.md`,
+"Stencils"):
+
+```c
+ghosts_update (u);
+foreach ()
+  v[] = u[1,0] + u[-1,0] + u[0,1] + u[0,-1] - 4 * u[];
+```
+
+cwrap expands it into `foreach_leaf ()` and `foreach_cell (shape, 0)`,
+with one `block_data ()` per leaf for each scalar used (`const` for `u`, only
+read) and `u[i,j]` as `cell_at`. It is serial over the leaves.
+
 ## Tests
 
     sh tests/run.sh
@@ -107,6 +120,14 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   linear field, and keeping the mean), coarsening, 2:1 balance through
   random refining and coarsening, and `adapt_wavelet ()` on a front: it
   settles, keeps the integral, and coarsens a constant field to minlevel.
+
+- `test_stencil.c`: cwrap's `foreach ()` and `s[i,j,k]`: every interior cell
+  once and no ghost written, stencils in every dimension equal to `cell_at`
+  bit for bit, offsets that are expressions, `+=` and `++` on a cell, a
+  vector's components, an array of scalars and a pointer to one, a scalar
+  parameter, and names in the body (`c`, `level`, `i`, `node`, `sblocks`)
+  that the loops' own names do not hide. Also with OpenMP and
+  `-DBAMR_ALIGN=4`.
 
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash

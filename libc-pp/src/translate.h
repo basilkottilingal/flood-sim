@@ -143,4 +143,54 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
                          struct ast *args, struct ast *block,
                          const struct var *const *given, int *rejected);
 
+/* Stencils, with -dimension=N: the cells of every leaf block of libb-amr.
+ *
+ *   foreach ()
+ *     s[] = (t[1] + t[-1] + t[0,1] + t[0,-1])/4.;
+ *
+ * s[] is the cell of scalar s, and s[i], s[i,j], s[i,j,k] the cell at that
+ * offset from it: offsets left out are 0. The loop is two loops, the @loops
+ * that <block-loops.h> defines:
+ *
+ *   foreach_leaf () {                          every leaf block
+ *     Real *const       __cwrap_block_L_0 = block_data (sblocks, s);
+ *     const Real *const __cwrap_block_L_1 = block_data (sblocks, t);
+ *     foreach_cell (tree_block_shape (), 0)    every interior cell
+ *       body, with s[i,j] as __cwrap_block_L_0[c + (i) + (j) * shape.sy]
+ *   }
+ *
+ * Only the scalars that the body reads or writes get a block, once each, and
+ * those it only reads a const one. The names the two loops declare (sblocks,
+ * c, shape, i, j, level, ...) are renamed, so the body sees none of them. */
+
+struct stencil_loop {
+  struct stencil_loop *outer;   /* the foreach () around this one, or NULL */
+  const struct token *at;       /* foreach, for messages */
+  struct ast **access;          /* every s[...] of the body, in order */
+  int naccess, cap;
+};
+
+/* Whether `foreach ()` is the stencil loop: -dimension= is given. */
+int stencil_enabled (void);
+
+/* foreach (, once `)` is read: the loop whose accesses the body adds to. */
+struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
+                                         struct ast *kw, int *rejected);
+
+/* base[offsets] as the parser reduces it, offsets NULL for base[]. If base is
+ * a scalar, returns the access, added to loop. Otherwise returns NULL for
+ * base[offsets], an ordinary subscript, and for base[] reports an error and
+ * returns a subscript. A scalar outside foreach () is an error too. */
+struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
+                            struct ast *open, struct ast *offsets,
+                            struct ast *close, int *rejected);
+
+/* The loop with its body: the expansion described above. leaf and cell are
+ * the definitions of foreach_leaf and foreach_cell, NULL if not defined: an
+ * error. */
+struct ast *stencil_loop_end (struct stencil_loop *loop,
+                              const struct loop_def *leaf,
+                              const struct loop_def *cell, struct ast *kw,
+                              struct ast *body, int *rejected);
+
 #endif

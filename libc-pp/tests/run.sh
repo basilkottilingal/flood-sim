@@ -308,6 +308,36 @@ check "@loop: each misuse is an error, and the file never reaches gcc" $?
   grep -q "^loop_lines.c:11:[0-9]*: warning: initialization of .const Bag \*. from incompatible pointer type" loop_lines.log
 check "@loop: errors in the block, in an argument and after the use keep their lines" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_run.c -o stencil_run 2> stencil_run.log &&
+  [ "$(./stencil_run)" = "48 672 24" ] && [ ! -s stencil_run.log ]
+check "foreach (): every cell of every leaf, s[i,j] offsets, a vector, the body's own names" $?
+
+"$cwrap" -dimension=2 -translate stencil_run.c -o stencil_run.out &&
+  [ "$(grep -c '[^t] Real \* const __cwrap_block_2_0 = block_data ( __cwrap_foreach_leaf_sblocks_[0-9]* , ( s ) )' stencil_run.out)" = 1 ] &&
+  [ "$(grep -c 'const Real \* const __cwrap_block_2_1 = block_data ( __cwrap_foreach_leaf_sblocks_[0-9]* , ( t ) )' stencil_run.out)" = 1 ] &&
+  [ "$(grep -c '__cwrap_block_2_[2-9]' stencil_run.out)" = 0 ]
+check "foreach (): a block for each scalar used, once, const where only read" $?
+
+"$cwrap" -dimension=2 -c stencil_lines.c -o stencil_lines.o 2> stencil_lines.log
+[ $? -ne 0 ] && grep -q "^stencil_lines.c:7:[0-9]*: error: .*nope1" stencil_lines.log &&
+  grep -q "^stencil_lines.c:9:[0-9]*: error: .*nope2" stencil_lines.log
+check "foreach (): errors in the body and after it keep their lines" $?
+
+"$cwrap" -dimension=2 -c stencil_bad.c -o stencil_bad.o 2> stencil_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_bad.o ] &&
+  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 " ] &&
+  grep -q "^stencil_bad.c:7: error: 'a\[\]', but 'a' is not a scalar" stencil_bad.log &&
+  grep -q "^stencil_bad.c:8: error: 's\[1,2,3\]' has 3 offsets, in 2 dimensions" stencil_bad.log
+check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nesting" $?
+
+"$cwrap" -dimension=2 -c stencil_noloops.c -o stencil_noloops.o 2> stencil_noloops.log
+[ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () needs the @loops" stencil_noloops.log
+check "foreach (): without foreach_leaf and foreach_cell, an error" $?
+
+"$cwrap" -dimension=2 -Wall stencil_call.c -o stencil_call 2> stencil_call.log &&
+  [ "$(./stencil_call)" = 2 ] && [ ! -s stencil_call.log ]
+check "foreach (): a function named foreach is still called" $?
+
 "$cwrap" -dimension=1 -translate loop_run.c -o loop_run.out 2> /dev/null &&
   ! grep -q '@loop' loop_run.out &&
   grep -q '^  { int __cwrap_repeat_n_[0-9]* = 3 ;$' loop_run.out &&
