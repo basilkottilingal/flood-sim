@@ -1319,6 +1319,7 @@ struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
   }
   loop->outer = outer;
   loop->at = ast_token (kw);
+  loop->errors = *rejected;
   return loop;
 }
 
@@ -1548,6 +1549,31 @@ static int reserved_uses (struct ast *n, const struct ast *body, int uses[],
   return 0;
 }
 
+/* An error for each name under n that would be the cell's x, y, z or Delta
+ * but was declared outside the body as a scalar, a vector or a tensor (or
+ * an array of them, or a pointer): the coordinate would hide it. */
+static void reserved_hides_scalar (struct ast *n, const struct ast *body,
+                                   int *rejected)
+{
+  int depth, ind, none[NRESERVED] = { 0 };
+
+  if (n->kind != AST_TOKEN) {
+    for (n = n->child; n; n = n->next)
+      reserved_hides_scalar (n, body, rejected);
+    return;
+  }
+  const struct token *t = ast_token (n);
+
+  if (!reserved_uses (n, body, none, 0) || !scalar_shape (n, &depth, &ind))
+    return;
+  stencil_error (rejected, n, "'%s' in foreach () is the cell's %s, which "
+                 "hides %s '%s'; rename the %s", t->text,
+                 strcmp (t->text, "Delta") == 0 ? "size" : "coordinate",
+                 depth == 0 ? "scalar" : depth == 1 ? "vector" : "tensor",
+                 t->text, depth == 0 ? "scalar" : depth == 1 ? "vector" : "tensor");
+  note_declared (t->binding->decl);
+}
+
 /* The loops' names that the cell's x, y, z and Delta are computed from. */
 static int loops_give_position (const struct loop_def *leaf,
                                 const struct loop_def *cell)
@@ -1576,6 +1602,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   const char *sblocks, *c, *shape;
   int nblocks = 0, serial = ++stencil_serial, inner, outer;
   int uses[NRESERVED] = { 0 }, position = 0;
+  int errors = loop->errors;              /* this loop's: those after it */
 
   if (!leaf || !cell || !loop_gives (leaf, "sblocks") || !loop_gives (cell, "c")
       || !loop_gives (cell, "shape")) {
@@ -1594,7 +1621,10 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                      "Delta are the cell's, not a scalar",
                      expression_text (scalar));
   }
-  if (*rejected)
+  if (*rejected > errors)
+    return body;
+  reserved_hides_scalar (body, body, rejected);
+  if (*rejected > errors)
     return body;
   position = reserved_uses (body, body, uses, 1) > 0;
   if (position && !loops_give_position (leaf, cell)) {
@@ -1603,7 +1633,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                    "cj, ck");
     return body;
   }
-  if (*rejected)
+  if (*rejected > errors)
     return body;
 
   /* The names the expansions below will have: foreach_cell's first, as it

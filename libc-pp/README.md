@@ -661,7 +661,11 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
         ...
           const double x = __cwrap_x_1 + (ci - shape.ox) * __cwrap_Delta_1;
 
-  - **They cannot name a scalar** in `foreach ()`: `Delta[]` is an error.
+  - **They cannot name a scalar** in `foreach ()`: `Delta[]` is an error,
+    and so is any use of an outer scalar, vector or tensor called `x`, `y`,
+    `z` or `Delta` (`f (x)`, `u = y`), which the coordinate would hide.
+    Rename it. An outer variable of another type is hidden quietly, as in
+    Basilisk.
   - **They need `foreach_leaf` to give `level`, `i`, `j`, `k`, and
     `foreach_cell` to give `ci`, `cj`, `ck`,** as in `<block-loops.h>`.
 - **The body sees none of the loops' names.** `c`, `shape`, `sblocks`, `node`,

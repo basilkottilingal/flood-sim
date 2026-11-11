@@ -172,6 +172,7 @@ struct stencil_loop {
   const struct token *at;       /* foreach, for messages */
   struct ast **access;          /* every s[...] of the body, in order */
   int naccess, cap;
+  int errors;                   /* reported before it: those after are its */
 };
 
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */

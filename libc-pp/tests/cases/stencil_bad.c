@@ -11,3 +11,7 @@ void f (void)
 }
 scalar Delta;
 void g (void) { foreach () Delta[] = 0; }
+scalar x;
+vector y;
+int use (scalar a);
+void h (void) { foreach () use (x + y.x); }
