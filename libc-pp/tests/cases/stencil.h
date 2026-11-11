@@ -78,3 +78,6 @@ static inline void ghosts_update_dirty (int n, const int * s)
       {...}
     }
 }
+
+/* the stencil loop, as <block-loops.h> declares it */
+@foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);

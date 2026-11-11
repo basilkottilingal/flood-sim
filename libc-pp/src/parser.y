@@ -54,6 +54,7 @@ struct parse_status {
   struct loop_def *cur_loop;  /* the one being parsed, or NULL */
   int loop_serial;
   struct stencil_loop *stencil;  /* the foreach () being parsed, or NULL */
+  struct stencil_def *stencils;  /* @foreach definitions, newest first */
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -255,6 +256,31 @@ static struct ast *loop_use (struct scope_table *scopes,
   return loop_expand (def, name, args, block, given, &status->rejected);
 }
 
+static const struct stencil_def *find_stencil (const struct parse_status *status,
+                                               const char *name)
+{
+  for (const struct stencil_def *d = status->stencils; d; d = d->next)
+    if (strcmp (d->name, name) == 0)
+      return d;
+  return NULL;
+}
+
+/* The end of a stencil loop's body: the loop, expanded. */
+static struct ast *stencil_use (struct scope_table *scopes,
+                                struct parse_status *status, struct ast *name,
+                                struct ast *args, struct ast *body)
+{
+  struct stencil_loop *loop = status->stencil;
+
+  status->stencil = loop->outer;
+  return stencil_loop_end (loop, find_stencil (status, ast_token (name)->text),
+                           args,
+                           scope_find (scopes, "ghosts_mark_dirty")
+                           && scope_find (scopes, "ghosts_mark_all_dirty")
+                           && scope_find (scopes, "ghosts_update_dirty"),
+                           name, body, &status->rejected);
+}
+
 /* A file may have foreach loops or something named foreach, not both. Reports
  * the loop, and returns whether foreach is declared here. */
 static int foreach_declared (const struct scope_table *scopes,
@@ -300,6 +326,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token FOREACH CACHE
 %token FOREACH_CELLS "foreach ()"
 %token AT_LOOP "@loop" LOOP_NAME
+%token AT_FOREACH "@foreach" STENCIL_NAME
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -338,6 +365,7 @@ external_declaration:
   | ASM '(' string ')' ';'        { $$ = N (ASM_DEFINITION, $1, $2, $3, $4, $5); }
   | ';'                           { $$ = N (EMPTY_DECLARATION, $1); }
   | loop_definition
+  | stencil_definition
   /* Error recovery: skip to the end of the declaration, and go on to find more
    * errors. A file with errors is not translated, so these build nothing. */
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -362,6 +390,36 @@ loop_definition:
                                                    N (LOOP_SOURCE, $1, $2, $3, $4, $5,
                                                       $6, $7, $8, $9, $10),
                                                    $6, $9); }
+  ;
+
+/* A stencil loop: see translate.h. Its parameters are in scope for the
+ * arguments of its two loops. foreach itself is not declared as a name, as
+ * a declared foreach would be a function. */
+stencil_definition:
+    AT_FOREACH stencil_name '(' open_scope loop_params ')' '='
+    LOOP_NAME '(' opt_arguments ')' LOOP_NAME '(' opt_arguments ')' ';' close_scope
+                                  { $$ = stencil_define (&status->stencils,
+                                                         N (LOOP_SOURCE, $1, $2, $3, $5, $6, $7,
+                                                            $8, $9, $10, $11, $12, $13, $14,
+                                                            $15, $16),
+                                                         $2, $5,
+                                                         find_loop (status, ast_token ($8)->text),
+                                                         $8, $10,
+                                                         find_loop (status, ast_token ($12)->text),
+                                                         $12, $14, &status->rejected);
+                                    if (strcmp (ast_token ($2)->text, "foreach") != 0)
+                                      scope_add (scopes, ast_token ($2)->text, SCOPE_STENCIL, $2);
+                                    (void) $4; (void) $17; }
+  ;
+
+stencil_name:
+    any_identifier
+  | FOREACH_CELLS
+  ;
+
+opt_arguments:
+    %empty                        { $$ = NULL; }
+  | argument_list
   ;
 
 loop_params:
@@ -554,6 +612,7 @@ any_identifier:
   | FOREACH
   | CACHE
   | LOOP_NAME
+  | STENCIL_NAME
   ;
 
 /* Declarators */
@@ -977,15 +1036,20 @@ iteration_statement:
   | FOREACH_CELLS '(' ')'         { status->stencil = stencil_loop_begin (status->stencil, $1,
                                                                         &status->rejected);
                                     $$ = NULL; }
-    statement                     { struct stencil_loop *loop = status->stencil;
-                                    status->stencil = loop->outer;
-                                    $$ = stencil_loop_end (loop, find_loop (status, "foreach_leaf"),
-                                                           find_loop (status, "foreach_cell"),
-                                                           scope_find (scopes, "ghosts_mark_dirty")
-                                                           && scope_find (scopes, "ghosts_mark_all_dirty")
-                                                           && scope_find (scopes, "ghosts_update_dirty"),
-                                                           $1, $5, &status->rejected);
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
+  /* a loop declared with @foreach, with arguments or not */
+  | STENCIL_NAME '(' ')'          { status->stencil = stencil_loop_begin (status->stencil, $1,
+                                                                        &status->rejected);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
+                                    (void) $2; (void) $3; (void) $4; }
+  | STENCIL_NAME '(' argument_list ')'
+                                  { status->stencil = stencil_loop_begin (status->stencil, $1,
+                                                                        &status->rejected);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_use (scopes, status, $1, $3, $6);
+                                    (void) $2; (void) $4; (void) $5; }
   /* A use of a block macro. Its statement, the block, is parsed in a scope
    * with the names the loop gives it. */
   | LOOP_NAME '(' ')' open_scope  { loop_open (scopes, status, $1); $$ = NULL; }
@@ -1358,7 +1422,7 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
-  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL };
+  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL, NULL };
   int lineno = 1;
   int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 

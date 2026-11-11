@@ -18,6 +18,7 @@ enum scope_kind {
                            * parameter or enumerator */
   SCOPE_TYPEDEF,
   SCOPE_LOOP,             /* a name defined by @loop */
+  SCOPE_STENCIL,          /* a name declared by @foreach */
 };
 
 struct var {

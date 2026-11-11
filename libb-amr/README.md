@@ -43,7 +43,9 @@ the same nodes, for coupled operators such as `h` with `zb`.
 
 **Derived scalars** are not prolonged. Fill the ghosts of the scalars they
 come from, then compute them on the halo, `block_cells (shape, GHOSTS)`, as
-Parthenon's `FillDerived` does.
+Parthenon's `FillDerived` does. With cwrap, compute them on the interior,
+`foreach () d[] = f (u[]);`, and let the stale ghosts be filled as for any
+scalar (below): one more update, but right at every kind of boundary.
 
 **Refining and coarsening keep ghosts valid.**
 - `tree_refine ()` prolongs the children from the parent (interior and
@@ -140,8 +142,8 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   parameter, and names in the body (`c`, `level`, `i`, `node`, `sblocks`)
   that the loops' own names do not hide; `x`, `y`, `z` and `Delta` on a
   moved, resized domain with two levels of leaves, against the centre of
-  each cell computed apart. Also with OpenMP and
-  `-DBAMR_ALIGN=4`.
+  each cell computed apart; ghosts updated lazily, against `ghosts_update ()`
+  by hand. Also with OpenMP and `-DBAMR_ALIGN=4`.
 
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash

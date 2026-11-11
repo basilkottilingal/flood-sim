@@ -614,6 +614,25 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
 - **`foreach ()` visits every interior cell of every leaf block.** It is two
   loops, the `@loop`s `foreach_leaf ()` over the leaves, in Morton order, and
   `foreach_cell (tree_block_shape (), 0)` over the cells of each.
+- **Stencil loops are declared with `@foreach`,** in `<block-loops.h>`:
+
+      @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
+
+  the loop over the blocks and the loop over the cells of each, both
+  `@loop`s, with their arguments. The block loop must give `sblocks`, the
+  cell loop `c` and `shape` (and `level`, `i`, `j`, `k`, `ci`, `cj`, `ck`
+  for `x`, `y`, `z` and `Delta`). A loop may take parameters, which its two
+  loops' arguments use, and each use binds once:
+  `@foreach foreach_in (int l) = leaf_at (l) foreach_cell (...);` then
+  `foreach_in (2) s[] = 1;`. Everything below holds for each. The cell loop
+  is to visit interior cells only.
+- **No stencil loop fills ghosts.** What a ghost is depends on what is
+  beyond the block: a leaf of the same level, a coarser one, the domain's
+  boundary, another rank later. `ghosts_update ()` (block-ghosts.h) does it,
+  by the scalar's operations, and `foreach ()` calls it as needed (below).
+  A derived scalar is computed on the interior with `foreach ()`, and its
+  ghosts filled like any other's. Loops over the ghosts, by kind of
+  boundary, are left for later, with MPI.
 - **`s[]` is the cell of scalar `s`; `s[i]`, `s[i,j]`, `s[i,j,k]` the cell at
   that offset.** Offsets left out are 0, so `s[1]` is `s[1,0,0]` in any
   dimension. More offsets than the dimension is an error. Offsets are any
@@ -698,12 +717,17 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     `foreach () { p[] = x; q[] = p[1,0] - p[-1,0]; }` reads the ghosts of
     `p` stale, and its neighbours old or new by the order of the cells.
     Write `p` in a `foreach ()` of its own first.
-- **`foreach ()` inside `foreach ()` is an error,** and so is `s[]` outside.
+- **Stencil loops do not nest, which is checked at compile time:**
+  - one inside another, of the same `@foreach` or not, is an error;
+  - so is a call, inside one, of a function of the same file that runs one,
+    itself or through other functions of the file. A function of another
+    file, or one called through a pointer, cannot be seen.
+  - `s[]` outside a stencil loop is an error.
 - **`foreach ()` is the loop only while no `foreach` is declared** (a
   function, a variable). Otherwise `foreach ()` is the call it was.
-- **Errors:** without `foreach_leaf` (giving `sblocks`) and `foreach_cell`
-  (giving `c` and `shape`) defined, `foreach ()` is an error that says to
-  include `<block-loops.h>`; a loop that writes, or reads at an offset,
+- **Errors:** without the `@foreach` of a loop, as without
+  `<block-loops.h>`, its use is an error that says to include it; a loop
+  that writes, or reads at an offset,
   without `ghosts_mark_dirty ()`, `ghosts_mark_all_dirty ()` and
   `ghosts_update_dirty ()` declared, one that says to include
   `<block-ghosts.h>`.

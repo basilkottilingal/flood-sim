@@ -101,6 +101,8 @@ static int identifier_kind (struct lexer *lx, const char *name)
     return T_TYPE_NAME;
   if (v && v->kind == SCOPE_LOOP)
     return T_LOOP_NAME;
+  if (v && v->kind == SCOPE_STENCIL)
+    return T_STENCIL_NAME;
   return T_IDENTIFIER;
 }
 
@@ -269,6 +271,8 @@ PFX     (u8|u|U|L)
 
   /* A block macro: see translate.h. C has no other use for @. */
 "@loop"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_LOOP); }
+  /* A stencil loop: see translate.h. */
+"@foreach"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_FOREACH); }
 
   /* Unknown to the grammar, so it surfaces as a syntax error. */
 .       { AST ((unsigned char)yytext[0]); }

@@ -336,8 +336,28 @@ check "foreach (): errors in the body and after it keep their lines" $?
 check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nesting, a scalar x hidden" $?
 
 "$cwrap" -dimension=2 -c stencil_noloops.c -o stencil_noloops.o 2> stencil_noloops.log
-[ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () needs the @loops" stencil_noloops.log
-check "foreach (): without foreach_leaf and foreach_cell, an error" $?
+[ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () is not declared: include <block-loops.h>" stencil_noloops.log
+check "foreach (): without its @foreach, an error" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra stencil_params.c -o stencil_params 2> stencil_params.log &&
+  [ "$(./stencil_params)" = "6 1" ] && [ ! -s stencil_params.log ]
+check "@foreach with a parameter: given to its block loop, its argument evaluated once" $?
+
+"$cwrap" -dimension=2 -c stencil_foreach_bad.c -o stencil_foreach_bad.o 2> stencil_foreach_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_foreach_bad.o ] &&
+  [ "$(grep -o '^stencil_foreach_bad.c:[0-9]*: error' stencil_foreach_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 9 " ] &&
+  grep -q "^stencil_foreach_bad.c:6: error: again () inside foreach (): stencil loops do not nest" stencil_foreach_bad.log &&
+  grep -q "^stencil_foreach_bad.c:7: error: again () takes 0 arguments, not 1" stencil_foreach_bad.log &&
+  grep -q "^stencil_foreach_bad.c:9: error: @foreach foreach is defined again, differently" stencil_foreach_bad.log
+check "@foreach: one stencil loop in another, the arguments counted, a different definition again" $?
+
+"$cwrap" -dimension=2 -c stencil_nest.c -o stencil_nest.o 2> stencil_nest.log
+[ $? -ne 0 ] && [ ! -e stencil_nest.o ] &&
+  [ "$(grep -o '^stencil_nest.c:[0-9]*: error' stencil_nest.log | cut -d: -f2 | tr '\n' ' ')" = "8 9 " ] &&
+  grep -q "^stencil_nest.c:8: error: 'fill ()' runs a stencil loop, and is called inside one" stencil_nest.log &&
+  grep -q "^stencil_nest.c:3: note: 'fill' runs one here" stencil_nest.log &&
+  grep -q "^stencil_nest.c:4: note: 'twice' calls one that runs one" stencil_nest.log
+check "@foreach: a call inside a stencil loop to a function that runs one, directly or not" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra stencil_ghosts.c -o stencil_ghosts 2> stencil_ghosts.log &&
   [ "$(./stencil_ghosts)" = "updated 0 4 | stale 14" ] && [ ! -s stencil_ghosts.log ]

@@ -598,6 +598,19 @@
   }
 
   /*
+  .. Stencil loops, for cwrap's s[] (see libc-pp/README.md, "Stencils"):
+  ..
+  ..   foreach () { ... }    every interior cell of every leaf, the ghosts
+  ..                         kept up to date as cells are written
+  ..
+  .. A stencil loop does not nest, in itself or another, nor through a call.
+  .. Loops that fill ghosts depend on what is beyond the block (a neighbour,
+  .. a coarser leaf, the domain's boundary, another rank): block-ghosts.h
+  .. does that, not a stencil loop.
+  */
+  @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
+
+  /*
   .. block_table (s, table, where): the blocks of scalar s in the leaves, in
   .. Morton order, into table [0..], and their indices into where [0..] if
   .. not NULL. Returns how many: tree_get_nleaves (). For gpu_cells (): with

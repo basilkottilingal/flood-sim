@@ -167,9 +167,40 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
  * of the cell, as in Basilisk, from the leaf's i, j, k and level and the
  * cell's ci, cj, ck; only those the body uses are declared. */
 
+/* A stencil loop, declared with @foreach:
+ *
+ *   @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
+ *
+ * the loop over the blocks and the loop over the cells of each, two @loops,
+ * with their arguments, which may use the parameters, as in
+ * `@foreach name (int l) = ...`. A use, name (args) body, binds each
+ * parameter to its argument, once, then expands as foreach () does. The
+ * cell loop is to visit interior cells: the ghosts are kept up to date
+ * around it, not by it. */
+struct stencil_def {
+  const char *name;
+  const struct token *at;       /* the name, for messages */
+  struct ast *source;           /* every token, to compare two definitions */
+  struct ast *params;           /* PARAMETER_LIST, or NULL */
+  const struct loop_def *leaf, *cell;
+  struct ast *leaf_args, *cell_args;  /* ARGUMENT_LIST, or NULL */
+  struct stencil_def *next;
+};
+
+/* @foreach, parsed: added to *list, unless defined before the same way;
+ * an error if differently, or if leaf or cell is not a @loop. Returns what
+ * goes in the tree: the definition's trivia. */
+struct ast *stencil_define (struct stencil_def **list, struct ast *source,
+                            struct ast *name, struct ast *params,
+                            const struct loop_def *leaf,
+                            struct ast *leaf_name, struct ast *leaf_args,
+                            const struct loop_def *cell, struct ast *cell_name,
+                            struct ast *cell_args, int *rejected);
+
 struct stencil_loop {
-  struct stencil_loop *outer;   /* the foreach () around this one, or NULL */
+  struct stencil_loop *outer;   /* the loop around this one, or NULL */
   const struct token *at;       /* foreach, for messages */
+  const char *name;             /* foreach, or another @foreach */
   struct ast **access;          /* every s[...] of the body, in order */
   int naccess, cap;
   int errors;                   /* reported before it: those after are its */
@@ -178,7 +209,8 @@ struct stencil_loop {
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
 
-/* foreach (, once `)` is read: the loop whose accesses the body adds to. */
+/* foreach (, once `)` is read: the loop whose accesses the body adds to.
+ * One inside another is an error. */
 struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
                                          struct ast *kw, int *rejected);
 
@@ -190,9 +222,9 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
                             struct ast *open, struct ast *offsets,
                             struct ast *close, int *rejected);
 
-/* The loop with its body: the expansion described above. leaf and cell are
- * the definitions of foreach_leaf and foreach_cell, NULL if not defined: an
- * error. has_ghosts: ghosts_mark_dirty (), ghosts_mark_all_dirty () and
+/* The loop with its body: the expansion described above. def is the
+ * loop's @foreach, NULL if not declared: an error; args its arguments, an
+ * ARGUMENT_LIST or NULL. has_ghosts: ghosts_mark_dirty (), ghosts_mark_all_dirty () and
  * ghosts_update_dirty () are declared, which a loop that writes or reads at
  * an offset needs: an error otherwise.
  *
@@ -209,8 +241,8 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
  * cell at an offset (s[1] = ...) is an error; reading at an offset a scalar
  * the loop writes, a warning. */
 struct ast *stencil_loop_end (struct stencil_loop *loop,
-                              const struct loop_def *leaf,
-                              const struct loop_def *cell, int has_ghosts,
-                              struct ast *kw, struct ast *body, int *rejected);
+                              const struct stencil_def *def, struct ast *args,
+                              int has_ghosts, struct ast *kw, struct ast *body,
+                              int *rejected);
 
 #endif

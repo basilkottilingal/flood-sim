@@ -1312,10 +1312,12 @@ struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
 {
   struct stencil_loop *loop = allocate (sizeof (*loop));
 
+  loop->name = ast_token (kw)->text;
   if (outer) {
-    stencil_error (rejected, kw, "foreach () inside foreach ()");
-    diag (outer->at->file, outer->at->line, DIAG_NOTE, "the outer foreach () "
-          "is here");
+    stencil_error (rejected, kw, "%s () inside %s (): stencil loops do not "
+                   "nest", loop->name, outer->name);
+    diag (outer->at->file, outer->at->line, DIAG_NOTE, "the outer %s () is "
+          "here", outer->name);
   }
   loop->outer = outer;
   loop->at = ast_token (kw);
@@ -1515,6 +1517,106 @@ static int loop_gives (const struct loop_def *def, const char *name)
 
 static int stencil_serial;
 
+static void add_text (struct ast *leaf, void *out);
+
+/* What a stencil loop expands to, marked as one, for check_stencil_calls (). */
+static struct ast *stencil_mark (struct ast *n)
+{
+  return ast_node (AST_STENCIL_LOOP, &n, 1);
+}
+
+/* A copy of args, a declaration's arguments to one of its loops, with each
+ * of its parameters ps [0..n) named names [k], or NULL. */
+static void rename_params (struct ast *leaf, void *arg)
+{
+  struct ast **pass = arg;
+  struct ast **ps = (struct ast **)pass[0];
+  const char **names = (const char **)pass[1];
+  int n = (int)(long)pass[2];
+  struct token *t = &((struct ast_leaf *)leaf)->tok;
+
+  if (t->kind != T_IDENTIFIER || !names_ordinary (leaf))
+    return;
+  for (int k = 0; k < n; k++)
+    if (strcmp (t->text, ast_declared_name (ps[k])) == 0) {
+      t->text = names[k];
+      t->binding = NULL;
+      return;
+    }
+}
+
+static struct ast *stencil_arguments (const struct ast *args, struct ast **ps,
+                                      const char **names, int n)
+{
+  struct ast *copy;
+  void *pass[3] = { ps, names, (void *)(long)n };
+
+  if (!args)
+    return NULL;
+  copy = ast_copy (args);
+  each_leaf (copy, rename_params, pass);
+  return copy;
+}
+
+/* The tokens under n, one space apart, to compare two definitions. */
+static const char *source_text (const struct ast *n)
+{
+  MEMSTREAM (t);
+
+  if (!t)
+    abort ();
+  each_leaf ((struct ast *)n, add_text, t);
+  return MEMSTREAM_TEXT (t);
+}
+
+struct ast *stencil_define (struct stencil_def **list, struct ast *source,
+                            struct ast *name, struct ast *params,
+                            const struct loop_def *leaf,
+                            struct ast *leaf_name, struct ast *leaf_args,
+                            const struct loop_def *cell, struct ast *cell_name,
+                            struct ast *cell_args, int *rejected)
+{
+  struct stencil_def *def = allocate (sizeof (*def)), *old;
+  struct ast *ps[MAX_LOOP_PARAMS];
+  struct loop_def holder = { 0 };
+  int n;
+
+  def->name = ast_token (name)->text;
+  def->at = ast_token (name);
+  def->source = source;
+  def->params = params;
+  def->leaf = leaf;
+  def->cell = cell;
+  def->leaf_args = leaf_args;
+  def->cell_args = cell_args;
+  if (!leaf)
+    stencil_error (rejected, leaf_name, "@foreach %s: '%s' is not a @loop",
+                   def->name, ast_token (leaf_name)->text);
+  if (!cell)
+    stencil_error (rejected, cell_name, "@foreach %s: '%s' is not a @loop",
+                   def->name, ast_token (cell_name)->text);
+  holder.name = def->name;
+  holder.at = def->at;
+  holder.params = params;
+  *rejected += loop_check_params (&holder);
+  n = loop_params (&holder, ps, MAX_LOOP_PARAMS);
+  def->params = n ? params : NULL;
+  for (old = *list; old && strcmp (old->name, def->name) != 0; old = old->next)
+    ;
+  if (old) {
+    if (strcmp (source_text (old->source), source_text (source)) != 0) {
+      stencil_error (rejected, name, "@foreach %s is defined again, "
+                     "differently", def->name);
+      diag (old->at->file, old->at->line, DIAG_NOTE, "'%s' is defined here",
+            old->name);
+    }
+  } else {
+    def->next = *list;
+    *list = def;
+  }
+  return loop_stub (source);
+}
+
 /* In foreach (), x, y, z and Delta are the cell's: the coordinates of its
  * centre and its size, as in Basilisk. */
 static const char *const stencil_reserved[] = { "x", "y", "z", "Delta" };
@@ -1687,26 +1789,56 @@ static int loops_give_position (const struct loop_def *leaf,
 }
 
 struct ast *stencil_loop_end (struct stencil_loop *loop,
-                              const struct loop_def *leaf,
-                              const struct loop_def *cell, int has_ghosts,
-                              struct ast *kw, struct ast *body, int *rejected)
+                              const struct stencil_def *def, struct ast *args,
+                              int has_ghosts, struct ast *kw, struct ast *body,
+                              int *rejected)
 {
+  const struct loop_def *leaf = def ? def->leaf : NULL;
+  const struct loop_def *cell = def ? def->cell : NULL;
+  struct ast *ps[MAX_LOOP_PARAMS], *vs[MAX_LOOP_PARAMS];
+  int nparams = 0, nargs = 0;
   struct ghost_scalar written[MAX_GHOST_SCALARS], needed[MAX_GHOST_SCALARS];
   int nwritten = 0, nneeded = 0, *wrote;
   static const char *const strides[] = { "", " * %s.sy", " * %s.sz" };
   const struct token *at = ast_token (kw);
   struct stencil_block blocks[MAX_STENCIL_BLOCKS];
-  struct ast *args, *items, *open, *close, *kids[3], *cells;
+  struct ast *items, *open, *close, *kids[3], *cells;
   const char *sblocks, *c, *shape;
   int nblocks = 0, serial = ++stencil_serial, inner, outer;
+  const char *params[MAX_LOOP_PARAMS];
   int uses[NRESERVED] = { 0 }, position = 0;
   int errors = loop->errors;              /* this loop's: those after it */
 
-  if (!leaf || !cell || !loop_gives (leaf, "sblocks") || !loop_gives (cell, "c")
+  if (!def) {
+    stencil_error (rejected, kw, "%s () is not declared: include "
+                   "<block-loops.h>, which declares it with @foreach",
+                   ast_token (kw)->text);
+    return body;
+  }
+  if (!leaf || !cell)
+    return body;                          /* reported where it is defined */
+  if (!loop_gives (leaf, "sblocks") || !loop_gives (cell, "c")
       || !loop_gives (cell, "shape")) {
-    stencil_error (rejected, kw, "foreach () needs the @loops foreach_leaf, "
-                   "which gives sblocks, and foreach_cell, which gives c and "
-                   "shape: include <block-loops.h>");
+    stencil_error (rejected, kw, "%s () needs its loop over the blocks, %s, "
+                   "to give sblocks, and its loop over the cells, %s, c and "
+                   "shape", def->name, leaf->name, cell->name);
+    return body;
+  }
+  {
+    struct loop_def holder = { 0 };
+
+    holder.params = def->params;
+    nparams = loop_params (&holder, ps, MAX_LOOP_PARAMS);
+  }
+  for (struct ast *a = args ? args->child : NULL; a; a = a->next)
+    if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
+        && nargs < MAX_LOOP_PARAMS)
+      vs[nargs++] = a;
+  if (nargs != nparams) {
+    stencil_error (rejected, kw, "%s () takes %d argument%s, not %d",
+                   def->name, nparams, nparams == 1 ? "" : "s", nargs);
+    diag (def->at->file, def->at->line, DIAG_NOTE, "'%s' is defined here",
+          def->name);
     return body;
   }
   /* x, y, z and Delta are the cell's, and cannot name a scalar here */
@@ -1746,8 +1878,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     wrote[a] = stencil_writes (access);
     if (wrote[a] && offset) {
       stencil_error (rejected, access, "'%s' writes a cell other than its "
-                     "own: in foreach (), a cell writes only s[]",
-                     expression_text (access));
+                     "own: in %s (), a cell writes only s[]",
+                     expression_text (access), def->name);
       continue;
     }
     if (nwritten == MAX_GHOST_SCALARS || nneeded == MAX_GHOST_SCALARS)
@@ -1879,10 +2011,13 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     body = ast_node (AST_COMPOUND_STATEMENT, wrap, 3);
   }
 
-  /* foreach_cell (tree_block_shape (), 0) body */
-  args = parse_stencil_item ("g (tree_block_shape (), 0);")->child->child->next->next;
-  args->parent = args->next = NULL;
-  cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at), args,
+  /* the cell loop, with the arguments the declaration gives it: its
+   * parameters as hidden locals, bound below */
+  for (int k = 0; k < nparams; k++)
+    params[k] = arena_printf ("__cwrap_%s_%s_%d", def->name,
+                              ast_declared_name (ps[k]), serial);
+  cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at),
+                       stencil_arguments (def->cell_args, ps, params, nparams),
                        body, NULL, 1, rejected);
 
   /* { the blocks; foreach_cell ... }, the block of foreach_leaf () */
@@ -1929,19 +2064,35 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   kids[0] = open;
   kids[1] = items;
   kids[2] = close;
-  if (!nwritten && !nneeded)
-    return expand_loop (leaf, kw, NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
-                        NULL, 1, rejected);
+  struct ast *leaf_args = stencil_arguments (def->leaf_args, ps, params, nparams);
 
-  /* { the stale ghosts it reads, updated; the loop; those it writes,
-   *   marked } */
+  if (!nwritten && !nneeded && !nparams)
+    return stencil_mark (expand_loop (leaf, kw, leaf_args,
+                                      ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                                      NULL, 1, rejected));
+
+  /* { the parameters, bound; the stale ghosts it reads, updated; the loop;
+   *   those it writes, marked } */
   struct ast *leaves = expand_loop (leaf, new_token (T_IDENTIFIER, "foreach", at),
-                                    NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                                    leaf_args,
+                                    ast_node (AST_COMPOUND_STATEMENT, kids, 3),
                                     NULL, 1, rejected);
   struct ast *around = ast_new (AST_BLOCK_ITEMS), *es[2 * MAX_GHOST_SCALARS];
   const struct token *end = last_token (leaves);
   int all = 0, nes = 0;
   const char *text = "";
+
+  {
+    struct loop_def none = { 0 };
+    struct rename r = { &none, 0, NULL, 0 };
+
+    none.serial = -1;                     /* renames nothing */
+    for (int k = 0; k < nparams; k++) {
+      vs[k]->parent = vs[k]->next = NULL;
+      each_leaf (vs[k], flatten_leaf, (void *)at);
+      ast_add (around, bind_parameter (ps[k], params[k], vs[k], &r, at));
+    }
+  }
 
   for (int r = 0; r < nneeded; r++)
     all |= needed[r].all;
@@ -2005,14 +2156,157 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   first_token (kids[0])->trivia = at->trivia;
   kids[1] = around;
   kids[2] = new_token ('}', "}", end);
-  return ast_node (AST_COMPOUND_STATEMENT, kids, 3);
+  return stencil_mark (ast_node (AST_COMPOUND_STATEMENT, kids, 3));
+}
+
+/* Stencil loops do not nest, even through a call: a function of this file
+ * that runs one, itself or through others of this file, must not be called
+ * inside one. Returns the number of errors reported. */
+
+struct stencil_fn {
+  const char *name;
+  struct ast *def;
+  const struct token *loop;     /* its first stencil loop, or NULL */
+  int runs;                     /* runs one, itself or through a call */
+};
+
+static const struct token *first_stencil_loop (struct ast *n)
+{
+  if (n->kind == AST_TOKEN)
+    return NULL;
+  if (n->kind == AST_STENCIL_LOOP)
+    return ast_first_token (n);
+  for (n = n->child; n; n = n->next) {
+    const struct token *t = first_stencil_loop (n);
+
+    if (t)
+      return t;
+  }
+  return NULL;
+}
+
+static struct stencil_fn *find_fn (struct stencil_fn *fns, int n,
+                                   const char *name)
+{
+  for (int k = 0; k < n; k++)
+    if (strcmp (fns[k].name, name) == 0)
+      return &fns[k];
+  return NULL;
+}
+
+/* The function a call names, if it is a plain name. */
+static const char *callee (const struct ast *call)
+{
+  const struct ast *f = call->child;
+
+  while (f->kind == AST_PAREN_EXPRESSION)
+    f = f->child->next;
+  return f->kind == AST_TOKEN && ast_token (f)->kind == T_IDENTIFIER
+         ? ast_token (f)->text : NULL;
+}
+
+/* Does anything under n call one that runs a stencil loop? */
+static int calls_runner (struct ast *n, struct stencil_fn *fns, int nfns)
+{
+  struct stencil_fn *f;
+  const char *name;
+
+  if (n->kind == AST_TOKEN)
+    return 0;
+  if (n->kind == AST_CALL && (name = callee (n))
+      && (f = find_fn (fns, nfns, name)) && f->runs)
+    return 1;
+  for (n = n->child; n; n = n->next)
+    if (calls_runner (n, fns, nfns))
+      return 1;
+  return 0;
+}
+
+/* An error for each call under n, a stencil loop, of one that runs one. */
+static int report_nested_calls (struct ast *n, struct stencil_fn *fns,
+                                int nfns, const struct token *outer)
+{
+  struct stencil_fn *f;
+  const char *name;
+  int errors = 0;
+
+  if (n->kind == AST_TOKEN)
+    return 0;
+  if (n->kind == AST_CALL && (name = callee (n))
+      && (f = find_fn (fns, nfns, name)) && f->runs) {
+    const struct token *t = ast_first_token (n);
+
+    diag (t->file, t->line, DIAG_ERROR, "'%s ()' runs a stencil loop, and is "
+          "called inside one: stencil loops do not nest", name);
+    if (f->loop)
+      diag (f->loop->file, f->loop->line, DIAG_NOTE, "'%s' runs one here",
+            name);
+    else {
+      t = ast_first_token (f->def);
+      diag (t->file, t->line, DIAG_NOTE, "'%s' calls one that runs one",
+            name);
+    }
+    diag (outer->file, outer->line, DIAG_NOTE, "the outer loop is here");
+    errors++;
+  }
+  for (n = n->child; n; n = n->next)
+    errors += report_nested_calls (n, fns, nfns, outer);
+  return errors;
+}
+
+static int find_stencil_loops (struct ast *n, struct stencil_fn *fns, int nfns)
+{
+  int errors = 0;
+
+  if (n->kind == AST_TOKEN)
+    return 0;
+  if (n->kind == AST_STENCIL_LOOP)
+    return report_nested_calls (n, fns, nfns, ast_first_token (n));
+  for (n = n->child; n; n = n->next)
+    errors += find_stencil_loops (n, fns, nfns);
+  return errors;
+}
+
+static int check_stencil_calls (struct ast *root)
+{
+  struct stencil_fn *fns;
+  int n = 0, cap = 0, changed = 1, errors = 0;
+
+  for (struct ast *d = root->child; d; d = d->next)
+    cap++;
+  fns = allocate ((size_t)cap * sizeof (*fns) + 1);
+  for (struct ast *d = root->child; d; d = d->next) {
+    struct ast *fn = d->kind == AST_EXTENSION_DEFINITION ? d->child->next : d;
+    const char *name;
+
+    if (fn->kind != AST_FUNCTION_DEFINITION
+        || !(name = ast_declared_name (fn->child->next)))
+      continue;
+    fns[n].name = name;
+    fns[n].def = fn;
+    fns[n].loop = first_stencil_loop (fn);
+    fns[n].runs = fns[n].loop != NULL;
+    n++;
+  }
+  while (changed) {
+    changed = 0;
+    for (int k = 0; k < n; k++)
+      if (!fns[k].runs && calls_runner (fns[k].def, fns, n))
+        fns[k].runs = changed = 1;
+  }
+  for (int k = 0; k < n; k++)
+    errors += find_stencil_loops (fns[k].def, fns, n);
+  return errors;
 }
 
 /* The translation itself: rewrite the tree here. */
-static void transform (struct ast *root)
+static int transform (struct ast *root)
 {
+  int errors = check_stencil_calls (root);
+
   register_scalars (root);
   define_caches (root);
+  return errors;
 }
 
 /* gcc gets the input as it came. It either accepts code our grammar does not
@@ -2048,8 +2342,12 @@ int translate_file (const char *in_path, const char *out_path)
     return TRANSLATE_FAILED;
   }
   parsed = root != NULL;
+  if (root && transform (root)) {
+    fclose (in);
+    free_arena ();
+    return TRANSLATE_FAILED;
+  }
   if (root) {
-    transform (root);
     if (getenv ("CWRAP_DUMP_AST"))
       ast_dump (root, stderr);
   }
