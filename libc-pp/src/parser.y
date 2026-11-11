@@ -1259,6 +1259,7 @@ postfix_expression:
   | CACHE '(' argument_list ')'   { $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '(' argument_list ')'
                                   { check_cache_arguments (scopes, $3);
+                                    status->rejected += check_global_free ($1, $3);
                                     /* coarse (s, i, j): a cell one level up */
                                     $$ = stencil_coarse (status->stencil, $1, $2, $3, $4,
                                                          &status->rejected);

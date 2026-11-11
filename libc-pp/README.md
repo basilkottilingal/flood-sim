@@ -252,6 +252,27 @@ covers a whole vector or tensor, or part of one, as in `v = w`, `t.y = v` and
 `t.x.y = 1`. The warning names the operator and what it changes, and a note
 shows the declaration.
 
+### A global scalar is never freed
+
+A scalar at file scope, `static` in a function, or `extern`, and each scalar
+of such a vector or tensor, is numbered once, before `main ()`, and keeps its
+id for the whole run: another scalar's operators may depend on it, as
+coupled prolongations will. So:
+
+- **`scalar_free ()`, `vector_free ()` or `tensor_free ()` of one, or of a
+  member of one, is a compile error,** with a note at its declaration:
+
+      scalar zb;
+      ...
+      scalar_free (zb);   /* error: scalar_free () of 'zb', a global scalar: it
+                             is numbered once for the whole run and never freed */
+
+- **A free cwrap cannot see,** as through a pointer, stops the run:
+  `scalar_free ()` of an id below `n_global_scalars` prints the id and
+  aborts.
+
+A local scalar, and one from `scalar_new ()`, is freed as before.
+
 ### Runtime API (`src/scalar.h`)
 
 | Function | |

@@ -55,6 +55,18 @@ void (* scalar_new_hook) (scalar) = NULL;
 void scalar_free (scalar s)
 {
   /*
+  .. A global scalar (at file scope, or static in a function) is numbered
+  .. once for the whole run, and never freed: another scalar's operators may
+  .. depend on it (block-ghosts.h). cwrap refuses such a free where it sees
+  .. one; this catches the others, as through a pointer.
+  */
+  if (s >= 0 && s < n_global_scalars)
+  {
+    fprintf (stderr, "scalar_free: scalar %d is global, numbered once for "
+             "the whole run: it is never freed\n", (int) s);
+    abort ();
+  }
+  /*
   .. an id not in use is left alone: freed twice, or never set, as when a goto
   .. jumps past the declaration of a local scalar.
   */

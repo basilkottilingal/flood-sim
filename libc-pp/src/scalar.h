@@ -34,7 +34,9 @@
 
   /* api */
   scalar scalar_new    (void);         /* the lowest free id; aborts if none */
-  void   scalar_free   (scalar);       /* an id not in use is left alone */
+  void   scalar_free   (scalar);       /* an id not in use is left alone;
+                                          a global one stops the run: a
+                                          global scalar is never freed */
   int    scalar_in_use (scalar);
   int    scalar_count  (void);         /* ids in use */
 

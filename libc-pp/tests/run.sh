@@ -397,6 +397,21 @@ check "@prolongation and @restriction: ids by kind, attached by name, a switch w
   grep -q "^ops_bad.c:5: error: @restriction (...) (...): no @restriction is defined before it" ops_bad.log
 check "ghost operators: defined twice, or dispatched with none defined, an error" $?
 
+"$cwrap" -dimension=2 -c scalar_global_free.c -o scalar_global_free.o 2> scalar_global_free.log
+[ $? -ne 0 ] && [ ! -e scalar_global_free.o ] &&
+  [ "$(grep -o '^scalar_global_free.c:[0-9]*: error' scalar_global_free.log | cut -d: -f2 | tr '\n' ' ')" = "9 10 11 12 13 " ] &&
+  grep -q "^scalar_global_free.c:9: error: scalar_free () of 'zb', a global scalar: it is numbered once for the whole run and never freed" scalar_global_free.log &&
+  grep -q "^scalar_global_free.c:10: error: scalar_free () of 'u.x', a member of a global vector" scalar_global_free.log &&
+  grep -q "^scalar_global_free.c:1: note: 'zb' is declared here" scalar_global_free.log
+check "a global scalar is never freed: at file scope, static, extern, a member, a tensor; a local one is" $?
+
+"$cwrap" -dimension=2 -Wall scalar_global_abort.c -o scalar_global_abort 2> scalar_global_abort.log &&
+  (ulimit -c 0; ./scalar_global_abort > scalar_global_abort.out 2> scalar_global_abort.err
+   echo $? > scalar_global_abort.rc) 2> /dev/null &&
+  [ "$(cat scalar_global_abort.rc)" -ne 0 ] && [ ! -s scalar_global_abort.out ] &&
+  grep -q "^scalar_free: scalar 0 is global, numbered once for the whole run: it is never freed" scalar_global_abort.err
+check "a global scalar freed through a pointer stops the run" $?
+
 "$cwrap" -dimension=2 -c stencil_foreach_bad.c -o stencil_foreach_bad.o 2> stencil_foreach_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_foreach_bad.o ] &&
   [ "$(grep -o '^stencil_foreach_bad.c:[0-9]*: error' stencil_foreach_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 9 " ] &&

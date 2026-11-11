@@ -1152,6 +1152,55 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
   return expand_loop (def, name, args, block, given, 0, rejected);
 }
 
+/* A global scalar is never freed */
+
+static const struct ast *declarator_specs (const struct ast *d);
+static int declarator_indirections (const struct ast *d);
+
+int check_global_free (const struct ast *fn, const struct ast *args)
+{
+  const struct ast *e, *specs, *decl;
+  const struct token *t;
+
+  if (!dimension || fn->kind != AST_TOKEN || !args || !args->child)
+    return 0;
+  t = ast_token (fn);
+  if (t->kind != T_IDENTIFIER || (strcmp (t->text, "scalar_free") != 0
+                                  && strcmp (t->text, "vector_free") != 0
+                                  && strcmp (t->text, "tensor_free") != 0))
+    return 0;
+  /* (t.x).y: down to t */
+  for (e = args->child;;) {
+    if (e->kind == AST_PAREN_EXPRESSION)
+      e = e->child->next;
+    else if (e->kind == AST_MEMBER && strcmp (ast_token (e->child->next)->text, ".") == 0)
+      e = e->child;
+    else
+      break;
+  }
+  if (e->kind != AST_TOKEN || !ast_token (e)->binding
+      || ast_token (e)->binding->kind != SCOPE_VARIABLE
+      || !(decl = ast_token (e)->binding->decl)
+      || !(specs = declarator_specs (decl)) || !scalar_type (specs)
+      || declarator_indirections (decl) != 0)
+    return 0;
+  {
+    const struct ast *d = specs->parent;  /* the declaration */
+
+    if (d->parent && d->parent->kind == AST_EXTENSION_DECLARATION)
+      d = d->parent;
+    if (!has_token (specs, T_STATIC, NULL) && !has_token (specs, T_EXTERN, NULL)
+        && !(d->parent && d->parent->kind == AST_TRANSLATION_UNIT))
+      return 0;
+  }
+  diag (t->file, t->line, DIAG_ERROR, "%s () of '%s', %s global %s: it is "
+        "numbered once for the whole run and never freed", t->text,
+        expression_text (args->child),
+        e == args->child ? "a" : "a member of a", scalar_type (specs));
+  note_declared (decl);
+  return 1;
+}
+
 /* Stencils: foreach () and s[...] */
 
 int stencil_enabled (void)

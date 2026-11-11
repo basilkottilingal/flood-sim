@@ -78,6 +78,13 @@ int check_cache_copy (const struct scope_table *scopes, const struct ast *expr,
 void check_cache_arguments (const struct scope_table *scopes,
                             const struct ast *args);
 
+/* An error if a call, fn (args), is scalar_free, vector_free or tensor_free
+ * of a global scalar, vector or tensor (at file scope, static or extern), or
+ * of a member of one: a global scalar is numbered once for the whole run and
+ * never freed, as other scalars' operators may depend on it. Returns the
+ * number of errors reported. */
+int check_global_free (const struct ast *fn, const struct ast *args);
+
 /* An error for a typedef of cache (T): caches are known by cache (T) alone. */
 int check_cache_declaration (const struct ast *decl);
 
