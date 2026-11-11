@@ -79,5 +79,16 @@ static inline void ghosts_update_dirty (int n, const int * s)
     }
 }
 
+/* foreach_neighbor (r) checks r against the ghost layers with this */
+#include <stdio.h>
+#include <stdlib.h>
+static inline void block_reach_check (int r, int g, const char * file, int line)
+{
+  if (r < 0 || r > g) {
+    fprintf (stderr, "%s:%d: reach %d past %d\n", file, line, r, g);
+    abort ();
+  }
+}
+
 /* the stencil loop, as <block-loops.h> declares it */
 @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);

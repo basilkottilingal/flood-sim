@@ -278,6 +278,7 @@ static struct ast *stencil_use (struct scope_table *scopes,
                            scope_find (scopes, "ghosts_mark_dirty")
                            && scope_find (scopes, "ghosts_mark_all_dirty")
                            && scope_find (scopes, "ghosts_update_dirty"),
+                           scope_find (scopes, "block_reach_check") != NULL,
                            name, body, &status->rejected);
 }
 
@@ -327,6 +328,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token FOREACH_CELLS "foreach ()"
 %token AT_LOOP "@loop" LOOP_NAME
 %token AT_FOREACH "@foreach" STENCIL_NAME
+%token FOREACH_NEIGHBOR "foreach_neighbor"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -1038,6 +1040,13 @@ iteration_statement:
                                     $$ = NULL; }
     statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
+  /* foreach_neighbor (r): the point of a stencil loop moved to each of its
+   * neighbours within r, for the statement */
+  | FOREACH_NEIGHBOR '(' expression ')'
+                                  { stencil_mover_begin (status->stencil, $1, &status->rejected);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, $3, $4, $6);
+                                    (void) $5; }
   /* a loop declared with @foreach, with arguments or not */
   | STENCIL_NAME '(' ')'          { status->stencil = stencil_loop_begin (status->stencil, $1,
                                                                         &status->rejected);

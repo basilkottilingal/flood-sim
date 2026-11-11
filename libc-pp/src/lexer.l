@@ -126,6 +126,16 @@ static int stencil_word (struct lexer *lx)
   return T_FOREACH_CELLS;
 }
 
+/* foreach_neighbor, which moves the point of a stencil loop: a word of its
+ * own with -dimension=, unless declared. */
+static int mover_word (struct lexer *lx, const char *name, int keyword)
+{
+  if (!stencil_enabled () || scope_find (lx->scopes, name))
+    return identifier_kind (lx, name);
+  lx->binding = NULL;
+  return keyword;
+}
+
 /* The leaf for one token, which also takes the trivia gathered before it. */
 static struct ast *leaf (struct lexer *lx, int kind, const char *text, int len,
                          int line)
@@ -232,6 +242,7 @@ PFX     (u8|u|U|L)
   /* Ordinary names until <cwrap/cache.h> comes in. */
   /* foreach (): the stencil loop. The parentheses are read again after it. */
 "foreach"/[ \t\r\f\v\n]*"("[ \t\r\f\v\n]*")"  { AST (stencil_word (yyextra)); }
+"foreach_neighbor"      { AST (mover_word (yyextra, yytext, T_FOREACH_NEIGHBOR)); }
 "foreach"               { AST (cache_word (yyextra, yytext, T_FOREACH)); }
 "cache"                 { AST (cache_word (yyextra, yytext, T_CACHE)); }
 

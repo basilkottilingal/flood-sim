@@ -228,6 +228,46 @@ int main (void)
   }
   CHECK (diff (gr, q) == 0);
 
+  /* 7. foreach_neighbor (1): the box around each cell, read after its
+   * ghosts are updated (gp written just before), against the same sum by
+   * hand; x of the neighbours, whose mean is the cell's */
+  foreach ()
+    gp[] = x * y + z - x;
+  CHECK (ghosts_is_dirty (gp));
+  foreach () {
+    double sum = 0;
+    foreach_neighbor (1)
+      sum += gp[];
+    gr[] = sum;
+  }
+  CHECK (!ghosts_is_dirty (gp));
+  foreach_leaf () {
+    const Real * a = block_data (sblocks, gp);
+    Real * b = block_data (sblocks, q);
+    int lo [3] = { -1, dimension > 1 ? -1 : 0, dimension > 2 ? -1 : 0 };
+    int hi [3] = { 1, dimension > 1 ? 1 : 0, dimension > 2 ? 1 : 0 };
+    block_cells (shape, 0) {
+      double sum = 0;
+      for (int dk = lo [2]; dk <= hi [2]; dk++)
+      for (int dj = lo [1]; dj <= hi [1]; dj++)
+      for (int di = lo [0]; di <= hi [0]; di++)
+        sum += a [c + di + dj * shape.sy + dk * shape.sz];
+      b [c] = sum;
+    }
+  }
+  CHECK (diff (gr, q) == 0);
+  foreach () {
+    double xs = 0;
+    int n = 0;
+    foreach_neighbor (1) {
+      xs += x;
+      n++;
+    }
+    gr[] = xs / n - x;
+  }
+  set_all (q, 0);
+  CHECK (diff (gr, q) < 1e-12);
+
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);
   return fails != 0;

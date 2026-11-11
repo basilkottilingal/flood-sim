@@ -172,6 +172,8 @@
   */
 
   #include <assert.h>
+  #include <stdio.h>
+  #include <stdlib.h>
   #include "tree.h"
   #include "grid-scalar.h"
   #include "morton-curve.h"
@@ -609,6 +611,20 @@
   .. does that, not a stencil loop.
   */
   @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
+
+  /*
+  .. foreach_neighbor (r), in a stencil loop, reads the cells within r of the
+  .. point, which its ghosts must hold: cwrap checks r once per cell with
+  .. this, as GHOSTS is not known to it.
+  */
+  static inline void block_reach_check (int r, int g, const char * file, int line)
+  {
+    if (r < 0 || r > g) {
+      fprintf (stderr, "%s:%d: foreach_neighbor (%d) reaches past the %d "
+               "ghost layers\n", file, line, r, g);
+      abort ();
+    }
+  }
 
   /*
   .. block_table (s, table, where): the blocks of scalar s in the leaves, in

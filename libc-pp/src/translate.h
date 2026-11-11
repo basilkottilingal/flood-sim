@@ -204,7 +204,24 @@ struct stencil_loop {
   struct ast **access;          /* every s[...] of the body, in order */
   int naccess, cap;
   int errors;                   /* reported before it: those after are its */
+  struct ast **mover;           /* its foreach_neighbor (), in order */
+  int nmover, mcap;
+  int in_mover;                 /* in one now */
 };
+
+/* foreach_neighbor (r) statement, in a stencil loop: the statement runs for
+ * the point moved to each cell within r of it along every axis, as in
+ * Basilisk. s[], s[i,j] and x, y, z, Delta are then those of the moved
+ * point. It only reads: writing a cell in it is an error, as it would write
+ * a neighbour; its reads are reads at an offset, so the lazy ghost update
+ * applies. r is checked against the ghost layers when the loop runs, by
+ * block_reach_check () (<block-loops.h>). Outside a stencil loop, or in
+ * another foreach_neighbor (), it is an error. */
+void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
+                          int *rejected);
+struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
+                               struct ast *open, struct ast *radius,
+                               struct ast *close, struct ast *body);
 
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
@@ -242,7 +259,7 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
  * the loop writes, a warning. */
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, struct ast *kw, struct ast *body,
-                              int *rejected);
+                              int has_ghosts, int has_reach, struct ast *kw,
+                              struct ast *body, int *rejected);
 
 #endif

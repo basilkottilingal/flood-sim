@@ -143,7 +143,9 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   that the loops' own names do not hide; `x`, `y`, `z` and `Delta` on a
   moved, resized domain with two levels of leaves, against the centre of
   each cell computed apart; ghosts updated lazily, against `ghosts_update ()`
-  by hand. Also with OpenMP and `-DBAMR_ALIGN=4`.
+  by hand; `foreach_neighbor (1)` against the same box summed by hand, its
+  ghosts updated first, and `x` of the neighbours. Also with OpenMP and
+  `-DBAMR_ALIGN=4`.
 
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash

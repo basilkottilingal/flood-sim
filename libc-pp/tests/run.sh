@@ -339,6 +339,24 @@ check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nestin
 [ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () is not declared: include <block-loops.h>" stencil_noloops.log
 check "foreach (): without its @foreach, an error" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_neighbor.c -o stencil_neighbor 2> stencil_neighbor.log &&
+  [ "$(./stencil_neighbor)" = "300 0 | 3 " ] && [ ! -s stencil_neighbor.log ]
+check "foreach_neighbor (r): the box around the point, offsets in it, x and Delta the neighbour's, ghosts updated first" $?
+
+"$cwrap" -dimension=2 -c stencil_neighbor_bad.c -o stencil_neighbor_bad.o 2> stencil_neighbor_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_neighbor_bad.o ] &&
+  grep -q "^stencil_neighbor_bad.c:5: error: foreach_neighbor () outside a stencil loop" stencil_neighbor_bad.log &&
+  grep -q "^stencil_neighbor_bad.c:6: error: foreach_neighbor () inside foreach_neighbor ()" stencil_neighbor_bad.log &&
+  grep -q "^stencil_neighbor_bad.c:7: error: 's\[\]' in foreach_neighbor () writes a neighbour" stencil_neighbor_bad.log
+check "foreach_neighbor (): outside a stencil loop, chained, or writing, an error" $?
+
+"$cwrap" -dimension=2 -Wall stencil_reach.c -o stencil_reach 2> stencil_reach.log &&
+  (ulimit -c 0; ./stencil_reach > stencil_reach.out 2> stencil_reach.err
+   echo $? > stencil_reach.rc) 2> /dev/null &&
+  [ "$(cat stencil_reach.rc)" -ne 0 ] &&
+  grep -q "^stencil_reach.c:8: reach 2 past 1" stencil_reach.err && [ ! -s stencil_reach.out ]
+check "foreach_neighbor (r): r past the ghost layers stops the run, at its line" $?
+
 "$cwrap" -dimension=2 -Wall -Wextra stencil_params.c -o stencil_params 2> stencil_params.log &&
   [ "$(./stencil_params)" = "6 1" ] && [ ! -s stencil_params.log ]
 check "@foreach with a parameter: given to its block loop, its argument evaluated once" $?

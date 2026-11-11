@@ -717,6 +717,32 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     `foreach () { p[] = x; q[] = p[1,0] - p[-1,0]; }` reads the ghosts of
     `p` stale, and its neighbours old or new by the order of the cells.
     Write `p` in a `foreach ()` of its own first.
+- **`foreach_neighbor (r)` moves the point,** as in Basilisk: its statement
+  runs for each cell within `r` of the point along every axis, the point's
+  own included, and `s[]`, `s[i,j]`, `x`, `y`, `z` and `Delta` are then
+  those of that cell.
+
+      foreach () {
+        double sum = 0;
+        int n = 0;
+        foreach_neighbor (1) {
+          sum += s[];
+          n++;
+        }
+        mean[] = sum / n;
+      }
+
+  - **It reads the ghosts,** which hold the neighbours: no tree is walked.
+    Its reads are reads at an offset, so the lazy ghost update applies.
+  - **It only reads:** writing a cell in it (`s[] = ...`) is an error, as it
+    would write a neighbour.
+  - **Only in a stencil loop, and not in another `foreach_neighbor ()`:**
+    either is an error.
+  - **`r` must not reach past the ghost layers,** which cwrap cannot know
+    after `gcc -E`: `block_reach_check ()` (`<block-loops.h>`) checks it as
+    the statement starts, and stops the run with the file and line.
+  - The point movers to come, as `foreach_child ()` in loops over parents,
+    follow the same rules.
 - **Stencil loops do not nest, which is checked at compile time:**
   - one inside another, of the same `@foreach` or not, is an error;
   - so is a call, inside one, of a function of the same file that runs one,
@@ -813,8 +839,10 @@ on it. The tests cover:
   and its translation
 - `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
   the body's own names, `x`, `y` and `Delta`, the ghosts updated only when
-  stale, the dependency warning, a block per scalar used, `const` when only read,
-  line numbers, every error, and a function named `foreach`. libb-amr's
+  stale, the dependency warning, `foreach_neighbor ()` and its checks,
+  `@foreach` with parameters, nesting through calls, a block per scalar
+  used, `const` when only read, line numbers, every error, and a function
+  named `foreach`. libb-amr's
   `tests/test_stencil.c` checks it on the real tree against `cell_at`.
 - nested `@loop`: 24 self-checking cases (`loop_nest.c`), each against the
   same computation in plain loops: a loop in its own block, five deep,

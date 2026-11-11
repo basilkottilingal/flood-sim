@@ -1325,6 +1325,44 @@ struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
   return loop;
 }
 
+void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
+                          int *rejected)
+{
+  const char *name = ast_token (kw)->text;
+
+  if (!loop) {
+    stencil_error (rejected, kw, "%s () outside a stencil loop, whose point "
+                   "it moves", name);
+    return;
+  }
+  if (loop->in_mover)
+    stencil_error (rejected, kw, "%s () inside %s (): a point is moved once",
+                   name, name);
+  loop->in_mover++;
+}
+
+struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
+                               struct ast *open, struct ast *radius,
+                               struct ast *close, struct ast *body)
+{
+  struct ast *node = ast_new (AST_STENCIL_MOVER);
+
+  ast_add (ast_add (ast_add (ast_add (ast_add (node, kw), open), radius), close),
+           body);
+  if (!loop)
+    return node;
+  loop->in_mover--;
+  if (loop->nmover == loop->mcap) {
+    struct ast **m = allocate ((size_t)(loop->mcap = 2 * loop->mcap + 4) * sizeof (*m));
+
+    if (loop->nmover)
+      memcpy (m, loop->mover, (size_t)loop->nmover * sizeof (*m));
+    loop->mover = m;
+  }
+  loop->mover[loop->nmover++] = node;
+  return node;
+}
+
 struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
                             struct ast *open, struct ast *offsets,
                             struct ast *close, int *rejected)
@@ -1772,6 +1810,46 @@ static void add_stencil_items (struct ast *items, const char *text,
 
 #define MAX_GHOST_SCALARS 256
 
+/* The foreach_neighbor () whose statement n is in, its place in loop's, or
+ * -1: n is at the loop's own point. */
+static int mover_of (const struct stencil_loop *loop, const struct ast *n,
+                     const struct ast *body)
+{
+  for (const struct ast *p = n->parent, *prev = n; p; prev = p, p = p->parent) {
+    if (p->kind == AST_STENCIL_MOVER && prev == p->last)
+      for (int k = 0; k < loop->nmover; k++)
+        if (loop->mover[k] == p)
+          return k;
+    if (p == body)
+      break;
+  }
+  return -1;
+}
+
+/* reserved_uses () at the loop's own point: not in a foreach_neighbor ()'s
+ * statement, which has x, y, z and Delta of its own. */
+static void reserved_uses_outside (struct ast *n, const struct ast *body,
+                                   int uses[])
+{
+  if (n->kind == AST_TOKEN) {
+    reserved_uses (n, body, uses, 0);
+    return;
+  }
+  for (struct ast *k = n->child; k; k = k->next)
+    if (!(n->kind == AST_STENCIL_MOVER && k == n->last))
+      reserved_uses_outside (k, body, uses);
+}
+
+/* s as a C string literal */
+static const char *c_string (const char *s)
+{
+  const char *q = "\"";
+
+  for (; *s; s++)
+    q = arena_printf (*s == '"' || *s == '\\' ? "%s\\%c" : "%s%c", q, *s);
+  return arena_printf ("%s\"", q);
+}
+
 /* The loops' names that the cell's x, y, z and Delta are computed from. */
 static int loops_give_position (const struct loop_def *leaf,
                                 const struct loop_def *cell)
@@ -1790,9 +1868,10 @@ static int loops_give_position (const struct loop_def *leaf,
 
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, struct ast *kw, struct ast *body,
-                              int *rejected)
+                              int has_ghosts, int has_reach, struct ast *kw,
+                              struct ast *body, int *rejected)
 {
+  int cell_uses[NRESERVED] = { 0 }, (*mover_uses)[NRESERVED], *moved;
   const struct loop_def *leaf = def ? def->leaf : NULL;
   const struct loop_def *cell = def ? def->cell : NULL;
   struct ast *ps[MAX_LOOP_PARAMS], *vs[MAX_LOOP_PARAMS];
@@ -1857,6 +1936,18 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   if (*rejected > errors)
     return body;
   position = reserved_uses (body, body, uses, 1) > 0;
+  reserved_uses_outside (body, body, cell_uses);
+  mover_uses = allocate ((size_t)loop->nmover * sizeof (*mover_uses) + 1);
+  for (int k = 0; k < loop->nmover; k++) {
+    for (int r = 0; r < NRESERVED; r++)
+      mover_uses[k][r] = 0;
+    reserved_uses (loop->mover[k]->last, body, mover_uses[k], 0);
+  }
+  if (loop->nmover && !has_reach) {
+    stencil_error (rejected, loop->mover[0], "foreach_neighbor () needs "
+                   "block_reach_check (): include <block-loops.h>");
+    return body;
+  }
   if (position && !loops_give_position (leaf, cell)) {
     stencil_error (rejected, kw, "x, y, z and Delta in foreach () need "
                    "foreach_leaf to give level, i, j, k and foreach_cell ci, "
@@ -1871,11 +1962,20 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
    * own cell; a neighbour of a scalar the loop writes is read old or new by
    * the order of the cells, and its ghosts stale. */
   wrote = allocate ((size_t)loop->naccess * sizeof (*wrote) + 1);
+  moved = allocate ((size_t)loop->naccess * sizeof (*moved) + 1);
   for (int a = 0; a < loop->naccess; a++) {
     struct ast *access = loop->access[a];
-    int offset = stencil_has_offset (access);
+    int offset;
 
+    moved[a] = mover_of (loop, access, body);
+    offset = moved[a] >= 0 || stencil_has_offset (access);
     wrote[a] = stencil_writes (access);
+    if (wrote[a] && moved[a] >= 0) {
+      stencil_error (rejected, access, "'%s' in foreach_neighbor () writes a "
+                     "neighbour: a cell writes only its own",
+                     expression_text (access));
+      continue;
+    }
     if (wrote[a] && offset) {
       stencil_error (rejected, access, "'%s' writes a cell other than its "
                      "own: in %s (), a cell writes only s[]",
@@ -1956,8 +2056,12 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     const char *index = c, *target;
     struct token *first;
 
-    for (int k = 0; k < n && k < 3; k++)
-      index = arena_printf ("%s + (__cwrap_o%d)%s", index, k,
+    for (int k = 0; k < (moved[a] >= 0 ? dimension : n) && k < 3; k++)
+      index = arena_printf ("%s + (%s%s)%s", index,
+                            k < n ? arena_printf ("__cwrap_o%d", k) : "0",
+                            moved[a] >= 0
+                            ? arena_printf (" + __cwrap_d%c_%d_%d", "ijk"[k],
+                                            serial, moved[a]) : "",
                             arena_printf (strides[k], shape));
     target = which[a] >= 0 ? arena_printf ("__cwrap_block_%d_%d", serial, which[a])
                            : arena_printf ("block_data (%s, (__cwrap_s))", sblocks);
@@ -1976,6 +2080,56 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     ast_replace (access, e);
   }
 
+  /* Each foreach_neighbor (r) statement becomes
+   *   { const int R = (r); block_reach_check (R, shape.g, file, line);
+   *     for (int dk = -R; dk <= R; dk++) ... for (int di ...)
+   *       { const double x = ...; statement } }
+   * its accesses already offset by di, dj, dk. */
+  for (int k = 0; k < loop->nmover; k++) {
+    static const char *const cijk[] = { "ci", "cj", "ck" };
+    static const char *const first[] = { "ox", "g", "g" };
+    struct ast *mv = loop->mover[k], *radius = mv->child->next->next;
+    struct ast *statement = mv->last, *items = ast_new (AST_BLOCK_ITEMS), *hole;
+    const struct token *kt = ast_token (mv->child);
+    const char *R = arena_printf ("__cwrap_r_%d_%d", serial, k);
+    const char *text = arena_printf ("{ const int %s = (__cwrap_e0); "
+                                     "block_reach_check (%s, %s.g, %s, %d);",
+                                     R, R, shape, c_string (kt->file), kt->line);
+    const char *decls = "";
+
+    for (int a = dimension - 1; a >= 0; a--)
+      text = arena_printf ("%s for (int __cwrap_d%c_%d_%d = -%s; "
+                           "__cwrap_d%c_%d_%d <= %s; __cwrap_d%c_%d_%d++)", text,
+                           "ijk"[a], serial, k, R, "ijk"[a], serial, k, R,
+                           "ijk"[a], serial, k);
+    for (int r = 0; r < NRESERVED; r++) {
+      if (!mover_uses[k][r])
+        continue;
+      if (r == 3)
+        decls = arena_printf ("%s const double Delta = __cwrap_Delta_%d;",
+                              decls, serial);
+      else if (r >= dimension)
+        decls = arena_printf ("%s const double %s = 0;", decls,
+                              stencil_reserved[r]);
+      else
+        decls = arena_printf ("%s const double %s = __cwrap_%s_%d + (%s - %s.%s"
+                              " + __cwrap_d%c_%d_%d) * __cwrap_Delta_%d;", decls,
+                              stencil_reserved[r], stencil_reserved[r], serial,
+                              STENCIL_NAME (cell->name, cijk[r], inner), shape,
+                              first[r], "ijk"[r], serial, k, serial);
+    }
+    add_stencil_items (items, arena_printf ("%s {%s __cwrap_body; } }", text,
+                                            decls), &radius, 1, kt);
+    hole = find_leaf (items, "__cwrap_body")->parent;   /* the statement */
+    statement->parent = statement->next = NULL;
+    mark_token (first_token (statement));
+    ast_replace (hole, statement);
+    hole = items->child;
+    hole->parent = hole->next = NULL;
+    first_token (hole)->trivia = kt->trivia;
+    ast_replace (mv, hole);
+  }
+
   /* { const double x = ..., Delta = ...; body }: those the body uses, at
    * each cell, from what each leaf gives once */
   if (position) {
@@ -1987,7 +2141,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       const char *text;
       struct ast *decl;
 
-      if (!uses[r])
+      if (!cell_uses[r])
         continue;
       if (r == 3)
         text = arena_printf ("const double Delta = __cwrap_Delta_%d;", serial);
