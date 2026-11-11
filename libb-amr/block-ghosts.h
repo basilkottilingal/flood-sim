@@ -204,7 +204,7 @@
   }
 
   /*
-  .. API
+  .. API (and, below, the stale ghosts of foreach ())
   ..
   ..   ghosts_update (s, ...)         the ghosts of every leaf, for the
   ..                                  scalars given; parents restricted first
@@ -230,6 +230,44 @@
 
   void ghosts_update_list    (int n, const int * s, int parents);
   void ghosts_update_scalars (int parents);
+
+  /*
+  .. Stale ghosts, for cwrap's foreach (): a bit per scalar, set while its
+  .. ghosts may be out of date. foreach () marks the scalars it writes, and
+  .. before a foreach () that reads a scalar at an offset (s[1], not s[]),
+  .. updates those of them that are marked, in one ghosts_update_list ().
+  .. Every update clears the bits of the scalars it updates, and a new or
+  .. freed scalar has its bit clear. Code that writes cells by hand, through
+  .. block_data (), marks nothing: call ghosts_update () as before, or
+  .. ghosts_mark_dirty ().
+  ..
+  ..   ghosts_mark_dirty (s)        s's ghosts may be stale
+  ..   ghosts_mark_all_dirty ()     every scalar's may be
+  ..   ghosts_is_dirty (s)
+  ..   ghosts_update_dirty (n, s)   updates those of s [0..n) that are marked
+  ..                                (and in use), at once; n < 0: every
+  ..                                scalar marked
+  */
+  #define GHOSTS_DIRTY_WORDS ((NSCALAR_MAX + 63) / 64)
+  extern unsigned long long ghosts_dirty [GHOSTS_DIRTY_WORDS];
+
+  static inline void ghosts_mark_dirty (int s)
+  {
+    ghosts_dirty [s / 64] |= 1ull << (s % 64);
+  }
+
+  static inline void ghosts_mark_all_dirty (void)
+  {
+    for (int w = 0; w < GHOSTS_DIRTY_WORDS; w++)
+      ghosts_dirty [w] = ~0ull;
+  }
+
+  static inline int ghosts_is_dirty (int s)
+  {
+    return (ghosts_dirty [s / 64] >> (s % 64)) & 1;
+  }
+
+  void ghosts_update_dirty (int n, const int * s);
   void tree_restrict  (int s);
   void block_ghosts   (Index p, int s);
   void block_prolong  (Index p, int s);

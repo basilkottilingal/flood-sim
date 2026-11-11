@@ -2,7 +2,7 @@
  * written by hand with foreach_leaf, block_cells and cell_at */
 #include <stdio.h>
 #include <math.h>
-#include "block-loops.h"
+#include "block-ghosts.h"
 
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; \
@@ -14,7 +14,7 @@ scalar s, t, r, q;
 #if dimension > 1
 vector u;
 #endif
-scalar a0, a1;
+scalar a0, a1, gp, gq, gr;
 scalar list [2];          /* an array: no ids of its own, a0 and a1 below */
 
 /* t over every cell of every leaf, ghosts included: a value per cell */
@@ -206,6 +206,27 @@ int main (void)
   }
   set_all (q, 7);
   CHECK (diff (s, q) == 0);
+
+  /* 6. the ghosts of a scalar written, updated before a foreach () reads
+   * it at an offset, as ghosts_update () by hand would, level jump and
+   * walls included; and only then */
+  foreach ()
+    gp[] = x * x + 0.5 * y - z;
+  CHECK (ghosts_is_dirty (gp));
+  foreach ()
+    gr[] = gp[1] - gp[-1];
+  CHECK (!ghosts_is_dirty (gp) && ghosts_is_dirty (gr));
+  foreach ()
+    gq[] = x * x + 0.5 * y - z;
+  ghosts_update (gq);
+  CHECK (!ghosts_is_dirty (gq));
+  foreach_leaf () {
+    const Real * a = block_data (sblocks, gq);
+    Real * b = block_data (sblocks, q);
+    block_cells (shape, 0)
+      b [c] = a [c + 1] - a [c - 1];
+  }
+  CHECK (diff (gr, q) == 0);
 
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);

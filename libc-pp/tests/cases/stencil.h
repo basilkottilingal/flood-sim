@@ -36,6 +36,30 @@ static inline void *** leaf_blocks (int l)
   return groups [l];
 }
 
+/* Stale ghosts, as libb-amr's <block-ghosts.h> keeps them: here an update
+ * only records which scalars it updated, in ghosts_log */
+static unsigned long long ghosts_dirty;
+static char ghosts_log [256];
+
+static inline void ghosts_mark_dirty (int s) { ghosts_dirty |= 1ull << s; }
+static inline void ghosts_mark_all_dirty (void) { ghosts_dirty = ~0ull; }
+
+static inline void ghosts_update_dirty (int n, const int * s)
+{
+  for (int t = 0; t < 64; t++) {
+    int listed = n < 0;
+    for (int q = 0; q < n; q++)
+      listed |= s [q] == t;
+    if (listed && (ghosts_dirty >> t & 1)) {
+      char * end = ghosts_log;
+      while (*end)
+        end++;
+      end [0] = (char) ('0' + t), end [1] = ' ', end [2] = '\0';
+      ghosts_dirty &= ~(1ull << t);
+    }
+  }
+}
+
 @loop foreach_leaf () : i, j, level, sblocks
 {
   for (int i = 0; i < NLEAF; i++) {

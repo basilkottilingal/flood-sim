@@ -95,6 +95,15 @@ read) and `u[i,j]` as `cell_at`. It is serial over the leaves. In the body,
 `tree_get_origin (axis)` and `tree_get_size ()`, the domain that
 `tree_shift_resize ()` sets.
 
+**Stale ghosts** (`block-ghosts.h`): a bit per scalar, set while its ghosts
+may be out of date. `foreach ()` marks the scalars it writes, and before a
+`foreach ()` that reads one at an offset updates those marked, in one
+`ghosts_update_dirty ()`; so the `ghosts_update (u)` above is no longer
+needed after a `foreach ()` writes `u`. Every update clears the bits of the
+scalars it updates, and a new or freed scalar starts clean. Writes through
+`block_data ()` by hand mark nothing: call `ghosts_update ()`, or
+`ghosts_mark_dirty ()`.
+
 ## Tests
 
     sh tests/run.sh

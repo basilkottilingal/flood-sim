@@ -675,13 +675,38 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   row as `BLOCK_BACKEND` says (see `block-loops.h`): a sum into a variable
   is fine; a cell must not be read along i in the row that writes it.
 - **No `break`:** it leaves only the row of cells.
-- **The ghosts are read as they are:** call `ghosts_update ()` first.
+- **Ghosts are kept up to date lazily,** as in Basilisk. After the loop,
+  each scalar it writes is marked stale (`ghosts_mark_dirty ()`, a bit).
+  Before a loop that reads a scalar at an offset (`p[1]`, `p[0,k]`: any
+  offset not written as `0`), those of them marked are updated, all in one
+  `ghosts_update_dirty ()`; a scalar read only at its cell (`p[]`) needs
+  none. Any update clears the bits, `ghosts_update ()` by hand or
+  `adapt_wavelet ()` too.
+
+      foreach () p[] = x*x;            /* p marked */
+      foreach () q[] = p[1] - p[-1];   /* p updated first; q marked */
+
+  - **A scalar that changes in the body,** `list[k]` with `k` the body's,
+    stands for every element of `list` if it is an array of a known size,
+    and for every scalar otherwise (`ghosts_mark_all_dirty ()`,
+    `ghosts_update_dirty (-1, 0)`).
+  - **Cells written by hand,** through `block_data ()`, are not seen: call
+    `ghosts_update ()` as before, or `ghosts_mark_dirty ()`.
+  - **Writing a cell at an offset** (`p[1] = ...`) **is an error:** a cell
+    writes only its own.
+  - **Reading a neighbour of a scalar the same loop writes is a warning:**
+    `foreach () { p[] = x; q[] = p[1,0] - p[-1,0]; }` reads the ghosts of
+    `p` stale, and its neighbours old or new by the order of the cells.
+    Write `p` in a `foreach ()` of its own first.
 - **`foreach ()` inside `foreach ()` is an error,** and so is `s[]` outside.
 - **`foreach ()` is the loop only while no `foreach` is declared** (a
   function, a variable). Otherwise `foreach ()` is the call it was.
 - **Errors:** without `foreach_leaf` (giving `sblocks`) and `foreach_cell`
   (giving `c` and `shape`) defined, `foreach ()` is an error that says to
-  include `<block-loops.h>`.
+  include `<block-loops.h>`; a loop that writes, or reads at an offset,
+  without `ghosts_mark_dirty ()`, `ghosts_mark_all_dirty ()` and
+  `ghosts_update_dirty ()` declared, one that says to include
+  `<block-ghosts.h>`.
 
 ---
 
@@ -763,7 +788,8 @@ on it. The tests cover:
 - `@loop`: running uses of it, every error, line numbers around an expansion,
   and its translation
 - `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
-  the body's own names, `x`, `y` and `Delta`, a block per scalar used, `const` when only read,
+  the body's own names, `x`, `y` and `Delta`, the ghosts updated only when
+  stale, the dependency warning, a block per scalar used, `const` when only read,
   line numbers, every error, and a function named `foreach`. libb-amr's
   `tests/test_stencil.c` checks it on the real tree against `cell_at`.
 - nested `@loop`: 24 self-checking cases (`loop_nest.c`), each against the

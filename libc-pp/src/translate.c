@@ -1574,6 +1574,102 @@ static void reserved_hides_scalar (struct ast *n, const struct ast *body,
   note_declared (t->binding->decl);
 }
 
+/* Does the access reach a cell other than its own: an offset that is not
+ * 0 as written? s[i] counts, whatever i is. */
+static int stencil_has_offset (struct ast *access)
+{
+  struct ast *os[4], *off = access->child->next->next;
+  int n;
+
+  if (off == access->last)
+    return 0;
+  n = stencil_offsets (off, os, 4);
+  for (int k = 0; k < n && k < 4; k++)
+    if (os[k]->kind != AST_TOKEN || ast_token (os[k])->kind != T_CONSTANT
+        || strcmp (ast_token (os[k])->text, "0") != 0)
+      return 1;
+  return 0;
+}
+
+/* A scalar whose ghosts a foreach () makes stale, or needs up to date: the
+ * scalar itself, if it is the same at every cell; else every element of
+ * the array it is one of, A[k] of an array A of a known size; else any
+ * scalar at all. */
+struct ghost_scalar {
+  const char *key;          /* s, A[*] or *, to know two of them the same */
+  struct ast *scalar;       /* a copy of the scalar, */
+  struct ast *array;        /* or of the array, */
+  int all;                  /* or any scalar */
+  struct ast *at;           /* the first access, for messages */
+};
+
+static struct ghost_scalar ghost_scalar_of (struct ast *access,
+                                            const struct ast *body)
+{
+  struct ast *e = access->child;
+  struct ghost_scalar g = { NULL, NULL, NULL, 0, access };
+
+  if (stencil_invariant (e, body)) {
+    g.key = expression_text (e);
+    g.scalar = ast_copy (e);
+    return g;
+  }
+  if (e->kind == AST_SUBSCRIPT && e->child->kind == AST_TOKEN
+      && stencil_invariant (e->child, body)) {
+    const struct ast *d = ast_token (e->child)->binding->decl;
+    const struct ast *specs = declarator_specs (d);
+
+    if (d->kind == AST_SUFFIXED_DECLARATOR && d->child->kind == AST_DECL_NAME
+        && d->last->kind == AST_ARRAY_SUFFIX
+        && d->last->child->next != d->last->last      /* [N], not [] */
+        && specs && specs->parent->kind == AST_DECLARATION) {
+      g.key = arena_printf ("%s[*]", expression_text (e->child));
+      g.array = ast_copy (e->child);
+      return g;
+    }
+  }
+  g.key = "*";
+  g.all = 1;
+  return g;
+}
+
+/* Adds g to set [0..*n) unless one with its key is there; returns its place. */
+static int add_ghost_scalar (struct ghost_scalar *set, int *n,
+                             struct ghost_scalar g)
+{
+  for (int k = 0; k < *n; k++)
+    if (strcmp (set[k].key, g.key) == 0)
+      return k;
+  set[*n] = g;
+  return (*n)++;
+}
+
+/* Code that cwrap adds as items, text with placeholders __cwrap_e0, ...
+ * that take the expressions es [0..), each a copy, all on the line of at. */
+static void add_stencil_items (struct ast *items, const char *text,
+                               struct ast **es, int nes,
+                               const struct token *at)
+{
+  struct ast *fn = parse_snippet (arena_printf ("typedef int Real; "
+                                                "void f (void) { %s }", text))->next;
+  struct ast *block = fn->child->next->next, *list = block->child->next;
+
+  for (int k = 0; k < nes; k++) {
+    struct ast *e = ast_copy (es[k]);
+
+    each_leaf (e, flatten_leaf, (void *)at);
+    fill_placeholder (list, arena_printf ("__cwrap_e%d", k), e);
+  }
+  for (struct ast *item = list->child, *next; item; item = next) {
+    next = item->next;
+    item->parent = item->next = NULL;
+    each_leaf (item, flatten_leaf, (void *)at);
+    ast_add (items, item);
+  }
+}
+
+#define MAX_GHOST_SCALARS 256
+
 /* The loops' names that the cell's x, y, z and Delta are computed from. */
 static int loops_give_position (const struct loop_def *leaf,
                                 const struct loop_def *cell)
@@ -1592,9 +1688,11 @@ static int loops_give_position (const struct loop_def *leaf,
 
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct loop_def *leaf,
-                              const struct loop_def *cell, struct ast *kw,
-                              struct ast *body, int *rejected)
+                              const struct loop_def *cell, int has_ghosts,
+                              struct ast *kw, struct ast *body, int *rejected)
 {
+  struct ghost_scalar written[MAX_GHOST_SCALARS], needed[MAX_GHOST_SCALARS];
+  int nwritten = 0, nneeded = 0, *wrote;
   static const char *const strides[] = { "", " * %s.sy", " * %s.sz" };
   const struct token *at = ast_token (kw);
   struct stencil_block blocks[MAX_STENCIL_BLOCKS];
@@ -1635,6 +1733,53 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   }
   if (*rejected > errors)
     return body;
+
+  /* Ghosts: the scalars written, whose ghosts go stale, and those read at an
+   * offset, whose ghosts must be up to date first. A cell writes only its
+   * own cell; a neighbour of a scalar the loop writes is read old or new by
+   * the order of the cells, and its ghosts stale. */
+  wrote = allocate ((size_t)loop->naccess * sizeof (*wrote) + 1);
+  for (int a = 0; a < loop->naccess; a++) {
+    struct ast *access = loop->access[a];
+    int offset = stencil_has_offset (access);
+
+    wrote[a] = stencil_writes (access);
+    if (wrote[a] && offset) {
+      stencil_error (rejected, access, "'%s' writes a cell other than its "
+                     "own: in foreach (), a cell writes only s[]",
+                     expression_text (access));
+      continue;
+    }
+    if (nwritten == MAX_GHOST_SCALARS || nneeded == MAX_GHOST_SCALARS)
+      continue;
+    if (wrote[a])
+      add_ghost_scalar (written, &nwritten, ghost_scalar_of (access, body));
+    else if (offset)
+      add_ghost_scalar (needed, &nneeded, ghost_scalar_of (access, body));
+  }
+  if (*rejected > errors)
+    return body;
+  for (int r = 0; r < nneeded; r++)
+    for (int w = 0; w < nwritten; w++)
+      if (!needed[r].all && strcmp (needed[r].key, written[w].key) == 0) {
+        const struct token *t = ast_first_token (needed[r].at);
+        const struct token *u = ast_first_token (written[w].at);
+
+        diag (t->file, t->line, DIAG_WARNING, "'%s' reads a neighbour of '%s', "
+              "which this foreach () writes: its ghosts are stale, and its "
+              "neighbours old or new by the order of the cells; write it in a "
+              "foreach () of its own first", expression_text (needed[r].at),
+              needed[r].key);
+        diag (u->file, u->line, DIAG_NOTE, "'%s' is written here",
+              expression_text (written[w].at));
+      }
+  if ((nwritten || nneeded) && !has_ghosts) {
+    stencil_error (rejected, kw, "foreach () keeps the ghosts of the scalars "
+                   "it writes up to date: it needs ghosts_mark_dirty (), "
+                   "ghosts_mark_all_dirty () and ghosts_update_dirty (): "
+                   "include <block-ghosts.h>");
+    return body;
+  }
 
   /* The names the expansions below will have: foreach_cell's first, as it
    * expands first. */
@@ -1784,8 +1929,83 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   kids[0] = open;
   kids[1] = items;
   kids[2] = close;
-  return expand_loop (leaf, kw, NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
-                      NULL, 1, rejected);
+  if (!nwritten && !nneeded)
+    return expand_loop (leaf, kw, NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                        NULL, 1, rejected);
+
+  /* { the stale ghosts it reads, updated; the loop; those it writes,
+   *   marked } */
+  struct ast *leaves = expand_loop (leaf, new_token (T_IDENTIFIER, "foreach", at),
+                                    NULL, ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                                    NULL, 1, rejected);
+  struct ast *around = ast_new (AST_BLOCK_ITEMS), *es[2 * MAX_GHOST_SCALARS];
+  const struct token *end = last_token (leaves);
+  int all = 0, nes = 0;
+  const char *text = "";
+
+  for (int r = 0; r < nneeded; r++)
+    all |= needed[r].all;
+  if (all)
+    add_stencil_items (around, "ghosts_update_dirty (-1, 0);", NULL, 0, at);
+  else if (nneeded) {
+    const char *size = "0", *fill = "";
+
+    for (int r = 0; r < nneeded; r++)
+      if (needed[r].scalar) {
+        es[nes] = needed[r].scalar;
+        size = arena_printf ("%s + 1", size);
+        fill = arena_printf ("%s __cwrap_stale_%d[__cwrap_nstale_%d++] = "
+                             "(__cwrap_e%d);", fill, serial, serial, nes++);
+      } else {
+        es[nes] = es[nes + 1] = es[nes + 2] = es[nes + 3] = needed[r].array;
+        size = arena_printf ("%s + sizeof (__cwrap_e%d) / sizeof (__cwrap_e%d)[0]",
+                             size, nes, nes + 1);
+        fill = arena_printf ("%s for (int __cwrap_i_%d = 0; __cwrap_i_%d < (int) "
+                             "(sizeof (__cwrap_e%d) / sizeof (__cwrap_e%d)[0]); "
+                             "__cwrap_i_%d++) __cwrap_stale_%d[__cwrap_nstale_%d++] "
+                             "= (__cwrap_e%d)[__cwrap_i_%d];", fill, serial, serial,
+                             nes + 2, nes + 3, serial, serial, serial, nes + 4,
+                             serial);
+        es[nes + 4] = needed[r].array;
+        nes += 5;
+      }
+    text = arena_printf ("{ int __cwrap_stale_%d[%s], __cwrap_nstale_%d = 0;%s "
+                         "ghosts_update_dirty (__cwrap_nstale_%d, "
+                         "__cwrap_stale_%d); }", serial, size, serial, fill,
+                         serial, serial);
+    add_stencil_items (around, text, es, nes, at);
+  }
+  ast_add (around, leaves);
+
+  all = 0;
+  for (int w = 0; w < nwritten; w++)
+    all |= written[w].all;
+  nes = 0;
+  text = "";
+  if (all)
+    text = "ghosts_mark_all_dirty ();";
+  else
+    for (int w = 0; w < nwritten; w++)
+      if (written[w].scalar) {
+        es[nes] = written[w].scalar;
+        text = arena_printf ("%s ghosts_mark_dirty (__cwrap_e%d);", text, nes++);
+      } else {
+        es[nes] = es[nes + 1] = es[nes + 2] = written[w].array;
+        text = arena_printf ("%s for (int __cwrap_i_%d = 0; __cwrap_i_%d < (int) "
+                             "(sizeof (__cwrap_e%d) / sizeof (__cwrap_e%d)[0]); "
+                             "__cwrap_i_%d++) ghosts_mark_dirty ((__cwrap_e%d)"
+                             "[__cwrap_i_%d]);", text, serial, serial, nes,
+                             nes + 1, serial, nes + 2, serial);
+        nes += 3;
+      }
+  if (*text)
+    add_stencil_items (around, text, es, nes, end);
+
+  kids[0] = new_token ('{', "{", at);
+  first_token (kids[0])->trivia = at->trivia;
+  kids[1] = around;
+  kids[2] = new_token ('}', "}", end);
+  return ast_node (AST_COMPOUND_STATEMENT, kids, 3);
 }
 
 /* The translation itself: rewrite the tree here. */

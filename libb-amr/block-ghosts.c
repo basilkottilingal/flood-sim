@@ -29,10 +29,14 @@ ScalarOps scalar_get_ops (int s)
   return o;
 }
 
+unsigned long long ghosts_dirty [GHOSTS_DIRTY_WORDS];
+
+/* a new or freed scalar: the default operations, and no stale ghosts */
 void scalar_ops_reset (int s)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
   scalar_ops [s] = (ScalarOps) {0};
+  ghosts_dirty [s / 64] &= ~(1ull << (s % 64));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -356,8 +360,32 @@ void ghosts_update_list (int n, const int * s, int parents)
         for (int q = 0; q < n; q++)
           block_ghosts (L.at [b], s [q]);
   }
+  for (int q = 0; q < n; q++)
+    ghosts_dirty [s [q] / 64] &= ~(1ull << (s [q] % 64));
   free (o);
   free (L.at);
+}
+
+void ghosts_update_dirty (int n, const int * s)
+{
+  int list [NSCALAR_MAX], m = 0;
+  if (n < 0) {
+    foreach_scalar (t)
+      if (ghosts_is_dirty (t))
+        list [m++] = t;
+  }
+  else
+    for (int q = 0; q < n; q++)
+    {
+      int t = s [q], seen = 0;
+      if (t < 0 || t >= NSCALAR_MAX || !scalar_in_use (t) || !ghosts_is_dirty (t))
+        continue;
+      for (int r = 0; r < m && !seen; r++)
+        seen = list [r] == t;
+      if (!seen)
+        list [m++] = t;
+    }
+  ghosts_update_list (m, list, 0);
 }
 
 void ghosts_update_scalars (int parents)

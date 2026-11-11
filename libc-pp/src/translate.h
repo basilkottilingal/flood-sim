@@ -192,10 +192,25 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
 
 /* The loop with its body: the expansion described above. leaf and cell are
  * the definitions of foreach_leaf and foreach_cell, NULL if not defined: an
- * error. */
+ * error. has_ghosts: ghosts_mark_dirty (), ghosts_mark_all_dirty () and
+ * ghosts_update_dirty () are declared, which a loop that writes or reads at
+ * an offset needs: an error otherwise.
+ *
+ * Ghosts are kept up to date lazily, as in Basilisk:
+ *
+ *   { int __cwrap_stale_L[1], __cwrap_nstale_L = 0;      the scalars read at
+ *     __cwrap_stale_L[__cwrap_nstale_L++] = (t);          an offset, updated
+ *     ghosts_update_dirty (__cwrap_nstale_L, __cwrap_stale_L); }  if marked
+ *   foreach_leaf () { ... }
+ *   ghosts_mark_dirty (s);                                 those written
+ *
+ * A scalar A[k] that changes in the body stands for every element of A, if A
+ * is an array of a known size, and any other for every scalar. Writing a
+ * cell at an offset (s[1] = ...) is an error; reading at an offset a scalar
+ * the loop writes, a warning. */
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct loop_def *leaf,
-                              const struct loop_def *cell, struct ast *kw,
-                              struct ast *body, int *rejected);
+                              const struct loop_def *cell, int has_ghosts,
+                              struct ast *kw, struct ast *body, int *rejected);
 
 #endif

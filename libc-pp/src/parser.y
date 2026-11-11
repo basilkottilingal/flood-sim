@@ -981,6 +981,9 @@ iteration_statement:
                                     status->stencil = loop->outer;
                                     $$ = stencil_loop_end (loop, find_loop (status, "foreach_leaf"),
                                                            find_loop (status, "foreach_cell"),
+                                                           scope_find (scopes, "ghosts_mark_dirty")
+                                                           && scope_find (scopes, "ghosts_mark_all_dirty")
+                                                           && scope_find (scopes, "ghosts_update_dirty"),
                                                            $1, $5, &status->rejected);
                                     (void) $2; (void) $3; (void) $4; }
   /* A use of a block macro. Its statement, the block, is parsed in a scope

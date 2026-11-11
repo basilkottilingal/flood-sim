@@ -325,7 +325,8 @@ check "foreach (): errors in the body and after it keep their lines" $?
 
 "$cwrap" -dimension=2 -c stencil_bad.c -o stencil_bad.o 2> stencil_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_bad.o ] &&
-  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 13 17 17 " ] &&
+  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 13 17 17 18 " ] &&
+  grep -q "^stencil_bad.c:18: error: 's\[1\]' writes a cell other than its own" stencil_bad.log &&
   grep -q "^stencil_bad.c:17: error: 'x' in foreach () is the cell's coordinate, which hides scalar 'x'" stencil_bad.log &&
   grep -q "^stencil_bad.c:14: note: 'x' is declared here" stencil_bad.log &&
   grep -q "^stencil_bad.c:17: error: 'y' in foreach () is the cell's coordinate, which hides vector 'y'" stencil_bad.log &&
@@ -337,6 +338,16 @@ check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nestin
 "$cwrap" -dimension=2 -c stencil_noloops.c -o stencil_noloops.o 2> stencil_noloops.log
 [ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () needs the @loops" stencil_noloops.log
 check "foreach (): without foreach_leaf and foreach_cell, an error" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra stencil_ghosts.c -o stencil_ghosts 2> stencil_ghosts.log &&
+  [ "$(./stencil_ghosts)" = "updated 0 4 | stale 14" ] && [ ! -s stencil_ghosts.log ]
+check "foreach (): the ghosts of a scalar read at an offset, updated only if written since; A[k] stands for all of A" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_dep.c -o stencil_dep.o 2> stencil_dep.log &&
+  [ "$(grep -c 'warning:' stencil_dep.log)" = 1 ] &&
+  grep -q "^stencil_dep.c:7: warning: 'p\[1,0\]' reads a neighbour of 'p', which this foreach () writes" stencil_dep.log &&
+  grep -q "^stencil_dep.c:6: note: 'p\[\]' is written here" stencil_dep.log
+check "foreach (): reading a neighbour of a scalar it writes, a warning" $?
 
 "$cwrap" -dimension=2 -c stencil_nopos.c -o stencil_nopos.o 2> stencil_nopos.log
 [ $? -ne 0 ] && grep -q "^stencil_nopos.c:6: error: x, y, z and Delta in foreach () need" stencil_nopos.log

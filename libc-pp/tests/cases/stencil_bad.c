@@ -15,3 +15,4 @@ scalar x;
 vector y;
 int use (scalar a);
 void h (void) { foreach () use (x + y.x); }
+void k (void) { foreach () s[1] = 0; }
