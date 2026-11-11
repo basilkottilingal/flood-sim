@@ -325,11 +325,14 @@ check "foreach (): errors in the body and after it keep their lines" $?
 
 "$cwrap" -dimension=2 -c stencil_bad.c -o stencil_bad.o 2> stencil_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_bad.o ] &&
-  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 13 " ] &&
+  [ "$(grep -o '^stencil_bad.c:[0-9]*: error' stencil_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 8 9 13 17 17 " ] &&
+  grep -q "^stencil_bad.c:17: error: 'x' in foreach () is the cell's coordinate, which hides scalar 'x'" stencil_bad.log &&
+  grep -q "^stencil_bad.c:14: note: 'x' is declared here" stencil_bad.log &&
+  grep -q "^stencil_bad.c:17: error: 'y' in foreach () is the cell's coordinate, which hides vector 'y'" stencil_bad.log &&
   grep -q "^stencil_bad.c:13: error: 'Delta\[...\]': in foreach (), x, y, z and Delta are the cell's" stencil_bad.log &&
   grep -q "^stencil_bad.c:7: error: 'a\[\]', but 'a' is not a scalar" stencil_bad.log &&
   grep -q "^stencil_bad.c:8: error: 's\[1,2,3\]' has 3 offsets, in 2 dimensions" stencil_bad.log
-check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nesting" $?
+check "foreach (): s[] outside it, x[] of a non-scalar, too many offsets, nesting, a scalar x hidden" $?
 
 "$cwrap" -dimension=2 -c stencil_noloops.c -o stencil_noloops.o 2> stencil_noloops.log
 [ $? -ne 0 ] && grep -q "^stencil_noloops.c:4: error: foreach () needs the @loops" stencil_noloops.log
