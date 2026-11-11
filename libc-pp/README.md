@@ -46,6 +46,7 @@ On top of C11 with GNU extensions, cwrap adds:
 13. [Limitations](#limitations)
 14. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
 15. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
+16. [Future: scalar names](#future-scalar-names)
 
 ---
 
@@ -1204,3 +1205,49 @@ Still open: whether a V that is not a name means "cache only", or also covers
 other structs with `n` and `a`, and arrays reached through a path, such as
 `foreach (x in s.arr)`. Arrays need their length from the type, which again
 means stage 3.
+
+---
+
+## Future: scalar names
+
+*Deferred (2026-11-11). Not started.*
+
+The aim: every scalar knows the name it was declared with, so that messages,
+output and visualisation can say `h` rather than `scalar 7`.
+
+    scalar h;              /* scalar_name (h) is "h" */
+    vector u;              /* "u.x", "u.y" */
+    void f (void) {
+      scalar tmp;          /* "tmp", while it lives */
+    }
+
+### Proposed
+
+- **The name comes from the declaration,** written by cwrap, nothing for the
+  user to add: the variable's name, and for a vector or tensor its members
+  (`u.x`, `t.x.y`).
+- **Global scalars:** each slot of the section `scalars` already holds the
+  variable's address; it would hold its name too, a pair `{ &h, "h" }`, and
+  `scalar.c`, which numbers them at start-up, records the names with the ids.
+- **Local scalars:** `scalar tmp;` already becomes
+  `scalar tmp __attribute__ ((cleanup (...))) = scalar_new ();`; it would
+  become `... = scalar_new_named ("tmp")`. A freed id forgets its name.
+- **Scalars made by hand:** `scalar_new ()` gives no name (`NULL`), and
+  `scalar_set_name (s, "depth")` gives one, or replaces one, at run time.
+- **API (`src/scalar.h`):** `const char * scalar_name (scalar s)`, and
+  `scalar_find (const char * name)`, the id of the scalar in use with that
+  name, or -1.
+- **Users of it:**
+  - libb-amr's messages: `ghost_ops: scalar h: ...` instead of `scalar 7`;
+  - output and visualisation (libview, libwebgl): fields by name;
+  - reading a field from a file or a command line by name.
+
+### Questions
+
+1. **Names that clash:** two functions each with a local `tmp`, alive at
+   once. Allowed (names are labels, not keys), or qualified (`f.tmp`), or an
+   error for `scalar_find` only?
+2. **`static` scalars in a function:** named `kept`, or `f.kept`?
+3. **An explicit name in the declaration** (`scalar h "depth";`?): wanted,
+   or only `scalar_set_name ()` at run time? The first needs new syntax, which
+   the attribute binding of operators was dropped for.
