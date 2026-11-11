@@ -51,6 +51,16 @@ pointer. The file that dispatches must see every definition:
 builds its own in its place (`block-ghosts.h`), as `tests/test_ghosts.c`
 does.
 
+**Coupled operators**, which read other scalars, as the water depth `h`
+prolonged from the surface `h + zb`: the operator names them in a second
+parameter list, `@prolongation prolong_lake (const Prolongation * pr) (scalar
+zb)`, and `ghost_ops (h, prolongation (prolong_lake, zb))` binds them, global
+scalars only (never freed). `ghost_ops_set ()` refuses a wrong count or a
+cycle. Wherever several scalars' ghosts are made, `ghosts_update ()`, a
+refinement or a coarsening (`foreach_scalar_ordered`), a scalar comes after
+those it depends on, a stale one of those updated with it; and marking one
+stale marks those that depend on it.
+
 **Derived scalars** are not prolonged. Fill the ghosts of the scalars they
 come from, then compute them on the halo, `block_cells (shape, GHOSTS)`, as
 Parthenon's `FillDerived` does. With cwrap, compute them on the interior,
@@ -156,6 +166,10 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
   by hand; `foreach_neighbor (1)` against the same box summed by hand, its
   ghosts updated first, and `x` of the neighbours. Also with OpenMP and
   `-DBAMR_ALIGN=4`.
+- `test_ghosts.c` also: a coupled prolongation (lake at rest, `h + zb` the
+  surface at level jumps, walls and refined leaves, the bed made first
+  against the order of ids), a stale bed making the depth stale, and a
+  cycle, a wrong count, and `scalar_set_ops ()` of it refused.
 
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash

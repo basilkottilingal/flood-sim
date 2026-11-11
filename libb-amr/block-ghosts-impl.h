@@ -4,6 +4,8 @@
 .. block-ghosts.c, or a program's own (see block-ghosts.h).
 */
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,12 +16,182 @@
 /* ---------------------------------------------------------------------- */
 
 static ScalarOps scalar_ops [NSCALAR_MAX];    /* zero: the defaults */
+unsigned long long ghost_dependents [NSCALAR_MAX][GHOSTS_DIRTY_WORDS];
+int ghost_ops_abort = 1;
+
+/* how many scalars the operator op of a kind depends on; -1: no such op */
+static int ghost_op_uses (int kind, int op)
+{
+  if (!op)
+    return 0;                 /* the default */
+  switch (kind) {
+  case GHOST_PROLONGATION: return @prolongation uses (op);
+  case GHOST_RESTRICTION:  return @restriction uses (op);
+  case GHOST_BOUNDARY:     return @boundary uses (op);
+  }
+  return -1;
+}
+
+/* the scalars that s's operators depend on, into d; how many */
+static int ghost_uses_of (int s, int * d)
+{
+  const ScalarOps * o = &scalar_ops [s];
+  int n = 0, c;
+
+  if ((c = ghost_op_uses (GHOST_PROLONGATION, o->prolongation)) > 0)
+    for (int k = 0; k < c; k++)
+      d [n++] = o->prolongation_uses [k];
+  if ((c = ghost_op_uses (GHOST_RESTRICTION, o->restriction)) > 0)
+    for (int k = 0; k < c; k++)
+      d [n++] = o->restriction_uses [k];
+  if ((c = ghost_op_uses (GHOST_BOUNDARY, o->boundary)) > 0)
+    for (int k = 0; k < c; k++)
+      d [n++] = o->boundary_uses [k];
+  return n;
+}
+
+/* ghost_dependents again, from every scalar's operators, and through them */
+static void ghost_dependents_rebuild (void)
+{
+  int d [3 * GHOST_USES_MAX];
+
+  memset (ghost_dependents, 0, sizeof ghost_dependents);
+  for (int s = 0; s < NSCALAR_MAX; s++)
+    for (int k = 0, n = ghost_uses_of (s, d); k < n; k++)
+      ghost_dependents [d [k]][s / 64] |= 1ull << (s % 64);
+  for (int changed = 1; changed; ) {
+    changed = 0;
+    for (int t = 0; t < NSCALAR_MAX; t++)
+      for (int s = 0; s < NSCALAR_MAX; s++)
+        if ((ghost_dependents [t][s / 64] >> (s % 64)) & 1)
+          for (int w = 0; w < GHOSTS_DIRTY_WORDS; w++)
+            if (ghost_dependents [s][w] & ~ghost_dependents [t][w]) {
+              ghost_dependents [t][w] |= ghost_dependents [s][w];
+              changed = 1;
+            }
+  }
+}
+
+/* a scalar that depends on itself, or -1 */
+static int ghost_dependents_cycle (void)
+{
+  for (int s = 0; s < NSCALAR_MAX; s++)
+    if ((ghost_dependents [s][s / 64] >> (s % 64)) & 1)
+      return s;
+  return -1;
+}
+
+static int ghost_ops_fail (const char * format, ...)
+{
+  va_list ap;
+
+  va_start (ap, format);
+  vfprintf (stderr, format, ap);
+  va_end (ap);
+  if (ghost_ops_abort)
+    abort ();
+  return 1;
+}
+
+static const char * const ghost_kinds [] = { "prolongation", "restriction",
+                                             "boundary" };
+
+int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
+{
+  assert (s >= 0 && s < NSCALAR_MAX && kind >= 0 && kind <= GHOST_BOUNDARY);
+  int need = ghost_op_uses (kind, op);
+  if (need < 0)
+    return ghost_ops_fail ("ghost_ops: scalar %d: no %s with the id %d\n",
+                           (int) s, ghost_kinds [kind], op);
+  if (n != need)
+    return ghost_ops_fail ("ghost_ops: scalar %d: its %s %d depends on %d "
+                           "scalar%s, not %d\n", (int) s, ghost_kinds [kind],
+                           op, need, need == 1 ? "" : "s", n);
+  if (n > GHOST_USES_MAX)
+    return ghost_ops_fail ("ghost_ops: scalar %d: %d scalars depended on, %d "
+                           "at most (GHOST_USES_MAX)\n", (int) s, n,
+                           GHOST_USES_MAX);
+  for (int k = 0; k < n; k++)
+    if (uses [k] < 0 || uses [k] >= n_global_scalars)
+      return ghost_ops_fail ("ghost_ops: scalar %d: scalar %d, which its %s "
+                             "depends on, is not global\n", (int) s,
+                             (int) uses [k], ghost_kinds [kind]);
+  ScalarOps old = scalar_ops [s];
+  int * id = kind == GHOST_PROLONGATION ? &scalar_ops [s].prolongation
+           : kind == GHOST_RESTRICTION ? &scalar_ops [s].restriction
+           : &scalar_ops [s].boundary;
+  scalar * to = kind == GHOST_PROLONGATION ? scalar_ops [s].prolongation_uses
+              : kind == GHOST_RESTRICTION ? scalar_ops [s].restriction_uses
+              : scalar_ops [s].boundary_uses;
+  *id = op;
+  for (int k = 0; k < GHOST_USES_MAX; k++)
+    to [k] = k < n ? uses [k] : 0;
+  ghost_dependents_rebuild ();
+  int c = ghost_dependents_cycle ();
+  if (c >= 0) {
+    scalar_ops [s] = old;
+    ghost_dependents_rebuild ();
+    return ghost_ops_fail ("ghost_ops: scalar %d: its operators would depend "
+                           "on itself, through scalar %d\n", (int) s, c);
+  }
+  ghosts_mark_dirty (s);      /* made by the old ones: made again */
+  return 0;
+}
 
 void scalar_set_ops (scalar s, ScalarOps ops)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
+  if (ghost_op_uses (GHOST_PROLONGATION, ops.prolongation) > 0
+      || ghost_op_uses (GHOST_RESTRICTION, ops.restriction) > 0
+      || ghost_op_uses (GHOST_BOUNDARY, ops.boundary) > 0) {
+    ghost_ops_fail ("scalar_set_ops: scalar %d: an operator that depends on "
+                    "scalars is bound with ghost_ops (), which names them\n",
+                    (int) s);
+    return;
+  }
+  for (int k = 0; k < GHOST_USES_MAX; k++)
+    ops.prolongation_uses [k] = ops.restriction_uses [k] = ops.boundary_uses [k] = 0;
   scalar_ops [s] = ops;
+  ghost_dependents_rebuild ();
   ghosts_mark_dirty (s);      /* made by the old ones: made again */
+}
+
+/* each scalar after those it depends on, the stale ones of those added */
+static void ghost_order_visit (int s, char * state, const char * want,
+                               int * out, int * n)
+{
+  int d [3 * GHOST_USES_MAX];
+
+  if (state [s])
+    return;
+  state [s] = 1;
+  for (int k = 0, nd = ghost_uses_of (s, d); k < nd; k++)
+    if (want [d [k]] || ghosts_is_dirty (d [k]))
+      ghost_order_visit (d [k], state, want, out, n);
+  out [(*n)++] = s;
+}
+
+int ghost_order (int n, const int * in, int * out)
+{
+  char state [NSCALAR_MAX] = {0}, want [NSCALAR_MAX] = {0};
+  int m = 0;
+
+  for (int q = 0; q < n; q++)
+    if (in [q] >= 0 && in [q] < NSCALAR_MAX)
+      want [in [q]] = 1;
+  for (int q = 0; q < n; q++)
+    if (in [q] >= 0 && in [q] < NSCALAR_MAX)
+      ghost_order_visit (in [q], state, want, out, &m);
+  return m;
+}
+
+int ghost_order_all (int * out)
+{
+  int in [NSCALAR_MAX], n = 0;
+
+  foreach_scalar (t)
+    in [n++] = t;
+  return ghost_order (n, in, out);
 }
 
 ScalarOps scalar_get_ops (scalar s)
@@ -42,6 +214,7 @@ void scalar_ops_reset (scalar s)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
   scalar_ops [s] = (ScalarOps) {0};
+  ghost_dependents_rebuild ();
   ghosts_dirty [s / 64] &= ~(1ull << (s % 64));
 }
 
@@ -70,13 +243,14 @@ void block_prolong (Index p, int s)
       pr.lo [a] = 0;
       pr.hi [a] = in ? m : 1;
     }
-    @prolongation (o.prolongation) (&pr);
+    @prolongation (o.prolongation, o.prolongation_uses) (&pr);
   }
 }
 
 void block_restrict (Index p, int s)
 {
-  @restriction (scalar_get_ops (s).restriction) (p, s);
+  ScalarOps o = scalar_get_ops (s);
+  @restriction (o.restriction, o.restriction_uses) (p, s);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -181,7 +355,7 @@ void block_ghosts (Index p, int s)
       pr.lo [a] = lo [a];
       pr.hi [a] = hi [a];
     }
-    @prolongation (o.prolongation) (&pr);
+    @prolongation (o.prolongation, o.prolongation_uses) (&pr);
   }
 
   /* the walls, one axis after the other */
@@ -190,7 +364,7 @@ void block_ghosts (Index p, int s)
       if (side ? P [a] == nb - 1 : P [a] == 0)
       {
         Boundary bc = { own, sh, a, side, p, s };
-        @boundary (o.boundary) (&bc);
+        @boundary (o.boundary, o.boundary_uses) (&bc);
       }
 }
 
@@ -235,16 +409,19 @@ static Levels levels_new (int parents)
 .. children, so one pass from the leaves up */
 void tree_restrict (int s)
 {
-  int restriction = scalar_get_ops (s).restriction;
+  ScalarOps o = scalar_get_ops (s);
   morton (TREE_ROOT_INDEX)
     if (tree_has_children (node))
-      @restriction (restriction) ((Index) {IJKL}, s);
+      @restriction (o.restriction, o.restriction_uses) ((Index) {IJKL}, s);
 }
 
-void ghosts_update_list (int n, const int * s, int parents)
+void ghosts_update_list (int n, const int * given, int parents)
 {
   if (n <= 0)
     return;
+  /* each after those it depends on, the stale ones of those with them */
+  int s [NSCALAR_MAX];
+  n = ghost_order (n, given, s);
   Levels L = levels_new (1);
   ScalarOps * o = malloc ((size_t) n * sizeof (ScalarOps));
   if (!o)
@@ -259,7 +436,7 @@ void ghosts_update_list (int n, const int * s, int parents)
     for (int b = L.first [l]; b < L.first [l + 1]; b++)
       if (tree_has_children (index_node (L.at [b])))
         for (int q = 0; q < n; q++)
-          @restriction (o [q].restriction) (L.at [b], s [q]);
+          @restriction (o [q].restriction, o [q].restriction_uses) (L.at [b], s [q]);
   }
 
   /* 2. the ghosts, coarsest first; within a level, at once */

@@ -122,15 +122,57 @@
   ..   @prolongation name (const Prolongation * pr) { ... }
   ..   @restriction  name (Index parent, scalar s)   { ... }
   ..   @boundary     name (const Boundary * bc)      { ... }
+  ..
+  .. Coupled operators: one that also reads other scalars of the same nodes
+  .. names them in a second parameter list, as the water depth h prolonged
+  .. from the surface h + zb, the bed zb prolonged first:
+  ..
+  ..   @prolongation prolong_lake (const Prolongation * pr) (scalar zb) { ... }
+  ..   ghost_ops (h, prolongation (prolong_lake, zb));
+  ..
+  .. ghost_ops () (cwrap) binds an operator and the scalars it depends on,
+  .. which must be global: never freed. It checks, as it runs, that the
+  .. operator takes that many, and that no scalar's operators depend on it
+  .. itself, through others: either stops the run with a message (unless
+  .. ghost_ops_abort is 0: then ghost_ops_set () returns 1 and binds
+  .. nothing). From then on:
+  ..   - a scalar's ghosts are made after those of the scalars it depends
+  ..     on, wherever several are made (ghosts_update (), refining,
+  ..     coarsening), and a stale one it depends on is updated with it;
+  ..   - ghosts_mark_dirty (zb) marks those that depend on zb too.
+  .. scalar_set_ops () binds operators that depend on nothing.
   */
+  #define GHOST_USES_MAX 4
+  enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
+
   typedef struct
   {
     int prolongation, restriction, boundary;
+    scalar prolongation_uses [GHOST_USES_MAX];  /* what each depends on */
+    scalar restriction_uses  [GHOST_USES_MAX];
+    scalar boundary_uses     [GHOST_USES_MAX];
   } ScalarOps;
 
   void      scalar_set_ops (scalar s, ScalarOps ops);
   ScalarOps scalar_get_ops (scalar s);  /* the defaults where 0 */
   void      scalar_ops_reset (scalar s);  /* back to the defaults */
+  int       ghost_ops_set (scalar s, int kind, int op, const scalar * uses,
+                           int n);      /* what ghost_ops () calls */
+  extern int ghost_ops_abort;           /* 1, the default: stop on errors */
+
+  /*
+  .. The scalars, ordered so that each comes after those it depends on:
+  .. ghost_order (n, in, out) of in [0..n), with the stale ones they depend
+  .. on added; ghost_order_all (out) of every scalar in use. Each returns
+  .. how many. foreach_scalar_ordered (s) { ... } runs over the second.
+  */
+  int ghost_order (int n, const int * in, int * out);
+  int ghost_order_all (int * out);
+  #define foreach_scalar_ordered(s)                                       \
+    for (int __cwrap_ol [NSCALAR_MAX], __cwrap_on = ghost_order_all (__cwrap_ol), \
+             __cwrap_oq = 0, s = 0;                                         \
+         __cwrap_oq < __cwrap_on && ((s = __cwrap_ol [__cwrap_oq]), 1);     \
+         __cwrap_oq++)
 
   /*
   .. The prolongations given:
@@ -364,10 +406,14 @@
   */
   #define GHOSTS_DIRTY_WORDS ((NSCALAR_MAX + 63) / 64)
   extern unsigned long long ghosts_dirty [GHOSTS_DIRTY_WORDS];
+  /* the scalars that depend on s, through others too: see ghost_ops () */
+  extern unsigned long long ghost_dependents [NSCALAR_MAX][GHOSTS_DIRTY_WORDS];
 
   static inline void ghosts_mark_dirty (int s)
   {
     ghosts_dirty [s / 64] |= 1ull << (s % 64);
+    for (int w = 0; w < GHOSTS_DIRTY_WORDS; w++)
+      ghosts_dirty [w] |= ghost_dependents [s][w];
   }
 
   static inline void ghosts_mark_all_dirty (void)

@@ -836,6 +836,44 @@ and the same with `@restriction` and `@boundary`.
   `scalar_set_ops (h, (ScalarOps) { .prolongation = prolong_minmod })`. That
   marks its ghosts stale, to be made again by the new ones.
 
+### Coupled operators
+
+An operator that also reads other scalars names them in a second parameter
+list: they are bound per scalar, and passed to it at each call.
+
+    @prolongation prolong_lake (const Prolongation * pr) (scalar zb)
+    {
+      scalar s = pr->s;
+      foreach_prolongation (pr)
+        s[] = coarse (s) + coarse (zb) - zb[];   /* the surface, less the bed */
+    }
+
+    scalar zb, h;                 /* global: see below */
+    ...
+    ghost_ops (h, prolongation (prolong_lake, zb), boundary (bc_odd));
+
+- **`ghost_ops (s, kind (op, scalars...), ...)`** binds operators to `s`,
+  anywhere, at any time, each with the scalars it depends on: kinds
+  `prolongation`, `restriction`, `boundary`. It becomes a call of libb-amr's
+  `ghost_ops_set ()` per item.
+- **The scalars depended on must be global** (at file scope, `static` or
+  `extern`, or a member of a global vector or tensor), checked by cwrap:
+  a global scalar is never freed (see [Scalars](#a-global-scalar-is-never-freed)),
+  so a binding cannot outlive what it reads. A local one is an error.
+- **The dispatch passes them:** `@prolongation (id, uses) (args)` calls one
+  that depends on scalars with `uses [0]`, `uses [1]`, ... after `args`;
+  without `uses`, it is an error if one of its kind depends on any.
+  `@prolongation uses (id)` is how many scalars that operator takes.
+- **What libb-amr then checks, as `ghost_ops ()` runs:** that the operator
+  takes that many scalars, that they are global, and that no scalar's
+  operators would depend on it itself through others. Either stops the run
+  with a message, binding nothing. `scalar_set_ops ()` refuses an operator
+  that depends on scalars.
+- **And keeps:** wherever several scalars' ghosts are made (a ghost update,
+  a refinement, a coarsening), those depended on are made first, whatever
+  the ids, and a stale one is updated with the scalar that needs it;
+  marking one stale (`ghosts_mark_dirty`) marks those that depend on it.
+
 ### Operator bodies: stencils over two levels
 
 A prolongation or a restriction is written with the stencil syntax, in a
@@ -974,7 +1012,8 @@ on it. The tests cover:
   stale, the dependency warning, `foreach_neighbor ()` and its checks,
   `@foreach` with parameters, nesting through calls, loops over two levels
   (`coarse ()`, `child.x`, `foreach_child ()`) and their errors, ghost
-  operators (`ops_run.c`, `ops_bad.c`), a block per scalar
+  operators (`ops_run.c`, `ops_bad.c`) and coupled ones (`ops_coupled.c`,
+  `ops_coupled_bad.c`), a global scalar never freed, a block per scalar
   used, `const` when only read, line numbers, every error, and a function
   named `foreach`. libb-amr's
   `tests/test_stencil.c` checks it on the real tree against `cell_at`.

@@ -397,6 +397,19 @@ check "@prolongation and @restriction: ids by kind, attached by name, a switch w
   grep -q "^ops_bad.c:5: error: @restriction (...) (...): no @restriction is defined before it" ops_bad.log
 check "ghost operators: defined twice, or dispatched with none defined, an error" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra ops_coupled.c -o ops_coupled 2> ops_coupled.log &&
+  [ "$(./ops_coupled)" = "34 1 2 0 | 0 2 2 1 2 1 0" ] && [ ! -s ops_coupled.log ]
+check "coupled operators: (scalar a, scalar b) passed from uses, @prolongation uses (id), ghost_ops () with globals" $?
+
+"$cwrap" -dimension=2 -c ops_coupled_bad.c -o ops_coupled_bad.o 2> ops_coupled_bad.log
+[ $? -ne 0 ] && [ ! -e ops_coupled_bad.o ] &&
+  [ "$(grep -o '^ops_coupled_bad.c:[0-9]*: error' ops_coupled_bad.log | cut -d: -f2 | tr '\n' ' ')" = "5 8 9 10 " ] &&
+  grep -q "^ops_coupled_bad.c:5: error: @prolongation wrong: what it depends on is scalars" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:8: error: @prolongation (id) (...): some @prolongation depends on scalars" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:9: error: prolongation (needs, ...): 'local', a scalar it depends on, must be global" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:10: error: ghost_ops (zb, ...): 'smoothing(needs)' is not prolongation" ops_coupled_bad.log
+check "coupled operators: a dependency not a scalar, a dispatch without uses, a local dependency, an item of no kind" $?
+
 "$cwrap" -dimension=2 -c scalar_global_free.c -o scalar_global_free.o 2> scalar_global_free.log
 [ $? -ne 0 ] && [ ! -e scalar_global_free.o ] &&
   [ "$(grep -o '^scalar_global_free.c:[0-9]*: error' scalar_global_free.log | cut -d: -f2 | tr '\n' ' ')" = "9 10 11 12 13 " ] &&

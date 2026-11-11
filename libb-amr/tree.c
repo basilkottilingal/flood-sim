@@ -142,10 +142,10 @@ static int divide_leaf (int IJKLargs)
   .. ghosts are valid. The leaves around that read this node's cells, by a
   .. copy or a prolongation, read the same values from the children now.
   */
-  foreach_scalar (s)
+  foreach_scalar_ordered (s)
     block_prolong ((Index) {IJKL}, s);
   children_of ((Index) {IJKL})
-    foreach_scalar (s)
+    foreach_scalar_ordered (s)
       block_ghosts ((Index) {IJKL}, s);
   return 1;
 }
@@ -260,7 +260,7 @@ int tree_coarsen (Index p)
         if (tree_has_children (node))
           return 0;
   /* p gets the restriction of its children, then they go */
-  foreach_scalar (s)
+  foreach_scalar_ordered (s)
     block_restrict (p, s);
   {
     INDEX_UNPACK (p);
@@ -272,13 +272,13 @@ int tree_coarsen (Index p)
   .. p's level read p, its restriction as before, and the coarser ones
   .. p's parent, unchanged.
   */
-  foreach_scalar (s)
+  foreach_scalar_ordered (s)
     block_ghosts (p, s);
   neighbors_of (p, 1)
     if (node && tree_has_children (node))
       children_of ((Index) {IJKL})
         if ((node->flags & BAMR_NODE_LEAF) && touches (p, (Index) {IJKL}))
-          foreach_scalar (s)
+          foreach_scalar_ordered (s)
             block_ghosts ((Index) {IJKL}, s);
   return 1;
 }

@@ -16,6 +16,9 @@ static int checks, fails;
   printf ("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 
 scalar u, v, w, z, e, u2;
+scalar zbl, hl;           /* a bed and a water depth on it: declared last,
+                             hl takes the lower id, so that its bed coming
+                             first is the order of dependence, not of ids */
 
 static const double tol = 1e3 * REAL_EPSILON;
 
@@ -118,8 +121,30 @@ static long restricted;
   @restriction (restriction_mean) (p, s);
 }
 
+/* lake at rest: the depth from the surface h + zb, injected, less the fine
+.. bed, which is prolonged first */
+@prolongation prolong_lake (const Prolongation * pr) (scalar zb)
+{
+  scalar s = pr->s;
+  foreach_prolongation (pr)
+    s[] = coarse (s) + coarse (zb) - zb[];
+}
+
 /* the core, dispatching to the operators above and those given */
 #include "block-ghosts-impl.h"
+
+/* the largest |h + b - surface| over every leaf cell, ghosts included */
+static double surface_error (int h, int b, double surface)
+{
+  BlockShape shape = tree_block_shape ();
+  double err = 0;
+  foreach_leaf () {
+    const Real * x = block_data (sblocks, h), * y = block_data (sblocks, b);
+    block_cells (shape, shape.g)
+      err = fmax (err, fabs ((double) x [c] + y [c] - surface));
+  }
+  return err;
+}
 
 /* the leaf holding the point r */
 static Index leaf_at (const double r [3])
@@ -438,6 +463,54 @@ int main (void)
     grid_scalar_trim (0);
     CHECK (grid_scalar_check ());
   }
+  /* 10. a coupled prolongation: the depth hl from the surface hl + zbl,
+   * the bed zbl made first though hl's id is lower, at level jumps, walls
+   * and in refined leaves; zbl stale makes hl stale; a cycle, a wrong
+   * count, or scalar_set_ops () of it are refused, binding nothing */
+  {
+    const double surface = 7;           /* not 'level': foreach_leaf's */
+    ghost_ops (hl, prolongation (prolong_lake, zbl));
+    CHECK ((ghost_dependents [zbl][hl / 64] >> (hl % 64)) & 1);
+    {
+      int order [NSCALAR_MAX], n = ghost_order_all (order), ph = -1, pz = -1;
+      for (int q = 0; q < n; q++)
+        ph = order [q] == hl ? q : ph, pz = order [q] == zbl ? q : pz;
+      CHECK (pz >= 0 && ph > pz);           /* the bed first, whatever ids */
+      fprintf (stderr, "  (hl %d, zbl %d: %s order of ids)\n", (int) hl,
+               (int) zbl, hl < zbl ? "against the" : "in the");
+    }
+    set (zbl, linear);
+    BlockShape shape = tree_block_shape ();
+    foreach_leaf () {
+      Real * h = block_data (sblocks, hl);
+      const Real * b = block_data (sblocks, zbl);
+      block_cells (shape, 0)
+        h [c] = (Real) (surface - b [c]);
+    }
+    ghosts_update (hl, zbl);              /* hl given first: zbl done first */
+    CHECK (surface_error (hl, zbl, surface) < tol * surface);
+    double r [3] = { 0.62, 0.41, 0.33 };
+    CHECK (tree_refine (leaf_at (r)) > 0);
+    CHECK (surface_error (hl, zbl, surface) < tol * surface);
+    ghosts_update (hl, zbl);
+    CHECK (!ghosts_is_dirty (hl) && !ghosts_is_dirty (zbl));
+    ghosts_mark_dirty (zbl);
+    CHECK (ghosts_is_dirty (hl));
+    ghosts_update (hl);                   /* zbl stale: updated with it */
+    CHECK (!ghosts_is_dirty (zbl));
+    ghost_ops_abort = 0;
+    fprintf (stderr, "  (three refusals expected:)\n");
+    CHECK (ghost_ops_set (zbl, GHOST_PROLONGATION, prolong_lake,
+                          (const scalar []) { hl }, 1) == 1);
+    CHECK (scalar_get_ops (zbl).prolongation == prolong_linear);
+    CHECK (ghost_ops_set (u, GHOST_PROLONGATION, prolong_lake, NULL, 0) == 1);
+    scalar_set_ops (u, (ScalarOps) { .prolongation = prolong_lake });
+    CHECK (scalar_get_ops (u).prolongation == prolong_linear);
+    ghost_ops_abort = 1;
+    scalar_set_ops (hl, (ScalarOps) {0});
+    CHECK (!((ghost_dependents [zbl][hl / 64] >> (hl % 64)) & 1));
+  }
+
   printf ("  %d leaves, %ld ghost cells at level jumps\n", tree_get_nleaves (), jumps);
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);

@@ -426,13 +426,19 @@ stencil_name:
 /* A ghost operator: see translate.h. Its parameters are in scope for its
  * body, as a function's. */
 operator_definition:
-    AT_OPERATOR any_identifier '(' open_scope loop_params ')' compound_statement
-    close_scope
-                                  { $$ = operator_define ($1, $2, $3, $5, $6, $7,
+    AT_OPERATOR any_identifier '(' open_scope loop_params ')' operator_deps
+    compound_statement close_scope
+                                  { $$ = operator_define ($1, $2, $3, $5, $6, $7, $8,
                                                           &status->rejected);
-                                    (void) $4; (void) $8; }
+                                    (void) $4; (void) $9; }
   | AT_OPERATOR any_identifier ';'
                                   { $$ = operator_declare ($1, $2, $3); }
+  ;
+
+/* (scalar zb, ...): the scalars a coupled operator depends on */
+operator_deps:
+    %empty                        { $$ = NULL; }
+  | '(' parameter_list ')'        { $$ = N (LOOP_INJECTS, $1, $2, $3); }
   ;
 
 opt_arguments:
@@ -1196,6 +1202,9 @@ asm_labels:
 
 primary_expression:
     IDENTIFIER
+  /* @prolongation uses (id): the scalars that operator takes, as a count */
+  | AT_OPERATOR any_identifier '(' expression ')'
+                                  { $$ = operator_uses ($1, $2, $3, $4, $5, &status->rejected); }
   | FOREACH %prec KEYWORD_NAME
   | CACHE %prec KEYWORD_NAME
   | CONSTANT
@@ -1260,9 +1269,11 @@ postfix_expression:
   | postfix_expression '(' argument_list ')'
                                   { check_cache_arguments (scopes, $3);
                                     status->rejected += check_global_free ($1, $3);
+                                    /* ghost_ops (s, prolongation (op, zb), ...) */
+                                    if (!($$ = ghost_ops_call ($1, $3, &status->rejected)))
                                     /* coarse (s, i, j): a cell one level up */
-                                    $$ = stencil_coarse (status->stencil, $1, $2, $3, $4,
-                                                         &status->rejected);
+                                      $$ = stencil_coarse (status->stencil, $1, $2, $3, $4,
+                                                           &status->rejected);
                                     if (!$$)
                                       $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '.' any_identifier

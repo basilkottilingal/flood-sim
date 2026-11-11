@@ -1157,20 +1157,16 @@ struct ast *loop_expand (const struct loop_def *def, struct ast *name,
 static const struct ast *declarator_specs (const struct ast *d);
 static int declarator_indirections (const struct ast *d);
 
-int check_global_free (const struct ast *fn, const struct ast *args)
+/* The declaration of the global scalar, vector or tensor that e names, or
+ * of which it names a member (t.x.y), or NULL: one at file scope, static or
+ * extern. *root is then the name, *member whether e is a member. */
+static const struct ast *global_scalar_decl (const struct ast *e,
+                                             const struct ast **specs_out,
+                                             int *member)
 {
-  const struct ast *e, *specs, *decl;
-  const struct token *t;
+  const struct ast *specs, *decl, *top = e;
 
-  if (!dimension || fn->kind != AST_TOKEN || !args || !args->child)
-    return 0;
-  t = ast_token (fn);
-  if (t->kind != T_IDENTIFIER || (strcmp (t->text, "scalar_free") != 0
-                                  && strcmp (t->text, "vector_free") != 0
-                                  && strcmp (t->text, "tensor_free") != 0))
-    return 0;
-  /* (t.x).y: down to t */
-  for (e = args->child;;) {
+  for (;;) {
     if (e->kind == AST_PAREN_EXPRESSION)
       e = e->child->next;
     else if (e->kind == AST_MEMBER && strcmp (ast_token (e->child->next)->text, ".") == 0)
@@ -1183,7 +1179,7 @@ int check_global_free (const struct ast *fn, const struct ast *args)
       || !(decl = ast_token (e)->binding->decl)
       || !(specs = declarator_specs (decl)) || !scalar_type (specs)
       || declarator_indirections (decl) != 0)
-    return 0;
+    return NULL;
   {
     const struct ast *d = specs->parent;  /* the declaration */
 
@@ -1191,12 +1187,32 @@ int check_global_free (const struct ast *fn, const struct ast *args)
       d = d->parent;
     if (!has_token (specs, T_STATIC, NULL) && !has_token (specs, T_EXTERN, NULL)
         && !(d->parent && d->parent->kind == AST_TRANSLATION_UNIT))
-      return 0;
+      return NULL;
   }
+  *specs_out = specs;
+  *member = e != top;
+  return decl;
+}
+
+int check_global_free (const struct ast *fn, const struct ast *args)
+{
+  const struct ast *specs, *decl;
+  const struct token *t;
+  int member;
+
+  if (!dimension || fn->kind != AST_TOKEN || !args || !args->child)
+    return 0;
+  t = ast_token (fn);
+  if (t->kind != T_IDENTIFIER || (strcmp (t->text, "scalar_free") != 0
+                                  && strcmp (t->text, "vector_free") != 0
+                                  && strcmp (t->text, "tensor_free") != 0))
+    return 0;
+  if (!(decl = global_scalar_decl (args->child, &specs, &member)))
+    return 0;
   diag (t->file, t->line, DIAG_ERROR, "%s () of '%s', %s global %s: it is "
         "numbered once for the whole run and never freed", t->text,
-        expression_text (args->child),
-        e == args->child ? "a" : "a member of a", scalar_type (specs));
+        expression_text (args->child), member ? "a member of a" : "a",
+        scalar_type (specs));
   note_declared (decl);
   return 1;
 }
@@ -2795,6 +2811,8 @@ struct ghost_op {
   const char *kind;         /* prolongation, restriction, boundary */
   const char *name;
   int id;
+  int nuses;                /* the scalars it depends on: its parameters
+                               after the first */
   const struct token *at;
   struct ghost_op *next;
 };
@@ -2828,7 +2846,7 @@ static const char *all_trivia (const struct ast *n)
 
 struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
                              struct ast *params, struct ast *close,
-                             struct ast *body, int *rejected)
+                             struct ast *deps, struct ast *body, int *rejected)
 {
   const char *kind = operator_kind (at), *nm = ast_token (name)->text;
   const struct token *t = ast_token (at);
@@ -2845,6 +2863,24 @@ struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
   o->kind = kind;
   o->name = nm;
   o->id = operator_count (kind) + 1;
+  /* the scalars it depends on, (scalar zb, ...), after its parameters */
+  o->nuses = 0;
+  if (deps) {
+    struct ast *list = deps->child->next;
+
+    for (struct ast *p = list->child; p; p = p->next) {
+      const struct ast *d;
+
+      if (p->kind != AST_PARAMETER)
+        continue;
+      d = p->child->next;
+      o->nuses++;
+      if (!scalar_type (p->child) || strcmp (scalar_type (p->child), "scalar") != 0
+          || !d || d->kind != AST_DECL_NAME)
+        stencil_error (rejected, p, "@%s %s: what it depends on is scalars, "
+                       "each declared 'scalar name'", kind, nm);
+    }
+  }
   o->at = ast_token (name);
   o->next = ghost_ops;
   ghost_ops = o;
@@ -2864,6 +2900,30 @@ struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
   last_token (suffix)->trivia = ast_token (close)->trivia;
   if (params)
     ast_replace (suffix->child->next, params);
+  if (deps) {
+    /* (params) (deps) becomes (params, deps), the trivia of the
+     * parentheses dropped kept on the comma */
+    struct ast *list = deps->child->next, *comma;
+    const char *trivia = arena_printf ("%s%s", ast_token (close)->trivia,
+                                       ast_token (deps->child)->trivia);
+
+    if (params) {
+      comma = new_token (',', ",", t);
+      first_token (comma)->trivia = trivia;
+      ast_add (params, comma);
+      for (struct ast *p = list->child, *next; p; p = next) {
+        next = p->next;
+        p->parent = p->next = NULL;
+        ast_add (params, p);
+      }
+    } else {
+      list->parent = list->next = NULL;
+      first_token (list)->trivia = arena_printf ("%s%s", trivia,
+                                                 first_token (list)->trivia);
+      ast_replace (suffix->child->next, list);
+    }
+    last_token (suffix)->trivia = ast_token (deps->last)->trivia;
+  }
   ast_replace (fn->last, body);
   kids[0] = fn;
   kids[1] = decl;
@@ -2895,7 +2955,22 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
   int nv = 0, n = operator_count (kind), nes = 1;
   struct ghost_op **by_id;
 
+  struct ast *uses = NULL;
+  int need_uses = 0;
+
   (void) open, (void) close, (void) open2, (void) close2;
+  if (id->kind == AST_COMMA && id->child->kind != AST_COMMA) {
+    uses = id->last;
+    id = id->child;
+    uses->parent = uses->next = id->parent = id->next = NULL;
+  }
+  for (struct ghost_op *o = ghost_ops; o; o = o->next)
+    need_uses |= strcmp (o->kind, kind) == 0 && o->nuses > 0;
+  if (need_uses && !uses) {
+    stencil_error (rejected, at, "@%s (id) (...): some @%s depends on scalars: "
+                   "pass them, @%s (id, uses) (...)", kind, kind, kind);
+    return ast_new (AST_EXPRESSION_STATEMENT);
+  }
   if (!n) {
     stencil_error (rejected, at, "@%s (...) (...): no @%s is defined before "
                    "it in this file", kind, kind);
@@ -2909,7 +2984,13 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
   for (struct ghost_op *o = ghost_ops; o; o = o->next)
     if (strcmp (o->kind, kind) == 0)
       by_id[o->id] = o;
-  es = allocate ((size_t)(1 + n * nv) * sizeof (*es) + 1);
+  {
+    int most = 0;                         /* the most scalars one depends on */
+
+    for (int k = 1; k <= n; k++)
+      most = by_id[k]->nuses > most ? by_id[k]->nuses : most;
+    es = allocate ((size_t)(1 + n * (nv + most)) * sizeof (*es) + 1);
+  }
   es[0] = id;
   text = "switch (__cwrap_e0) {";
   for (int k = 1; k <= n; k++) {
@@ -2918,6 +2999,13 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
     for (int j = 0; j < nv; j++) {
       es[nes] = vs[j];
       call = arena_printf ("%s%s(__cwrap_e%d)", call, j ? ", " : "", nes++);
+    }
+    /* uses [0], uses [1], ...: a copy of uses for each, as each placeholder
+     * is filled once */
+    for (int u = 0; u < by_id[k]->nuses; u++) {
+      es[nes] = uses;
+      call = arena_printf ("%s%s(__cwrap_e%d)[%d]", call, nv || u ? ", " : "",
+                           nes++, u);
     }
     text = arena_printf ("%s case %d: __cwrap_%s_%s (%s); break;", text, k,
                          kind, by_id[k]->name, call);
@@ -2933,6 +3021,104 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
     last_token (sw)->trivia = arena_printf ("%s%s", last_token (sw)->trivia,
                                             all_trivia (args));
   return sw;
+}
+
+struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
+                           struct ast *id, struct ast *close, int *rejected)
+{
+  const char *kind = operator_kind (at), *text = "";
+  const struct token *t = ast_token (at);
+  struct ast *items = ast_new (AST_BLOCK_ITEMS), *e;
+
+  (void) open, (void) close;
+  if (strcmp (ast_token (word)->text, "uses") != 0) {
+    stencil_error (rejected, word, "@%s %s (...) in an expression: only @%s "
+                   "uses (id)", kind, ast_token (word)->text, kind);
+    return ast_new (AST_EXPRESSION_STATEMENT);
+  }
+  for (struct ghost_op *o = ghost_ops; o; o = o->next)
+    if (strcmp (o->kind, kind) == 0)
+      text = arena_printf ("%s__cwrap_u == %d ? %d : ", text, o->id, o->nuses);
+  add_stencil_items (items, arena_printf ("({ int __cwrap_u = (__cwrap_e0); "
+                                          "(void) __cwrap_u; %s-1; });", text),
+                     &id, 1, t);
+  e = items->child->child;
+  e->parent = e->next = NULL;
+  first_token (e)->trivia = t->trivia;
+  return e;
+}
+
+/* ghost_ops (s, prolongation (op, zb, ...), restriction (...), boundary (...)) */
+struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
+{
+  static const char *const kinds[3] = { "prolongation", "restriction", "boundary" };
+  static const char *const consts[3] = { "GHOST_PROLONGATION", "GHOST_RESTRICTION",
+                                         "GHOST_BOUNDARY" };
+  const struct token *t;
+  struct ast *target, *es[4 * MAX_LOOP_PARAMS], *items = ast_new (AST_BLOCK_ITEMS), *e;
+  const char *text = "(";
+  int nes = 0, errors = *rejected;
+
+  if (!dimension || fn->kind != AST_TOKEN)
+    return NULL;
+  t = ast_token (fn);
+  if (t->kind != T_IDENTIFIER || strcmp (t->text, "ghost_ops") != 0 || t->binding)
+    return NULL;
+  target = args->child;
+  if (!is_scalar_expression (target))
+    stencil_error (rejected, target, "ghost_ops (%s, ...): '%s' is not a scalar",
+                   expression_text (target), expression_text (target));
+  for (struct ast *item = target->next; item; item = item->next) {
+    struct ast *vs[MAX_LOOP_PARAMS];
+    const char *deps = "";
+    int kind = -1, nv = 0;
+
+    if (item->kind == AST_TOKEN)              /* , */
+      continue;
+    if (item->kind == AST_CALL && item->child->kind == AST_TOKEN)
+      for (int k = 0; k < 3; k++)
+        if (strcmp (ast_token (item->child)->text, kinds[k]) == 0)
+          kind = k;
+    if (kind < 0 || item->child->next->next->kind != AST_ARGUMENT_LIST) {
+      stencil_error (rejected, item, "ghost_ops (%s, ...): '%s' is not "
+                     "prolongation (op, ...), restriction (op, ...) or "
+                     "boundary (op, ...)", expression_text (target),
+                     expression_text (item));
+      continue;
+    }
+    for (struct ast *a = item->child->next->next->child; a; a = a->next)
+      if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
+          && nv < MAX_LOOP_PARAMS)
+        vs[nv++] = a;
+    /* the scalars it depends on: global, never freed */
+    for (int k = 1; k < nv; k++) {
+      const struct ast *specs;
+      int member;
+
+      if (!is_scalar_expression (vs[k]) || !global_scalar_decl (vs[k], &specs, &member))
+        stencil_error (rejected, vs[k], "%s (%s, ...): '%s', a scalar it "
+                       "depends on, must be global (at file scope, static or "
+                       "extern), as a global scalar is never freed",
+                       kinds[kind], expression_text (vs[0]),
+                       expression_text (vs[k]));
+      es[nes] = vs[k];
+      deps = arena_printf ("%s%s(__cwrap_e%d)", deps, k > 1 ? ", " : "", nes++);
+    }
+    es[nes] = target;
+    es[nes + 1] = vs[0];
+    text = arena_printf ("%sghost_ops_set ((__cwrap_e%d), %s, (__cwrap_e%d), %s, %d), ",
+                         text, nes, consts[kind], nes + 1,
+                         nv > 1 ? arena_printf ("(const scalar []) { %s }", deps)
+                                : "(const scalar *) 0", nv - 1);
+    nes += 2;
+  }
+  if (*rejected > errors)
+    return NULL;
+  add_stencil_items (items, arena_printf ("%s(void) 0);", text), es, nes, t);
+  e = items->child->child;
+  e->parent = e->next = NULL;
+  first_token (e)->trivia = t->trivia;
+  return e;
 }
 
 /* The translation itself: rewrite the tree here. */

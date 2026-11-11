@@ -272,12 +272,33 @@ struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
  * definition; any other file attaches an operator by name, an int. */
 struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
                              struct ast *params, struct ast *close,
-                             struct ast *body, int *rejected);
+                             struct ast *deps, struct ast *body, int *rejected);
 struct ast *operator_declare (struct ast *at, struct ast *name, struct ast *semi);
 struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
                                struct ast *close, struct ast *open2,
                                struct ast *args, struct ast *close2,
                                struct ast *semi, int *rejected);
+
+/* Coupled operators. A second parameter list, after the first, holds the
+ * scalars a definition depends on, bound per scalar:
+ *
+ *   @prolongation lake (const Prolongation * pr) (scalar zb) { ... }
+ *       static inline void __cwrap_prolongation_lake (const Prolongation * pr,
+ *                                                     scalar zb) { ... }
+ *   @prolongation (id, uses) (args);  as above, passing uses [0], uses [1],
+ *       ... to an operator that takes them; without uses, an error if one
+ *       of its kind does
+ *   @prolongation uses (id)           an expression: how many scalars the
+ *       operator with that id takes, -1 for no such id
+ *   ghost_ops (h, prolongation (lake, zb), boundary (bc_odd))
+ *       ghost_ops_set (h, GHOST_PROLONGATION, lake, (const scalar []) {zb}, 1),
+ *       ghost_ops_set (h, GHOST_BOUNDARY, bc_odd, (const scalar *) 0, 0)
+ *     each scalar depended on a global one (at file scope, static or
+ *     extern, or a member of a global vector or tensor), which is never
+ *     freed: else an error. */
+struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
+                           struct ast *id, struct ast *close, int *rejected);
+struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected);
 
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
