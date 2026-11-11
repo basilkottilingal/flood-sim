@@ -815,9 +815,59 @@ and the same with `@restriction` and `@boundary`.
   `scalar_set_ops (h, (ScalarOps) { .prolongation = prolong_minmod })`. That
   marks its ghosts stale, to be made again by the new ones.
 
-Their bodies are plain C for now, written with libb-amr's `prolong_cells ()`
-and `boundary_cells ()`; the stencil syntax in them (`coarse (s)`,
-`child.x`, `foreach_child ()`) is to come.
+### Operator bodies: stencils over two levels
+
+A prolongation or a restriction is written with the stencil syntax, in a
+loop over two levels that libb-amr declares with `@foreach`:
+
+    @prolongation prolong_linear (const Prolongation * pr)
+    {
+      scalar s = pr->s;
+      foreach_prolongation (pr) {           /* the fine cells pr asks for */
+        RealSum v = coarse (s);
+        v += child.x * (coarse (s, 1) - coarse (s, -1)) / 8.;
+        v += child.y * (coarse (s, 0, 1) - coarse (s, 0, -1)) / 8.;
+        s[] = (Real) v;
+      }
+    }
+
+    @restriction restriction_mean (Index p, scalar s)
+    {
+      foreach_restriction (p) {             /* the parent's cells, child by child */
+        RealSum sum = 0;
+        foreach_child ()
+          sum += s[];
+        s[] = (Real) (sum / TREE_NCHILDREN);
+      }
+    }
+
+- **What a loop over two levels is, cwrap tells by the names its two loops
+  give**, as `sblocks`, `c` and `shape`:
+  - `coarse_sblocks` (block loop), `cc` and `sgn` (cell loop): the point
+    has a coarse cell. `coarse (s)` is it, `coarse (s, i, j, k)` its
+    neighbours at that level; `child.x`, `.y`, `.z` the half of it the
+    point is in, -1 or +1 (0 beyond the dimension).
+  - `child_sblocks` (block loop) and `fc` (cell loop): the point has
+    children. `foreach_child ()` moves the point to each, in order, i
+    fastest, as `foreach_neighbor ()` does.
+- **`s[]` is the point's cell, and the only cell of its level:** an offset
+  there (`s[1]`) is an error, those cells being the ones filled, and so is
+  `foreach_neighbor ()`.
+- **`coarse ()` and `foreach_child ()` only read,** and are written as
+  values; a write is an error. `coarse ()` offsets are constants within
+  `BAMR_COARSE_REACH` (1: only the coarse block's first ghost layer is valid
+  at a level jump), checked at compile time as the others.
+- **`coarse ()` outside such a loop, as in `foreach ()`, and `foreach_child
+  ()` in a loop whose points have no children, are errors.**
+- **No ghost is tracked:** these loops run inside the ghost update itself.
+- **Each scalar's blocks are found once per block,** fine and coarse, or
+  parent and child, as in `foreach ()`, and the restriction runs child by
+  child, so that the parent block and the child's are fixed in the inner
+  loop.
+
+libb-amr's given operators are written so (`block-ops.h`): the same results
+as before, bit for bit, and as fast or faster, as nothing is called through
+a pointer. The boundary conditions stay plain C, with `boundary_cells ()`.
 
 ---
 
@@ -901,7 +951,9 @@ on it. The tests cover:
 - `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
   the body's own names, `x`, `y` and `Delta`, the ghosts updated only when
   stale, the dependency warning, `foreach_neighbor ()` and its checks,
-  `@foreach` with parameters, nesting through calls, a block per scalar
+  `@foreach` with parameters, nesting through calls, loops over two levels
+  (`coarse ()`, `child.x`, `foreach_child ()`) and their errors, ghost
+  operators (`ops_run.c`, `ops_bad.c`), a block per scalar
   used, `const` when only read, line numbers, every error, and a function
   named `foreach`. libb-amr's
   `tests/test_stencil.c` checks it on the real tree against `cell_at`.

@@ -279,6 +279,7 @@ static struct ast *stencil_use (struct scope_table *scopes,
                            && scope_find (scopes, "ghosts_mark_all_dirty")
                            && scope_find (scopes, "ghosts_update_dirty"),
                            scope_find (scopes, "BAMR_GHOSTS") != NULL,
+                           scope_find (scopes, "BAMR_COARSE_REACH") != NULL,
                            name, body, &status->rejected);
 }
 
@@ -329,6 +330,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token AT_LOOP "@loop" LOOP_NAME
 %token AT_FOREACH "@foreach" STENCIL_NAME
 %token FOREACH_NEIGHBOR "foreach_neighbor"
+%token FOREACH_CHILD "foreach_child"
 %token AT_OPERATOR "@prolongation, @restriction or @boundary"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
@@ -1065,6 +1067,11 @@ iteration_statement:
                                     $$ = NULL; }
     statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, $3, $4, $6);
                                     (void) $5; }
+  /* foreach_child (): the point moved to each child of its cell */
+  | FOREACH_CHILD '(' ')'         { stencil_mover_begin (status->stencil, $1, &status->rejected);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, NULL, $3, $5);
+                                    (void) $4; }
   /* a loop declared with @foreach, with arguments or not */
   | STENCIL_NAME '(' ')'          { status->stencil = stencil_loop_begin (status->stencil, $1,
                                                                         &status->rejected);
@@ -1252,7 +1259,11 @@ postfix_expression:
   | CACHE '(' argument_list ')'   { $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '(' argument_list ')'
                                   { check_cache_arguments (scopes, $3);
-                                    $$ = N (CALL, $1, $2, $3, $4); }
+                                    /* coarse (s, i, j): a cell one level up */
+                                    $$ = stencil_coarse (status->stencil, $1, $2, $3, $4,
+                                                         &status->rejected);
+                                    if (!$$)
+                                      $$ = N (CALL, $1, $2, $3, $4); }
   | postfix_expression '.' any_identifier
                                   { $$ = N (MEMBER, $1, $2, $3); }
   | postfix_expression ARROW any_identifier

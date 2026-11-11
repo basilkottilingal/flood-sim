@@ -225,6 +225,99 @@
   }
 
   /*
+  .. Stencil loops over two levels, for the operators (cwrap: see
+  .. libc-pp/README.md), written as foreach () is:
+  ..
+  ..   foreach_prolongation (pr) { ... }  every fine cell pr asks for: s[] is
+  ..                     the fine cell, coarse (s), coarse (s, i, j) its coarse
+  ..                     cell and that cell's neighbours, child.x, .y, .z the
+  ..                     half it is in (-1 or +1, 0 beyond the dimension)
+  ..   foreach_restriction (p) { ... }   every cell of the parent p, child by
+  ..                     child: s[] is the parent cell, and foreach_child ()
+  ..                     moves the point to each of its children, in order
+  ..
+  .. In both, no offset on the point's own level (s[1]): those cells are
+  .. being filled. coarse () reaches BAMR_COARSE_REACH at most: only the
+  .. first ghost layer of the coarse block is valid when a level jump is
+  .. prolonged.
+  */
+  enum { BAMR_COARSE_REACH = 1 };
+
+  /* the fine node's blocks, and the coarse one's */
+  @loop prolong_block (const Prolongation * pr) : sblocks, coarse_sblocks
+  {
+    void *** sblocks = index_node (pr->fine_index)->s;
+    void *** coarse_sblocks = index_node (pr->coarse_index)->s;
+    (void) sblocks, (void) coarse_sblocks;
+    {...}
+  }
+
+  /* prolong_cells (pr), the fine cell c, its coarse cell cc, sgn its half */
+  @loop prolong_points (const Prolongation * pr) : c, shape, cc, sgn
+  {
+    BlockShape shape = pr->shape;
+    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 };
+    for (int a = 0; a < dimension; a++)
+      lo [a] = pr->lo [a], hi [a] = pr->hi [a];
+    int x [3];
+    for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+    for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+    for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
+    {
+      int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
+      for (int a = 0; a < dimension; a++)
+      {
+        int X = pr->off [a] + x [a];
+        assert (X >= 0 && X < 2 * shape.m);
+        C [a] = X >> 1;
+        sgn [a] = X & 1 ? 1 : -1;
+      }
+      long c = block_at (shape, x), cc = block_at (shape, C);
+      (void) c, (void) cc, (void) sgn;
+      {...}
+    }
+  }
+
+  /* the parent's blocks, and each child's, child by child */
+  @loop family_children (Index parent) : sblocks, child_sblocks, child
+  {
+    void *** sblocks = index_node (parent)->s;
+    for (int child = 0; child < TREE_NCHILDREN; child++)
+    {
+      void *** child_sblocks = index_node (index_child (parent, child))->s;
+      (void) sblocks, (void) child_sblocks;
+      {...}
+    }
+  }
+
+  /* the parent cells c of child's quadrant, by rows, and the first of
+  .. their children fc, in child's block */
+  @loop quadrant_cells (BlockShape shape, int child) : c, shape, fc
+  {
+    int h = shape.m / 2;
+    int hy = dimension > 1 ? h : 1, hz = dimension > 2 ? h : 1;
+    for (int Z = 0; Z < hz; Z++)
+    for (int Y = 0; Y < hy; Y++)
+    {
+      int px [3] = { (child & 1) * h, ((child >> 1) & 1) * h + Y,
+                     ((child >> 2) & 1) * h + Z };
+      int fx [3] = { 0, 2 * Y, 2 * Z };
+      long prow = block_at (shape, px), frow = block_at (shape, fx);
+      for (int X = 0; X < h; X++)
+      {
+        long c = prow + X, fc = frow + 2 * X;
+        (void) c, (void) fc;
+        {...}
+      }
+    }
+  }
+
+  @foreach foreach_prolongation (const Prolongation * pr)
+    = prolong_block (pr) prolong_points (pr);
+  @foreach foreach_restriction (Index p)
+    = family_children (p) quadrant_cells (tree_block_shape (), child);
+
+  /*
   .. API (and, below, the stale ghosts of foreach ())
   ..
   ..   ghosts_update (s, ...)         the ghosts of every leaf, for the

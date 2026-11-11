@@ -356,12 +356,28 @@ check "foreach_neighbor (): outside a stencil loop, chained, or writing, an erro
 
 "$cwrap" -dimension=2 -Wall -c stencil_reach.c -o stencil_reach.o 2> stencil_reach.log
 [ $? -ne 0 ] && [ ! -e stencil_reach.o ] &&
-  [ "$(grep -o '^stencil_reach.c:[0-9]*:[0-9]*: error' stencil_reach.log | cut -d: -f2 | tr '\n' ' ')" = "5 6 7 8 " ] &&
+  [ "$(grep -o '^stencil_reach.c:[0-9]*:[0-9]*: error' stencil_reach.log | cut -d: -f2 | tr '\n' ' ')" = "5 6 7 8 10 " ] &&
+  grep -q "^stencil_reach.c:10:[0-9]*: error: static assertion failed: \"coarse (t, 2): an offset is not a constant within BAMR_COARSE_REACH" stencil_reach.log &&
   grep -q "^stencil_reach.c:5:[0-9]*: error: static assertion failed: \"t\[3\]: an offset is not a constant within BAMR_GHOSTS" stencil_reach.log &&
   grep -q "^stencil_reach.c:6:[0-9]*: error: expression in static assertion is not constant" stencil_reach.log &&
   grep -q "^stencil_reach.c:7:[0-9]*: error: static assertion failed: \"foreach_neighbor (): its radius is not a constant" stencil_reach.log &&
   grep -q "^stencil_reach.c:8:[0-9]*: error: .*t\[0,1\].*adding the radius of foreach_neighbor" stencil_reach.log
 check "offsets and radii past BAMR_GHOSTS, or not constant, are compile errors at their lines" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra stencil_levels.c -o stencil_levels 2> stencil_levels.log &&
+  [ "$(./stencil_levels)" = "0 12 | " ] && [ ! -s stencil_levels.log ]
+check "two levels: coarse (s, i, j) and child.x against the same by hand, foreach_child () a mean, no ghost tracked" $?
+
+"$cwrap" -dimension=2 -c stencil_levels_bad.c -o stencil_levels_bad.o 2> stencil_levels_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_levels_bad.o ] &&
+  [ "$(grep -o '^stencil_levels_bad.c:[0-9]*: error' stencil_levels_bad.log | cut -d: -f2 | tr '\n' ' ')" = "5 6 7 8 9 10 " ] &&
+  grep -q "^stencil_levels_bad.c:5: error: 't\[1\]' in foreach_up (), a loop over two levels: no offset on the point's own level" stencil_levels_bad.log &&
+  grep -q "^stencil_levels_bad.c:6: error: 'coarse (s)' writes the coarse level" stencil_levels_bad.log &&
+  grep -q "^stencil_levels_bad.c:7: error: foreach_child () in foreach_up (), whose points have no children" stencil_levels_bad.log &&
+  grep -q "^stencil_levels_bad.c:8: error: foreach_neighbor () in foreach_up (), a loop over two levels" stencil_levels_bad.log &&
+  grep -q "^stencil_levels_bad.c:9: error: 'coarse (t)' in foreach (), whose points have no coarse cell" stencil_levels_bad.log &&
+  grep -q "^stencil_levels_bad.c:10: error: 't\[\]' in foreach_child () writes a child" stencil_levels_bad.log
+check "two levels: an own-level offset, writing coarse (), foreach_child () without children, foreach_neighbor (), coarse () in foreach (), writing a child" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra stencil_params.c -o stencil_params 2> stencil_params.log &&
   [ "$(./stencil_params)" = "6 1" ] && [ ! -s stencil_params.log ]

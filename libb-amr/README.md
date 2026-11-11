@@ -39,8 +39,11 @@ an integer id. 0 takes the default: `prolong_linear`, `restriction_mean`,
 depth), `prolong_injection` and `bc_odd`. One prolongation fills both the
 children of a refined block and the ghosts at a level jump, so the two
 agree. The operators are cwrap's `@prolongation`, `@restriction` and
-`@boundary` definitions (`block-ops.h`), written with `prolong_cells ()` and
-`boundary_cells ()`, and may read other scalars of the same nodes, for
+`@boundary` definitions (`block-ops.h`). Prolongations and restrictions are
+written with stencils over two levels, `foreach_prolongation (pr)` with
+`coarse (s, i, j)` and `child.x`, `foreach_restriction (p)` with
+`foreach_child ()` (`block-ghosts.h`); boundary conditions with
+`boundary_cells ()`. They may read other scalars of the same nodes, for
 coupled operators such as `h` with `zb`. `ghosts_update ()` calls them
 through a `switch` on the id, each case inlined, not through a function
 pointer. The file that dispatches must see every definition:

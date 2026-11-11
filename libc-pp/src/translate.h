@@ -207,6 +207,7 @@ struct stencil_loop {
   struct ast **mover;           /* its foreach_neighbor (), in order */
   int nmover, mcap;
   int in_mover;                 /* in one now */
+  const char *mover_name;       /* its name */
 };
 
 /* foreach_neighbor (r) statement, in a stencil loop: the statement runs for
@@ -221,6 +222,25 @@ struct stencil_loop {
  * another foreach_neighbor (), it is an error. */
 void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
                           int *rejected);
+
+/* Loops over two levels, as libb-amr's foreach_prolongation (pr) and
+ * foreach_restriction (p), are told apart by the names their two loops give,
+ * as sblocks, c and shape are:
+ *
+ *   coarse_sblocks (block loop), cc and sgn (cell loop): the point has a
+ *     coarse cell, cc in the coarse blocks. coarse (s), coarse (s, i, j)
+ *     read it and its neighbours at that level, |i| at most
+ *     BAMR_COARSE_REACH; child.x, .y, .z is sgn, the half the point is in.
+ *   child_sblocks (block loop) and fc (cell loop): the point has children,
+ *     the first at fc in the child's blocks. foreach_child () { ... } moves
+ *     the point to each, as foreach_neighbor () does, and only reads.
+ *
+ * In such a loop, an offset on the point's own level (s[1]) and
+ * foreach_neighbor () are errors, and no ghost is tracked: it runs inside
+ * the ghost update itself. coarse () only reads. */
+struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
+                            struct ast *open, struct ast *args,
+                            struct ast *close, int *rejected);
 struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
                                struct ast *open, struct ast *radius,
                                struct ast *close, struct ast *body);
@@ -288,7 +308,8 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
  * the loop writes, a warning. */
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, int has_reach, struct ast *kw,
+                              int has_ghosts, int has_reach,
+                              int has_coarse_reach, struct ast *kw,
                               struct ast *body, int *rejected);
 
 #endif

@@ -1337,7 +1337,9 @@ void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
   }
   if (loop->in_mover)
     stencil_error (rejected, kw, "%s () inside %s (): a point is moved once",
-                   name, name);
+                   name, loop->mover_name);
+  else
+    loop->mover_name = name;
   loop->in_mover++;
 }
 
@@ -1361,6 +1363,72 @@ struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
   }
   loop->mover[loop->nmover++] = node;
   return node;
+}
+
+struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
+                            struct ast *open, struct ast *args,
+                            struct ast *close, int *rejected)
+{
+  struct ast *node, *scalar, *offsets = NULL, *a;
+  const struct token *t;
+  int n = 0;
+
+  if (!loop || fn->kind != AST_TOKEN)
+    return NULL;
+  t = ast_token (fn);
+  if (t->kind != T_IDENTIFIER || strcmp (t->text, "coarse") != 0 || t->binding
+      || !(scalar = args->child) || !is_scalar_expression (scalar))
+    return NULL;
+  /* coarse (s, i, j) as s(i, j): the scalar, then the offsets, a comma
+   * expression, as in s[i, j] */
+  for (a = scalar->next; a; a = a->next)
+    n += !(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0);
+  if (n > dimension)
+    stencil_error (rejected, fn, "'%s' has %d offsets, in %d dimension%s",
+                   expression_text (args), n, dimension,
+                   dimension == 1 ? "" : "s");
+  for (a = scalar->next; a; ) {
+    struct ast *next = a->next;
+
+    if (a->kind != AST_TOKEN || strcmp (ast_token (a)->text, ",") != 0) {
+      a->parent = a->next = NULL;
+      if (!offsets)
+        offsets = a;
+      else {
+        struct ast *kids[3] = { offsets, new_token (',', ",", ast_first_token (a)), a };
+
+        offsets = ast_node (AST_COMMA, kids, 3);
+      }
+    }
+    a = next;
+  }
+  scalar->parent = scalar->next = NULL;
+  first_token (scalar)->trivia = arena_printf ("%s%s", t->trivia,
+                                               first_token (scalar)->trivia);
+  node = ast_new (AST_STENCIL_COARSE);
+  ast_add (ast_add (ast_add (ast_add (node, scalar), open), offsets), close);
+  if (loop->naccess == loop->cap) {
+    struct ast **m = allocate ((size_t)(loop->cap = 2 * loop->cap + 8) * sizeof (*m));
+
+    if (loop->naccess)
+      memcpy (m, loop->access, (size_t)loop->naccess * sizeof (*m));
+    loop->access = m;
+  }
+  loop->access[loop->naccess++] = node;
+  return node;
+}
+
+/* How an access reads in a message: s[1,0], or coarse (s, 1) */
+static const char *access_text (const struct ast *access)
+{
+  if (access->kind != AST_STENCIL_COARSE)
+    return expression_text (access);
+  const struct ast *off = access->child->next->next;
+
+  return off == access->last
+    ? arena_printf ("coarse (%s)", expression_text (access->child))
+    : arena_printf ("coarse (%s, %s)", expression_text (access->child),
+                    expression_text (off));
 }
 
 struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
@@ -1538,6 +1606,7 @@ struct stencil_block {
   const char *key;          /* the scalar as written: s, u.x */
   struct ast *scalar;       /* that expression, from its first access */
   int writes;
+  int level;                /* 0 the point's, 1 the coarse, 2 a child's */
 };
 
 #define MAX_STENCIL_BLOCKS 256
@@ -1581,6 +1650,23 @@ static void rename_params (struct ast *leaf, void *arg)
       t->binding = NULL;
       return;
     }
+}
+
+/* In the arguments of a stencil loop's cell loop, the names its block loop
+ * gives, as child, are its hidden ones, __cwrap_<loop>_<name>_<expansion>. */
+struct given_names {
+  const struct loop_def *def;
+  int expansion;
+};
+
+static void rename_given (struct ast *leaf, void *arg)
+{
+  const struct given_names *g = arg;
+  struct token *t = &((struct ast_leaf *)leaf)->tok;
+
+  if (t->kind == T_IDENTIFIER && names_ordinary (leaf) && injected (g->def, t->text))
+    t->text = arena_printf ("__cwrap_%s_%s_%d", g->def->name, t->text,
+                            g->expansion);
 }
 
 static struct ast *stencil_arguments (const struct ast *args, struct ast **ps,
@@ -1850,6 +1936,37 @@ static const char *c_string (const char *s)
   return arena_printf ("%s\"", q);
 }
 
+/* child.x, .y, .z under n, child not declared in the body: sgn [0], [1],
+ * [2], the half of the coarse cell the point is in. */
+static void replace_child_sgn (struct ast *n, const struct ast *body,
+                               const char *sgn)
+{
+  if (n->kind == AST_TOKEN)
+    return;
+  if (n->kind == AST_MEMBER && n->child->kind == AST_TOKEN
+      && strcmp (ast_token (n->child->next)->text, ".") == 0) {
+    const struct token *t = ast_token (n->child);
+    const char *m = ast_token (n->last)->text;
+
+    if (t->kind == T_IDENTIFIER && strcmp (t->text, "child") == 0
+        && !(t->binding && t->binding->decl && is_under (t->binding->decl, body))
+        && m[1] == '\0' && (m[0] == 'x' || m[0] == 'y' || m[0] == 'z')) {
+      struct ast *e = parse_stencil_item (arena_printf ("(%s[%d]);", sgn,
+                                                        m[0] - 'x'))->child;
+
+      e->parent = e->next = NULL;
+      each_leaf (e, flatten_leaf, (void *)t);
+      first_token (e)->trivia = t->trivia;
+      ast_replace (n, e);
+      return;
+    }
+  }
+  for (struct ast *k = n->child, *next; k; k = next) {
+    next = k->next;
+    replace_child_sgn (k, body, sgn);
+  }
+}
+
 /* The loops' names that the cell's x, y, z and Delta are computed from. */
 static int loops_give_position (const struct loop_def *leaf,
                                 const struct loop_def *cell)
@@ -1868,9 +1985,12 @@ static int loops_give_position (const struct loop_def *leaf,
 
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, int has_reach, struct ast *kw,
+                              int has_ghosts, int has_reach,
+                              int has_coarse_reach, struct ast *kw,
                               struct ast *body, int *rejected)
 {
+  int multi = 0, has_coarse = 0, has_child = 0, *level, *is_child;
+  const char *coarse_sblocks, *child_sblocks, *cc, *fc, *sgn;
   int cell_uses[NRESERVED] = { 0 }, (*mover_uses)[NRESERVED], *moved;
   const struct loop_def *leaf = def ? def->leaf : NULL;
   const struct loop_def *cell = def ? def->cell : NULL;
@@ -1909,6 +2029,47 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     holder.params = def->params;
     nparams = loop_params (&holder, ps, MAX_LOOP_PARAMS);
   }
+
+  /* Loops over two levels, by what their loops give: see translate.h */
+  multi = loop_gives (cell, "cc") || loop_gives (cell, "fc");
+  has_coarse = loop_gives (leaf, "coarse_sblocks") && loop_gives (cell, "cc")
+               && loop_gives (cell, "sgn");
+  has_child = loop_gives (leaf, "child_sblocks") && loop_gives (cell, "fc");
+  is_child = allocate ((size_t)loop->nmover * sizeof (*is_child) + 1);
+  for (int k = 0; k < loop->nmover; k++) {
+    struct ast *mv = loop->mover[k];
+    const char *name = ast_token (mv->child)->text;
+
+    is_child[k] = strcmp (name, "foreach_child") == 0;
+    if (is_child[k] && !has_child)
+      stencil_error (rejected, mv, "foreach_child () in %s (), whose points "
+                     "have no children: only in a loop over parents, as "
+                     "foreach_restriction ()", def->name);
+    if (!is_child[k] && multi)
+      stencil_error (rejected, mv, "%s () in %s (), a loop over two levels: "
+                     "it reads only the cells of its point", name, def->name);
+  }
+  level = allocate ((size_t)loop->naccess * sizeof (*level) + 1);
+  for (int a = 0; a < loop->naccess; a++) {
+    struct ast *access = loop->access[a];
+    int m = mover_of (loop, access, body);
+
+    level[a] = access->kind == AST_STENCIL_COARSE ? 1
+               : m >= 0 && is_child[m] ? 2 : 0;
+    if (level[a] == 1 && !has_coarse)
+      stencil_error (rejected, access, "'%s' in %s (), whose points have no "
+                     "coarse cell: only in a loop as foreach_prolongation ()",
+                     access_text (access), def->name);
+    else if (level[a] == 1 && stencil_writes (access))
+      stencil_error (rejected, access, "'%s' writes the coarse level: "
+                     "coarse () only reads", access_text (access));
+    else if (level[a] != 1 && multi && stencil_has_offset (access))
+      stencil_error (rejected, access, "'%s' in %s (), a loop over two "
+                     "levels: no offset on the point's own level, whose cells "
+                     "are being filled", access_text (access), def->name);
+  }
+  if (*rejected > errors)
+    return body;
   for (struct ast *a = args ? args->child : NULL; a; a = a->next)
     if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
         && nargs < MAX_LOOP_PARAMS)
@@ -1944,10 +2105,19 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     reserved_uses (loop->mover[k]->last, body, mover_uses[k], 0);
   }
   {
-    int reach = loop->nmover > 0;
+    int reach = 0, creach = 0;
 
-    for (int a = 0; a < loop->naccess && !reach; a++)
-      reach = loop->access[a]->child->next->next != loop->access[a]->last;
+    for (int k = 0; k < loop->nmover; k++)
+      reach |= !is_child[k];
+    for (int a = 0; a < loop->naccess; a++)
+      if (loop->access[a]->child->next->next != loop->access[a]->last)
+        *(level[a] == 1 ? &creach : &reach) = 1;
+    if (creach && !has_coarse_reach) {
+      stencil_error (rejected, kw, "offsets of coarse () in %s () are checked "
+                     "against BAMR_COARSE_REACH, the coarse ghost layers that "
+                     "are valid: include <block-loops.h>", def->name);
+      return body;
+    }
     if (reach && !has_reach) {
       stencil_error (rejected, kw, "offsets and foreach_neighbor () in %s () "
                      "are checked against BAMR_GHOSTS, the ghost layers: "
@@ -1978,11 +2148,14 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     offset = moved[a] >= 0 || stencil_has_offset (access);
     wrote[a] = stencil_writes (access);
     if (wrote[a] && moved[a] >= 0) {
-      stencil_error (rejected, access, "'%s' in foreach_neighbor () writes a "
-                     "neighbour: a cell writes only its own",
-                     expression_text (access));
+      stencil_error (rejected, access, "'%s' in %s () writes a %s: a cell "
+                     "writes only its own", expression_text (access),
+                     ast_token (loop->mover[moved[a]]->child)->text,
+                     is_child[moved[a]] ? "child" : "neighbour");
       continue;
     }
+    if (multi)
+      continue;                           /* in the ghost update: none tracked */
     if (wrote[a] && offset) {
       stencil_error (rejected, access, "'%s' writes a cell other than its "
                      "own: in %s (), a cell writes only s[]",
@@ -2027,6 +2200,11 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   sblocks = STENCIL_NAME (leaf->name, "sblocks", outer);
   c = STENCIL_NAME (cell->name, "c", inner);
   shape = STENCIL_NAME (cell->name, "shape", inner);
+  coarse_sblocks = STENCIL_NAME (leaf->name, "coarse_sblocks", outer);
+  child_sblocks = STENCIL_NAME (leaf->name, "child_sblocks", outer);
+  cc = STENCIL_NAME (cell->name, "cc", inner);
+  fc = STENCIL_NAME (cell->name, "fc", inner);
+  sgn = STENCIL_NAME (cell->name, "sgn", inner);
 
   /* Which scalars get a block, and whether it is written: before any access
    * is rewritten, which would hide the assignments around them. */
@@ -2034,7 +2212,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
 
   for (int a = 0; a < loop->naccess; a++) {
     struct ast *scalar = loop->access[a]->child;
-    const char *key = expression_text (scalar);
+    const char *key = arena_printf ("%d %s", level[a], expression_text (scalar));
     int b;
 
     which[a] = -1;
@@ -2047,6 +2225,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
         continue;
       blocks[nblocks].key = key;
       blocks[nblocks].scalar = ast_copy (scalar);
+      blocks[nblocks].level = level[a];
       blocks[nblocks++].writes = 0;
     }
     blocks[b].writes |= stencil_writes (loop->access[a]);
@@ -2060,7 +2239,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     struct ast *scalar = access->child, *rbracket = access->last;
     int n = stencil_offsets (access->child->next->next == rbracket ? NULL
                              : access->child->next->next, os, 4);
-    const char *index = c, *target;
+    const char *index = level[a] == 1 ? cc : level[a] == 2 ? fc : c, *target;
+    const char *levels[3] = { sblocks, coarse_sblocks, child_sblocks };
     struct token *first;
 
     for (int k = 0; k < (moved[a] >= 0 ? dimension : n) && k < 3; k++)
@@ -2073,7 +2253,22 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     /* Each offset is a constant within the ghost layers, with the
      * neighbour's in foreach_neighbor (): gcc checks it, at the access,
      * with a static assertion in the index, which costs nothing. */
-    if (n > 0) {
+    if (n > 0 && level[a] == 1) {
+      const char *cond = "1";
+
+      for (int k = 0; k < n && k < 3; k++)
+        cond = arena_printf ("%s && (__cwrap_a%d) <= BAMR_COARSE_REACH "
+                             "&& (__cwrap_b%d) >= -BAMR_COARSE_REACH", cond, k, k);
+      index = arena_printf ("%s + (int) (0 * sizeof (struct { _Static_assert "
+                            "(%s, %s); char __cwrap_c; }))", index, cond,
+                            c_string (arena_printf ("%s: an offset is not a "
+                                                    "constant within "
+                                                    "BAMR_COARSE_REACH, the "
+                                                    "coarse ghost layers that "
+                                                    "are valid",
+                                                    access_text (access))));
+    }
+    else if (n > 0) {
       const char *cond = "1";
 
       for (int k = 0; k < n && k < 3; k++)
@@ -2095,11 +2290,12 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                                                     : "")));
     }
     target = which[a] >= 0 ? arena_printf ("__cwrap_block_%d_%d", serial, which[a])
-                           : arena_printf ("block_data (%s, (__cwrap_s))", sblocks);
-    /* in foreach_neighbor (), a value, not an lvalue: gcc refuses a write
-     * there too, whatever cwrap's check sees */
-    e = parse_stencil_item (arena_printf (moved[a] >= 0 ? "((Real) %s[%s]);"
-                                                        : "%s[%s];",
+                           : arena_printf ("block_data (%s, (__cwrap_s))",
+                                           levels[level[a]]);
+    /* in a mover, or a level up, a value, not an lvalue: gcc refuses a
+     * write there too, whatever cwrap's check sees */
+    e = parse_stencil_item (arena_printf (moved[a] >= 0 || level[a] == 1
+                                          ? "((Real) %s[%s]);" : "%s[%s];",
                                           target, index))->child;
     e->parent = e->next = NULL;
     each_leaf (e, flatten_leaf, (void *)ast_first_token (access));
@@ -2137,6 +2333,31 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     static const char *const cijk[] = { "ci", "cj", "ck" };
     static const char *const first[] = { "ox", "g", "g" };
     struct ast *mv = loop->mover[k], *radius = mv->child->next->next;
+
+    if (is_child[k]) {
+      /* foreach_child () { s[] }: { for (int dk = 0; dk <= 1; dk++) ...
+       *   { statement } }, in the order of the children, i fastest */
+      struct ast *statement = mv->last, *items = ast_new (AST_BLOCK_ITEMS), *hole;
+      const struct token *kt = ast_token (mv->child);
+      const char *text = "{";
+
+      for (int a = dimension - 1; a >= 0; a--)
+        text = arena_printf ("%s for (int __cwrap_d%c_%d_%d = 0; "
+                             "__cwrap_d%c_%d_%d <= 1; __cwrap_d%c_%d_%d++)", text,
+                             "ijk"[a], serial, k, "ijk"[a], serial, k,
+                             "ijk"[a], serial, k);
+      add_stencil_items (items, arena_printf ("%s { __cwrap_body; } }", text),
+                         NULL, 0, kt);
+      hole = find_leaf (items, "__cwrap_body")->parent;
+      statement->parent = statement->next = NULL;
+      mark_token (first_token (statement));
+      ast_replace (hole, statement);
+      hole = items->child;
+      hole->parent = hole->next = NULL;
+      first_token (hole)->trivia = kt->trivia;
+      ast_replace (mv, hole);
+      continue;
+    }
     struct ast *statement = mv->last, *items = ast_new (AST_BLOCK_ITEMS), *hole;
     const struct token *kt = ast_token (mv->child);
     const char *R = arena_printf ("__cwrap_r_%d_%d", serial, k);
@@ -2218,14 +2439,25 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     body = ast_node (AST_COMPOUND_STATEMENT, wrap, 3);
   }
 
+  /* child.x, .y, .z: the half of the coarse cell the point is in */
+  if (has_coarse)
+    replace_child_sgn (body, body, sgn);
+
   /* the cell loop, with the arguments the declaration gives it: its
-   * parameters as hidden locals, bound below */
+   * parameters as hidden locals, bound below; the names the block loop
+   * gives, its own */
   for (int k = 0; k < nparams; k++)
     params[k] = arena_printf ("__cwrap_%s_%s_%d", def->name,
                               ast_declared_name (ps[k]), serial);
-  cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at),
-                       stencil_arguments (def->cell_args, ps, params, nparams),
-                       body, NULL, 1, rejected);
+  {
+    struct ast *cell_args = stencil_arguments (def->cell_args, ps, params, nparams);
+    struct given_names g = { leaf, outer };
+
+    if (cell_args)
+      each_leaf (cell_args, rename_given, &g);
+    cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at),
+                         cell_args, body, NULL, 1, rejected);
+  }
 
   /* { the blocks; foreach_cell ... }, the block of foreach_leaf () */
   items = ast_new (AST_BLOCK_ITEMS);
@@ -2258,7 +2490,9 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   for (int b = 0; b < nblocks; b++) {
     struct ast *decl = parse_stencil_item (arena_printf (
       "%sReal *const __cwrap_block_%d_%d = block_data (%s, (__cwrap_s));",
-      blocks[b].writes ? "" : "const ", serial, b, sblocks));
+      blocks[b].writes ? "" : "const ", serial, b,
+      blocks[b].level == 1 ? coarse_sblocks
+      : blocks[b].level == 2 ? child_sblocks : sblocks));
 
     each_leaf (blocks[b].scalar, flatten_leaf, (void *)at);
     fill_placeholder (decl, "__cwrap_s", blocks[b].scalar);
