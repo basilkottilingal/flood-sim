@@ -343,6 +343,10 @@ check "foreach (): without its @foreach, an error" $?
   [ "$(./stencil_neighbor)" = "300 0 | 3 " ] && [ ! -s stencil_neighbor.log ]
 check "foreach_neighbor (r): the box around the point, offsets in it, x and Delta the neighbour's, ghosts updated first" $?
 
+"$cwrap" -dimension=2 -translate stencil_neighbor.c -o stencil_neighbor.out &&
+  [ "$(grep -c '( ( Real ) __cwrap_block_[0-9]*_[0-9]* \[ [^;]*__cwrap_di_' stencil_neighbor.out)" = 3 ]
+check "foreach_neighbor (): its reads are values, not lvalues, for gcc too" $?
+
 "$cwrap" -dimension=2 -c stencil_neighbor_bad.c -o stencil_neighbor_bad.o 2> stencil_neighbor_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_neighbor_bad.o ] &&
   grep -q "^stencil_neighbor_bad.c:5: error: foreach_neighbor () outside a stencil loop" stencil_neighbor_bad.log &&

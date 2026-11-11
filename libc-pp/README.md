@@ -734,8 +734,10 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
 
   - **It reads the ghosts,** which hold the neighbours: no tree is walked.
     Its reads are reads at an offset, so the lazy ghost update applies.
-  - **It only reads:** writing a cell in it (`s[] = ...`) is an error, as it
-    would write a neighbour.
+  - **It only reads:** writing a cell in it (`s[] = ...`, `s[]++`, `&s[]`)
+    is an error, as it would write a neighbour. Its accesses are also
+    written as values, `((Real) block[...])`, not lvalues, so gcc refuses a
+    write there too.
   - **Only in a stencil loop, and not in another `foreach_neighbor ()`:**
     either is an error.
   - **`r` must not reach past the ghost layers,** which cwrap cannot know

@@ -2065,7 +2065,11 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                             arena_printf (strides[k], shape));
     target = which[a] >= 0 ? arena_printf ("__cwrap_block_%d_%d", serial, which[a])
                            : arena_printf ("block_data (%s, (__cwrap_s))", sblocks);
-    e = parse_stencil_item (arena_printf ("%s[%s];", target, index))->child;
+    /* in foreach_neighbor (), a value, not an lvalue: gcc refuses a write
+     * there too, whatever cwrap's check sees */
+    e = parse_stencil_item (arena_printf (moved[a] >= 0 ? "((Real) %s[%s]);"
+                                                        : "%s[%s];",
+                                          target, index))->child;
     e->parent = e->next = NULL;
     each_leaf (e, flatten_leaf, (void *)ast_first_token (access));
     first = first_token (e);
