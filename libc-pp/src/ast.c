@@ -9,7 +9,9 @@ static const char *const kind_names[] = {
 #undef X
 };
 
-/* allocate () returns zeroed memory, so only non-zero fields are set below. */
+/* allocate () [in allocator.h] returns zeroed memory, so only non-zero
+ * fields are set below.
+ */
 
 struct ast *ast_new (enum ast_kind kind)
 {
@@ -37,6 +39,7 @@ struct ast *ast_node (enum ast_kind kind, struct ast **kids, size_t n)
   return node;
 }
 
+/* create a copy of AST subtree 'n'. utilises recursive calls */
 struct ast *ast_copy (const struct ast *n)
 {
   struct ast *c;
@@ -49,6 +52,7 @@ struct ast *ast_copy (const struct ast *n)
   return c;
 }
 
+/* append a child at the last*/
 struct ast *ast_add (struct ast *parent, struct ast *kid)
 {
   if (!kid)
@@ -116,6 +120,7 @@ const char *ast_declared_name (const struct ast *n)
   return NULL;
 }
 
+/* emit the subtree 'n' recursively */
 void ast_emit (const struct ast *n, FILE *out)
 {
   if (n->kind == AST_TOKEN) {
@@ -147,5 +152,3 @@ void ast_dump (const struct ast *n, FILE *out)
 {
   dump (n, 0, out);
 }
-
-
