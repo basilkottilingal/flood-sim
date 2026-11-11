@@ -1943,10 +1943,17 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       mover_uses[k][r] = 0;
     reserved_uses (loop->mover[k]->last, body, mover_uses[k], 0);
   }
-  if (loop->nmover && !has_reach) {
-    stencil_error (rejected, loop->mover[0], "foreach_neighbor () needs "
-                   "block_reach_check (): include <block-loops.h>");
-    return body;
+  {
+    int reach = loop->nmover > 0;
+
+    for (int a = 0; a < loop->naccess && !reach; a++)
+      reach = loop->access[a]->child->next->next != loop->access[a]->last;
+    if (reach && !has_reach) {
+      stencil_error (rejected, kw, "offsets and foreach_neighbor () in %s () "
+                     "are checked against BAMR_GHOSTS, the ghost layers: "
+                     "include <block-loops.h>", def->name);
+      return body;
+    }
   }
   if (position && !loops_give_position (leaf, cell)) {
     stencil_error (rejected, kw, "x, y, z and Delta in foreach () need "
@@ -2063,6 +2070,30 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                             ? arena_printf (" + __cwrap_d%c_%d_%d", "ijk"[k],
                                             serial, moved[a]) : "",
                             arena_printf (strides[k], shape));
+    /* Each offset is a constant within the ghost layers, with the
+     * neighbour's in foreach_neighbor (): gcc checks it, at the access,
+     * with a static assertion in the index, which costs nothing. */
+    if (n > 0) {
+      const char *cond = "1";
+
+      for (int k = 0; k < n && k < 3; k++)
+        cond = moved[a] >= 0
+          ? arena_printf ("%s && (__cwrap_a%d) + (__cwrap_ra%d) <= BAMR_GHOSTS "
+                          "&& (__cwrap_b%d) - (__cwrap_rb%d) >= -BAMR_GHOSTS",
+                          cond, k, k, k, k)
+          : arena_printf ("%s && (__cwrap_a%d) <= BAMR_GHOSTS "
+                          "&& (__cwrap_b%d) >= -BAMR_GHOSTS", cond, k, k);
+      index = arena_printf ("%s + (int) (0 * sizeof (struct { _Static_assert "
+                            "(%s, %s); char __cwrap_c; }))", index, cond,
+                            c_string (arena_printf ("%s: an offset is not a "
+                                                    "constant within "
+                                                    "BAMR_GHOSTS, the ghost "
+                                                    "layers%s",
+                                                    expression_text (access),
+                                                    moved[a] >= 0
+                                                    ? " (adding the radius of foreach_neighbor)"
+                                                    : "")));
+    }
     target = which[a] >= 0 ? arena_printf ("__cwrap_block_%d_%d", serial, which[a])
                            : arena_printf ("block_data (%s, (__cwrap_s))", sblocks);
     /* in foreach_neighbor (), a value, not an lvalue: gcc refuses a write
@@ -2079,13 +2110,26 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       first_token (scalar)->trivia = "";   /* the line break went to e */
       fill_placeholder (e, "__cwrap_s", scalar);
     }
+    /* copies for the assertion first: the offsets themselves move */
+    for (int k = 0; k < n && k < 3; k++) {
+      const char *names[4] = { "__cwrap_a%d", "__cwrap_b%d",
+                               "__cwrap_ra%d", "__cwrap_rb%d" };
+
+      for (int q = 0; q < (moved[a] >= 0 ? 4 : 2); q++) {
+        struct ast *copy = ast_copy (q < 2 ? os[k]
+                                     : loop->mover[moved[a]]->child->next->next);
+
+        each_leaf (copy, flatten_leaf, (void *)ast_first_token (access));
+        fill_placeholder (e, arena_printf (names[q], k), copy);
+      }
+    }
     for (int k = 0; k < n && k < 3; k++)
       fill_placeholder (e, arena_printf ("__cwrap_o%d", k), os[k]);
     ast_replace (access, e);
   }
 
   /* Each foreach_neighbor (r) statement becomes
-   *   { const int R = (r); block_reach_check (R, shape.g, file, line);
+   *   { _Static_assert (r a constant from 0 to BAMR_GHOSTS); const int R = (r);
    *     for (int dk = -R; dk <= R; dk++) ... for (int di ...)
    *       { const double x = ...; statement } }
    * its accesses already offset by di, dj, dk. */
@@ -2096,9 +2140,14 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     struct ast *statement = mv->last, *items = ast_new (AST_BLOCK_ITEMS), *hole;
     const struct token *kt = ast_token (mv->child);
     const char *R = arena_printf ("__cwrap_r_%d_%d", serial, k);
-    const char *text = arena_printf ("{ const int %s = (__cwrap_e0); "
-                                     "block_reach_check (%s, %s.g, %s, %d);",
-                                     R, R, shape, c_string (kt->file), kt->line);
+    struct ast *rs[3] = { radius, radius, radius };
+    const char *text = arena_printf ("{ _Static_assert ((__cwrap_e1) >= 0 && "
+                                     "(__cwrap_e2) <= BAMR_GHOSTS, %s); "
+                                     "const int %s = (__cwrap_e0);",
+                                     c_string ("foreach_neighbor (): its "
+                                               "radius is not a constant from "
+                                               "0 to BAMR_GHOSTS, the ghost "
+                                               "layers"), R);
     const char *decls = "";
 
     for (int a = dimension - 1; a >= 0; a--)
@@ -2123,7 +2172,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                               first[r], "ijk"[r], serial, k, serial);
     }
     add_stencil_items (items, arena_printf ("%s {%s __cwrap_body; } }", text,
-                                            decls), &radius, 1, kt);
+                                            decls), rs, 3, kt);
     hole = find_leaf (items, "__cwrap_body")->parent;   /* the statement */
     statement->parent = statement->next = NULL;
     mark_token (first_token (statement));

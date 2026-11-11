@@ -309,7 +309,7 @@ check "@loop: each misuse is an error, and the file never reaches gcc" $?
 check "@loop: errors in the block, in an argument and after the use keep their lines" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra stencil_run.c -o stencil_run 2> stencil_run.log &&
-  [ "$(./stencil_run)" = "48 672 24 18 9 336 99" ] && [ ! -s stencil_run.log ]
+  [ "$(./stencil_run)" = "48 864 24 18 9 336 99" ] && [ ! -s stencil_run.log ]
 check "foreach (): every cell of every leaf, s[i,j] offsets, a vector, the body's own names, x, y, Delta" $?
 
 "$cwrap" -dimension=2 -translate stencil_run.c -o stencil_run.out &&
@@ -354,12 +354,14 @@ check "foreach_neighbor (): its reads are values, not lvalues, for gcc too" $?
   grep -q "^stencil_neighbor_bad.c:7: error: 's\[\]' in foreach_neighbor () writes a neighbour" stencil_neighbor_bad.log
 check "foreach_neighbor (): outside a stencil loop, chained, or writing, an error" $?
 
-"$cwrap" -dimension=2 -Wall stencil_reach.c -o stencil_reach 2> stencil_reach.log &&
-  (ulimit -c 0; ./stencil_reach > stencil_reach.out 2> stencil_reach.err
-   echo $? > stencil_reach.rc) 2> /dev/null &&
-  [ "$(cat stencil_reach.rc)" -ne 0 ] &&
-  grep -q "^stencil_reach.c:8: reach 2 past 1" stencil_reach.err && [ ! -s stencil_reach.out ]
-check "foreach_neighbor (r): r past the ghost layers stops the run, at its line" $?
+"$cwrap" -dimension=2 -Wall -c stencil_reach.c -o stencil_reach.o 2> stencil_reach.log
+[ $? -ne 0 ] && [ ! -e stencil_reach.o ] &&
+  [ "$(grep -o '^stencil_reach.c:[0-9]*:[0-9]*: error' stencil_reach.log | cut -d: -f2 | tr '\n' ' ')" = "5 6 7 8 " ] &&
+  grep -q "^stencil_reach.c:5:[0-9]*: error: static assertion failed: \"t\[3\]: an offset is not a constant within BAMR_GHOSTS" stencil_reach.log &&
+  grep -q "^stencil_reach.c:6:[0-9]*: error: expression in static assertion is not constant" stencil_reach.log &&
+  grep -q "^stencil_reach.c:7:[0-9]*: error: static assertion failed: \"foreach_neighbor (): its radius is not a constant" stencil_reach.log &&
+  grep -q "^stencil_reach.c:8:[0-9]*: error: .*t\[0,1\].*adding the radius of foreach_neighbor" stencil_reach.log
+check "offsets and radii past BAMR_GHOSTS, or not constant, are compile errors at their lines" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra stencil_params.c -o stencil_params 2> stencil_params.log &&
   [ "$(./stencil_params)" = "6 1" ] && [ ! -s stencil_params.log ]

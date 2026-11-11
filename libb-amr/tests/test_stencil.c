@@ -106,10 +106,9 @@ int main (void)
   }
   CHECK (diff (r, q) == 0);
 
-  /* offsets that are expressions, and +=, ++ on a cell */
-  int one = 1;
+  /* offsets that are constant expressions, and +=, ++ on a cell */
   foreach () {
-    r[] = t[one - 2];
+    r[] = t[1 - 2];
     r[] += 1;
     r[]++;
   }

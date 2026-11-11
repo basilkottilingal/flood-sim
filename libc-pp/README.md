@@ -635,8 +635,24 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   boundary, are left for later, with MPI.
 - **`s[]` is the cell of scalar `s`; `s[i]`, `s[i,j]`, `s[i,j,k]` the cell at
   that offset.** Offsets left out are 0, so `s[1]` is `s[1,0,0]` in any
-  dimension. More offsets than the dimension is an error. Offsets are any
-  expression; one that reaches past the ghost layers reads past the block.
+  dimension. More offsets than the dimension is an error.
+- **No access leaves its block, checked at compile time.** Each offset must
+  be an integer constant expression (`1`, `-2`, `1 - 2`, an enum constant)
+  within `BAMR_GHOSTS`, the ghost layers, which `<block-loops.h>` exports as
+  an enum constant, since `GHOSTS` is gone after `gcc -E`. In
+  `foreach_neighbor (r)` an offset plus `r` must stay within them too. gcc
+  checks it, at the access's line and column, with a static assertion in the
+  index (`(int) (0 * sizeof (struct { _Static_assert (...); ... }))`), which
+  costs nothing:
+
+      foreach () s[] = t[3];     /* error: static assertion failed: "t[3]: an
+                                    offset is not a constant within
+                                    BAMR_GHOSTS, the ghost layers" */
+      foreach () s[] = t[n];     /* error: expression in static assertion is
+                                    not constant */
+
+  A data-dependent stencil is written with constant offsets:
+  `u[] > 0 ? s[-1] : s[1]`, which also vectorises (a select, not a gather).
 - **Only a scalar is expanded.** `s` must be an expression of type `scalar`
   that cwrap can follow: a scalar name or parameter, a vector's or tensor's
   member (`u.x[]`, `t.x.y[]`), an element of an array of scalars or of a
@@ -740,9 +756,8 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     write there too.
   - **Only in a stencil loop, and not in another `foreach_neighbor ()`:**
     either is an error.
-  - **`r` must not reach past the ghost layers,** which cwrap cannot know
-    after `gcc -E`: `block_reach_check ()` (`<block-loops.h>`) checks it as
-    the statement starts, and stops the run with the file and line.
+  - **`r` is an integer constant from 0 to `BAMR_GHOSTS`,** checked at
+    compile time like the offsets, and each offset inside it plus `r` too.
   - The point movers to come, as `foreach_child ()` in loops over parents,
     follow the same rules.
 - **Stencil loops do not nest, which is checked at compile time:**

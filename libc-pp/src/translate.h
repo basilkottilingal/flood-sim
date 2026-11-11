@@ -214,8 +214,10 @@ struct stencil_loop {
  * Basilisk. s[], s[i,j] and x, y, z, Delta are then those of the moved
  * point. It only reads: writing a cell in it is an error, as it would write
  * a neighbour; its reads are reads at an offset, so the lazy ghost update
- * applies. r is checked against the ghost layers when the loop runs, by
- * block_reach_check () (<block-loops.h>). Outside a stencil loop, or in
+ * applies. r, as every offset of s[...], must be an integer constant within
+ * BAMR_GHOSTS (<block-loops.h>), the offsets inside adding r: gcc checks it
+ * with a static assertion, so no access leaves the block. Outside a stencil
+ * loop, or in
  * another foreach_neighbor (), it is an error. */
 void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
                           int *rejected);

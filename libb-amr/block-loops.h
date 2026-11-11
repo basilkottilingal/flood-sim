@@ -172,8 +172,6 @@
   */
 
   #include <assert.h>
-  #include <stdio.h>
-  #include <stdlib.h>
   #include "tree.h"
   #include "grid-scalar.h"
   #include "morton-curve.h"
@@ -613,18 +611,12 @@
   @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
 
   /*
-  .. foreach_neighbor (r), in a stencil loop, reads the cells within r of the
-  .. point, which its ghosts must hold: cwrap checks r once per cell with
-  .. this, as GHOSTS is not known to it.
+  .. The ghost layers, as a constant that outlives the preprocessor: cwrap
+  .. checks against it, at compile time, that every offset of s[...] and the
+  .. radius of foreach_neighbor () is an integer constant that stays within
+  .. them, so that no stencil access leaves its block.
   */
-  static inline void block_reach_check (int r, int g, const char * file, int line)
-  {
-    if (r < 0 || r > g) {
-      fprintf (stderr, "%s:%d: foreach_neighbor (%d) reaches past the %d "
-               "ghost layers\n", file, line, r, g);
-      abort ();
-    }
-  }
+  enum { BAMR_GHOSTS = GHOSTS };
 
   /*
   .. block_table (s, table, where): the blocks of scalar s in the leaves, in

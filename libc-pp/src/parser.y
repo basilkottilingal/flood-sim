@@ -278,7 +278,7 @@ static struct ast *stencil_use (struct scope_table *scopes,
                            scope_find (scopes, "ghosts_mark_dirty")
                            && scope_find (scopes, "ghosts_mark_all_dirty")
                            && scope_find (scopes, "ghosts_update_dirty"),
-                           scope_find (scopes, "block_reach_check") != NULL,
+                           scope_find (scopes, "BAMR_GHOSTS") != NULL,
                            name, body, &status->rejected);
 }
 

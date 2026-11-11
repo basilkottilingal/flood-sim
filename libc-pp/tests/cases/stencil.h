@@ -1,13 +1,14 @@
 /* A grid for the foreach () tests: what libb-amr's <block-loops.h> gives
- * cwrap, on NLEAF fixed blocks of 4 x 4 cells with one ghost layer, stored
- * 6 x 6, i fastest: the leaves i = 0, 1, 2, j = 0 of level 2 in the unit
+ * cwrap, on NLEAF fixed blocks of 4 x 4 cells with two ghost layers, stored
+ * 8 x 8, i fastest: the leaves i = 0, 1, 2, j = 0 of level 2 in the unit
  * square. Build with -dimension=2. */
 typedef double Real;
 typedef struct { int m, g, ox, nx, sy, sz; long cells; } BlockShape;
 
 #define NLEAF 3
 #define NS 8
-#define NX 6
+#define NX 8
+enum { BAMR_GHOSTS = 2 };
 
 static Real store [NLEAF][NS][NX * NX];
 static void * slots [NLEAF][NS];
@@ -19,7 +20,7 @@ static inline int tree_get_block_m (void) { return 4; }
 
 static inline BlockShape tree_block_shape (void)
 {
-  return (BlockShape) { 4, 1, 1, NX, NX, 0, NX * NX };
+  return (BlockShape) { 4, 2, 2, NX, NX, 0, NX * NX };
 }
 
 /* sblocks [s / NS][s % NS] is the block of scalar s, as in libb-amr */
@@ -77,17 +78,6 @@ static inline void ghosts_update_dirty (int n, const int * s)
       int c = ci + cj * shape.sy;
       {...}
     }
-}
-
-/* foreach_neighbor (r) checks r against the ghost layers with this */
-#include <stdio.h>
-#include <stdlib.h>
-static inline void block_reach_check (int r, int g, const char * file, int line)
-{
-  if (r < 0 || r > g) {
-    fprintf (stderr, "%s:%d: reach %d past %d\n", file, line, r, g);
-    abort ();
-  }
 }
 
 /* the stencil loop, as <block-loops.h> declares it */
