@@ -2506,6 +2506,152 @@ static int check_stencil_calls (struct ast *root)
   return errors;
 }
 
+/* Ghost operators: @prolongation, @restriction, @boundary */
+
+struct ghost_op {
+  const char *kind;         /* prolongation, restriction, boundary */
+  const char *name;
+  int id;
+  const struct token *at;
+  struct ghost_op *next;
+};
+static struct ghost_op *ghost_ops;     /* this file's, newest first */
+
+/* @prolongation -> prolongation */
+static const char *operator_kind (const struct ast *at)
+{
+  return ast_token (at)->text + 1;
+}
+
+static int operator_count (const char *kind)
+{
+  int n = 0;
+
+  for (const struct ghost_op *o = ghost_ops; o; o = o->next)
+    n += strcmp (o->kind, kind) == 0;
+  return n;
+}
+
+/* The trivia of every token under n, to keep the lines of what is dropped. */
+static const char *all_trivia (const struct ast *n)
+{
+  MEMSTREAM (t);
+
+  if (!t)
+    abort ();
+  subtree_trivia (n, t);
+  return MEMSTREAM_TEXT (t);
+}
+
+struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
+                             struct ast *params, struct ast *close,
+                             struct ast *body, int *rejected)
+{
+  const char *kind = operator_kind (at), *nm = ast_token (name)->text;
+  const struct token *t = ast_token (at);
+  struct ghost_op *o;
+  struct ast *fn, *decl, *suffix, *kids[2];
+
+  for (o = ghost_ops; o; o = o->next)
+    if (strcmp (o->kind, kind) == 0 && strcmp (o->name, nm) == 0) {
+      stencil_error (rejected, name, "@%s %s is defined twice", kind, nm);
+      diag (o->at->file, o->at->line, DIAG_NOTE, "'%s' is defined here", nm);
+      return loop_stub (at);
+    }
+  o = allocate (sizeof (*o));
+  o->kind = kind;
+  o->name = nm;
+  o->id = operator_count (kind) + 1;
+  o->at = ast_token (name);
+  o->next = ghost_ops;
+  ghost_ops = o;
+
+  /* static inline void __cwrap_KIND_NAME (params) body  const int NAME = id; */
+  fn = parse_snippet (arena_printf ("static inline void __cwrap_%s_%s (void) {} "
+                                    "const int %s = %d;", kind, nm, nm, o->id));
+  decl = fn->next;
+  fn->next = decl->next = NULL;
+  each_leaf (fn, flatten_leaf, (void *)t);
+  each_leaf (decl, flatten_leaf, (void *)t);
+  first_token (fn)->trivia = arena_printf ("%s%s", t->trivia,
+                                           all_trivia (name));
+  /* the parameters, with the trivia of the parentheses, and the body */
+  suffix = find_kind (fn->child->next, AST_FUNCTION_SUFFIX);
+  first_token (suffix)->trivia = ast_token (open)->trivia;
+  last_token (suffix)->trivia = ast_token (close)->trivia;
+  if (params)
+    ast_replace (suffix->child->next, params);
+  ast_replace (fn->last, body);
+  kids[0] = fn;
+  kids[1] = decl;
+  return ast_node (AST_OPERATOR_DEFINITION, kids, 2);
+}
+
+struct ast *operator_declare (struct ast *at, struct ast *name, struct ast *semi)
+{
+  const struct token *t = ast_token (at);
+  struct ast *decl = parse_snippet (arena_printf ("extern const int %s;",
+                                                  ast_token (name)->text));
+
+  decl->next = NULL;
+  each_leaf (decl, flatten_leaf, (void *)t);
+  first_token (decl)->trivia = arena_printf ("%s%s", t->trivia,
+                                             all_trivia (name));
+  last_token (decl)->trivia = ast_token (semi)->trivia;
+  return decl;
+}
+
+struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
+                               struct ast *close, struct ast *open2,
+                               struct ast *args, struct ast *close2,
+                               struct ast *semi, int *rejected)
+{
+  const char *kind = operator_kind (at), *text;
+  const struct token *t = ast_token (at);
+  struct ast *vs[MAX_LOOP_PARAMS], **es, *items = ast_new (AST_BLOCK_ITEMS), *sw;
+  int nv = 0, n = operator_count (kind), nes = 1;
+  struct ghost_op **by_id;
+
+  (void) open, (void) close, (void) open2, (void) close2;
+  if (!n) {
+    stencil_error (rejected, at, "@%s (...) (...): no @%s is defined before "
+                   "it in this file", kind, kind);
+    return ast_new (AST_EXPRESSION_STATEMENT);
+  }
+  for (struct ast *a = args ? args->child : NULL; a; a = a->next)
+    if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
+        && nv < MAX_LOOP_PARAMS)
+      vs[nv++] = a;
+  by_id = allocate ((size_t)(n + 1) * sizeof (*by_id));
+  for (struct ghost_op *o = ghost_ops; o; o = o->next)
+    if (strcmp (o->kind, kind) == 0)
+      by_id[o->id] = o;
+  es = allocate ((size_t)(1 + n * nv) * sizeof (*es) + 1);
+  es[0] = id;
+  text = "switch (__cwrap_e0) {";
+  for (int k = 1; k <= n; k++) {
+    const char *call = "";
+
+    for (int j = 0; j < nv; j++) {
+      es[nes] = vs[j];
+      call = arena_printf ("%s%s(__cwrap_e%d)", call, j ? ", " : "", nes++);
+    }
+    text = arena_printf ("%s case %d: __cwrap_%s_%s (%s); break;", text, k,
+                         kind, by_id[k]->name, call);
+  }
+  text = arena_printf ("%s default: __builtin_trap (); }", text);
+  add_stencil_items (items, text, es, nes, t);
+  sw = items->child;
+  sw->parent = sw->next = NULL;
+  first_token (sw)->trivia = t->trivia;
+  last_token (sw)->trivia = arena_printf ("%s%s", all_trivia (id),
+                                          ast_token (semi)->trivia);
+  if (args)
+    last_token (sw)->trivia = arena_printf ("%s%s", last_token (sw)->trivia,
+                                            all_trivia (args));
+  return sw;
+}
+
 /* The translation itself: rewrite the tree here. */
 static int transform (struct ast *root)
 {
@@ -2542,6 +2688,7 @@ int translate_file (const char *in_path, const char *out_path)
     return TRANSLATE_FAILED;
   }
   cache_types = NULL;
+  ghost_ops = NULL;
   root = parse_file (in, &rejected);
   if (rejected) {
     fclose (in);

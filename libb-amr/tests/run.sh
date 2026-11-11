@@ -10,6 +10,9 @@ trap 'rm -rf "$dir"' EXIT
 src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
 flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib -I$lib/.."
 fails=0
+# test_ghosts.c has operators of its own: it is the file that dispatches,
+# in place of block-ghosts.c (block-ghosts.h)
+gsrc=$(echo "$src" | sed "s| $lib/block-ghosts.c||")
 
 run () {   # name, dimension, extra flags, sources...
   name=$1 d=$2 extra=$3; shift 3
@@ -36,7 +39,7 @@ for prec in "" "-DBAMR_SINGLE"; do
   for d in 1 2 3; do
     run tree   $d "$prec" tests/test_tree.c $src
     run blocks $d "$prec" tests/test_blocks.c "$lib/tree.c" $src
-    run ghosts $d "$prec" tests/test_ghosts.c "$lib/tree.c" $src
+    run ghosts $d "$prec" tests/test_ghosts.c "$lib/tree.c" $gsrc
     run adapt  $d "$prec" tests/test_adapt.c "$lib/tree.c" $src
     run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
   done
@@ -46,14 +49,14 @@ flags="$flags -fopenmp"
 export OMP_NUM_THREADS=4
 for d in 2 3; do
   run blocks $d "-fopenmp" tests/test_blocks.c "$lib/tree.c" $src
-  run ghosts $d "-fopenmp" tests/test_ghosts.c "$lib/tree.c" $src
+  run ghosts $d "-fopenmp" tests/test_ghosts.c "$lib/tree.c" $gsrc
   run adapt  $d "-fopenmp" tests/test_adapt.c "$lib/tree.c" $src
   run stencil $d "-fopenmp" tests/test_stencil.c "$lib/tree.c" $src
 done
 # stored blocks in the aligned layout: rows on 4 Reals
 for d in 1 2 3; do
   run blocks $d "-DBAMR_ALIGN=4" tests/test_blocks.c "$lib/tree.c" $src
-  run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $src
+  run ghosts $d "-DBAMR_ALIGN=4" tests/test_ghosts.c "$lib/tree.c" $gsrc
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
   run stencil $d "-DBAMR_ALIGN=4" tests/test_stencil.c "$lib/tree.c" $src
 done
@@ -68,7 +71,7 @@ for idx in "2" "3" "3 -DNVDB_COMPACT"; do
   for d in 2 3; do
     run tree   $d "-DBAMR_INDEX=$idx" tests/test_tree.c $src
     run blocks $d "-DBAMR_INDEX=$idx" tests/test_blocks.c "$lib/tree.c" $src
-    run ghosts $d "-DBAMR_INDEX=$idx" tests/test_ghosts.c "$lib/tree.c" $src
+    run ghosts $d "-DBAMR_INDEX=$idx" tests/test_ghosts.c "$lib/tree.c" $gsrc
     run adapt  $d "-DBAMR_INDEX=$idx" tests/test_adapt.c "$lib/tree.c" $src
   done
 done
@@ -82,7 +85,7 @@ else
 fi
 # the tree on a pool that gives memory back with MADV_FREE
 for d in 2 3; do
-  run ghosts $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_ghosts.c "$lib/tree.c" $src
+  run ghosts $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_ghosts.c "$lib/tree.c" $gsrc
   run adapt  $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_adapt.c "$lib/tree.c" $src
 done
 [ "$fails" = 0 ] && echo "all passed"

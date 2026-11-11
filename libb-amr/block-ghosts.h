@@ -28,9 +28,26 @@
   .. Within one level the blocks are independent: they run on all threads
   .. with OpenMP.
   ..
-  .. Per scalar, three operations: ScalarOps, set with scalar_set_ops (). The
-  .. same prolongation fills the children of a refined block and the ghosts
-  .. at a level jump, so the two agree.
+  .. Per scalar, three operations: ScalarOps, set with scalar_set_ops (),
+  .. anywhere and at any time. The same prolongation fills the children of a
+  .. refined block and the ghosts at a level jump, so the two agree.
+  ..
+  .. An operation is an integer, not a function pointer: cwrap's
+  .. @prolongation, @restriction and @boundary (libc-pp/README.md) define
+  .. them as inline functions, each with an id, and ghosts_update () calls
+  .. the one a scalar has through a switch, each case inlined. The file that
+  .. dispatches must see every definition: block-ghosts.c, which includes the
+  .. ones given here (block-ops.h) and the core (block-ghosts-impl.h). A
+  .. program with operators of its own builds its own such file instead:
+  ..
+  ..   #include "block-ops.h"             // the given ones, ids first
+  ..   @boundary bc_inflow (const Boundary * bc) { ... }
+  ..   #include "block-ghosts-impl.h"     // the core, dispatching to all
+  ..
+  .. and any other file attaches one by its name, an int:
+  ..
+  ..   @boundary bc_inflow;
+  ..   scalar_set_ops (h, (ScalarOps) { .boundary = bc_inflow });
   ..
   .. Derived scalars. Fill the ghosts of the scalars a derived one is
   .. computed from, then compute it on the ghosts too, halo GHOSTS:
@@ -75,7 +92,7 @@
     int off [3];             /* see above; 0 beyond the dimension      */
     int lo [3], hi [3];      /* the fine cells to fill; 0, 1 beyond    */
     Index coarse_index, fine_index;
-    int s;                   /* the scalar                             */
+    scalar s;                /* the scalar                             */
   } Prolongation;
 
   /*
@@ -92,24 +109,28 @@
     BlockShape shape;        /* tree_block_shape ()                    */
     int axis, side;
     Index p;                 /* the block's node                       */
-    int s;                   /* the scalar                             */
+    scalar s;                /* the scalar                             */
   } Boundary;
 
   /*
-  .. The operations of a scalar. NULL takes the default: linear
-  .. prolongation, the mean, a zero gradient at the walls. A scalar gets the
-  .. defaults back when it is freed while the tree exists.
+  .. The operations of a scalar, by their ids (see above). 0 takes the
+  .. default: linear prolongation, the mean, a zero gradient at the walls. A
+  .. scalar gets the defaults back when it is freed while the tree exists.
+  .. scalar_set_ops () marks s's ghosts stale: those made by the operations
+  .. it had are made again by the new ones, as foreach () next needs them.
+  .. Their signatures:
+  ..   @prolongation name (const Prolongation * pr) { ... }
+  ..   @restriction  name (Index parent, scalar s)   { ... }
+  ..   @boundary     name (const Boundary * bc)      { ... }
   */
   typedef struct
   {
-    void (* prolongation) (const Prolongation * pr);
-    void (* restriction)  (Index parent, int s);
-    void (* boundary)     (const Boundary * bc);
+    int prolongation, restriction, boundary;
   } ScalarOps;
 
-  void      scalar_set_ops (int s, ScalarOps ops);
-  ScalarOps scalar_get_ops (int s);     /* the defaults where NULL */
-  void      scalar_ops_reset (int s);   /* back to the defaults */
+  void      scalar_set_ops (scalar s, ScalarOps ops);
+  ScalarOps scalar_get_ops (scalar s);  /* the defaults where 0 */
+  void      scalar_ops_reset (scalar s);  /* back to the defaults */
 
   /*
   .. The prolongations given:
@@ -128,12 +149,12 @@
   ..   bc_odd             minus that: zero at the wall, for the normal
   ..                      velocity at a solid wall.
   */
-  void prolong_linear    (const Prolongation * pr);
-  void prolong_minmod    (const Prolongation * pr);
-  void prolong_injection (const Prolongation * pr);
-  void restriction_mean  (Index parent, int s);
-  void bc_neumann        (const Boundary * bc);
-  void bc_odd            (const Boundary * bc);
+  @prolongation prolong_linear;
+  @prolongation prolong_minmod;
+  @prolongation prolong_injection;
+  @restriction  restriction_mean;
+  @boundary     bc_neumann;
+  @boundary     bc_odd;
 
   /*
   .. prolong_cells (pr) { ... }: every fine cell pr asks for, with f its

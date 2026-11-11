@@ -329,6 +329,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token AT_LOOP "@loop" LOOP_NAME
 %token AT_FOREACH "@foreach" STENCIL_NAME
 %token FOREACH_NEIGHBOR "foreach_neighbor"
+%token AT_OPERATOR "@prolongation, @restriction or @boundary"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -368,6 +369,7 @@ external_declaration:
   | ';'                           { $$ = N (EMPTY_DECLARATION, $1); }
   | loop_definition
   | stencil_definition
+  | operator_definition
   /* Error recovery: skip to the end of the declaration, and go on to find more
    * errors. A file with errors is not translated, so these build nothing. */
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -417,6 +419,18 @@ stencil_definition:
 stencil_name:
     any_identifier
   | FOREACH_CELLS
+  ;
+
+/* A ghost operator: see translate.h. Its parameters are in scope for its
+ * body, as a function's. */
+operator_definition:
+    AT_OPERATOR any_identifier '(' open_scope loop_params ')' compound_statement
+    close_scope
+                                  { $$ = operator_define ($1, $2, $3, $5, $6, $7,
+                                                          &status->rejected);
+                                    (void) $4; (void) $8; }
+  | AT_OPERATOR any_identifier ';'
+                                  { $$ = operator_declare ($1, $2, $3); }
   ;
 
 opt_arguments:
@@ -1040,6 +1054,10 @@ iteration_statement:
                                     $$ = NULL; }
     statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
+  /* @prolongation (id) (args);: the operator with that id, called */
+  | AT_OPERATOR '(' expression ')' '(' opt_arguments ')' ';'
+                                  { $$ = operator_dispatch ($1, $2, $3, $4, $5, $6, $7, $8,
+                                                            &status->rejected); }
   /* foreach_neighbor (r): the point of a stencil loop moved to each of its
    * neighbours within r, for the statement */
   | FOREACH_NEIGHBOR '(' expression ')'

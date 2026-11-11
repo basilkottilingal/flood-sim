@@ -32,14 +32,21 @@ foreach_leaf_parallel () {
 Within a level the blocks are independent and run on all threads.
 `ghosts_update_levels ()` fills parents too, for coarse-level stencils.
 
-**Per-scalar operations** (`ScalarOps`, `scalar_set_ops ()`): a
-prolongation, a restriction and a boundary condition. `NULL` takes the
-default: `prolong_linear`, `restriction_mean`, `bc_neumann`. Also given:
-`prolong_minmod` (no new extrema, for a water depth), `prolong_injection`
-and `bc_odd`. One prolongation fills both the children of a refined block
-and the ghosts at a level jump, so the two agree. Callbacks are written with
-`prolong_cells ()` and `boundary_cells ()`, and may read other scalars of
-the same nodes, for coupled operators such as `h` with `zb`.
+**Per-scalar operations** (`ScalarOps`, `scalar_set_ops ()`, anywhere,
+at any time): a prolongation, a restriction and a boundary condition, each
+an integer id. 0 takes the default: `prolong_linear`, `restriction_mean`,
+`bc_neumann`. Also given: `prolong_minmod` (no new extrema, for a water
+depth), `prolong_injection` and `bc_odd`. One prolongation fills both the
+children of a refined block and the ghosts at a level jump, so the two
+agree. The operators are cwrap's `@prolongation`, `@restriction` and
+`@boundary` definitions (`block-ops.h`), written with `prolong_cells ()` and
+`boundary_cells ()`, and may read other scalars of the same nodes, for
+coupled operators such as `h` with `zb`. `ghosts_update ()` calls them
+through a `switch` on the id, each case inlined, not through a function
+pointer. The file that dispatches must see every definition:
+`block-ghosts.c` for the given ones; a program with operators of its own
+builds its own in its place (`block-ghosts.h`), as `tests/test_ghosts.c`
+does.
 
 **Derived scalars** are not prolonged. Fill the ghosts of the scalars they
 come from, then compute them on the halo, `block_cells (shape, GHOSTS)`, as

@@ -367,6 +367,20 @@ check "offsets and radii past BAMR_GHOSTS, or not constant, are compile errors a
   [ "$(./stencil_params)" = "6 1" ] && [ ! -s stencil_params.log ]
 check "@foreach with a parameter: given to its block loop, its argument evaluated once" $?
 
+"$cwrap" -Wall -Wextra ops_run.c -o ops_run 2> ops_run.log &&
+  [ "$(./ops_run)" = "1 2 1 | 1 2 -2" ] && [ ! -s ops_run.log ] &&
+  "$cwrap" -translate ops_run.c -o ops_run.out &&
+  grep -q 'switch ( id ) { case 1 : __cwrap_prolongation_p_twice ( ( pr ) ) ; break ; case 2 : __cwrap_prolongation_p_neg' ops_run.out &&
+  ! grep -q '(\*' ops_run.out
+check "@prolongation and @restriction: ids by kind, attached by name, a switch with no function pointer" $?
+
+"$cwrap" -c ops_bad.c -o ops_bad.o 2> ops_bad.log
+[ $? -ne 0 ] && [ ! -e ops_bad.o ] &&
+  grep -q "^ops_bad.c:2: error: @boundary b_one is defined twice" ops_bad.log &&
+  grep -q "^ops_bad.c:1: note: 'b_one' is defined here" ops_bad.log &&
+  grep -q "^ops_bad.c:5: error: @restriction (...) (...): no @restriction is defined before it" ops_bad.log
+check "ghost operators: defined twice, or dispatched with none defined, an error" $?
+
 "$cwrap" -dimension=2 -c stencil_foreach_bad.c -o stencil_foreach_bad.o 2> stencil_foreach_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_foreach_bad.o ] &&
   [ "$(grep -o '^stencil_foreach_bad.c:[0-9]*: error' stencil_foreach_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 7 9 " ] &&

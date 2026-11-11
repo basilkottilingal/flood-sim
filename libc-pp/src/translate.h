@@ -225,6 +225,33 @@ struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
                                struct ast *open, struct ast *radius,
                                struct ast *close, struct ast *body);
 
+/* Ghost operators: prolongations, restrictions and boundary conditions,
+ * chosen per scalar by an integer id and called through a switch, with no
+ * function pointer:
+ *
+ *   @prolongation name (params) { body }   at file scope: the operator,
+ *       static inline void __cwrap_prolongation_name (params) { body }
+ *       const int name = id;
+ *     ids count from 1, per kind, in the order of definition in the file;
+ *     0 is left for "the default". A name defined twice is an error.
+ *   @prolongation name;                     extern const int name;
+ *   @prolongation (id) (args);              a statement:
+ *       switch (id) { case 1: __cwrap_prolongation_a (args); break; ...
+ *                     default: __builtin_trap (); }
+ *     over every operator of that kind defined before it in the file.
+ *
+ * and the same with @restriction and @boundary. So the one file that
+ * dispatches (libb-amr's block-ghosts.c, or a program's own) must see every
+ * definition; any other file attaches an operator by name, an int. */
+struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
+                             struct ast *params, struct ast *close,
+                             struct ast *body, int *rejected);
+struct ast *operator_declare (struct ast *at, struct ast *name, struct ast *semi);
+struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
+                               struct ast *close, struct ast *open2,
+                               struct ast *args, struct ast *close2,
+                               struct ast *semi, int *rejected);
+
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
 

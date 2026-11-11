@@ -8,6 +8,8 @@
 #include <math.h>
 #include "adapt.h"
 #include "block-ghosts.h"
+/* operators of its own: this file dispatches, in place of block-ghosts.c */
+#include "block-ops.h"
 
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; \
@@ -98,7 +100,7 @@ static double ghost_error (int s, double (* f) (const double [3]), int parents)
 }
 
 /* a linear extrapolation at the walls: exact for a linear field */
-static void bc_linear (const Boundary * bc)
+@boundary bc_linear (const Boundary * bc)
 {
   boundary_cells (bc) {
     Real w0 = bc->b [ghost + (layer + 1) * inward];
@@ -109,12 +111,15 @@ static void bc_linear (const Boundary * bc)
 
 /* restrictions counted, to check each parent gets one */
 static long restricted;
-static void restriction_counted (Index p, int s)
+@restriction restriction_counted (Index p, scalar s)
 {
   BLOCK_PRAGMA (omp atomic)
   restricted++;
-  restriction_mean (p, s);
+  @restriction (restriction_mean) (p, s);
 }
+
+/* the core, dispatching to the operators above and those given */
+#include "block-ghosts-impl.h"
 
 /* the leaf holding the point r */
 static Index leaf_at (const double r [3])

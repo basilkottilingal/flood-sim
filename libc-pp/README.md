@@ -39,12 +39,13 @@ On top of C11 with GNU extensions, cwrap adds:
 6. [foreach](#foreach)
 7. [@loop: block macros](#loop-block-macros)
 8. [Stencils: foreach () and s[]](#stencils-foreach--and-s)
-9. [How the translator works](#how-the-translator-works)
-10. [Source layout](#source-layout)
-11. [Tests](#tests)
-12. [Limitations](#limitations)
-13. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
-14. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
+9. [Ghost operators: @prolongation, @restriction, @boundary](#ghost-operators-prolongation-restriction-boundary)
+10. [How the translator works](#how-the-translator-works)
+11. [Source layout](#source-layout)
+12. [Tests](#tests)
+13. [Limitations](#limitations)
+14. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
+15. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
 
 ---
 
@@ -774,6 +775,49 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   without `ghosts_mark_dirty ()`, `ghosts_mark_all_dirty ()` and
   `ghosts_update_dirty ()` declared, one that says to include
   `<block-ghosts.h>`.
+
+---
+
+## Ghost operators: @prolongation, @restriction, @boundary
+
+The operators that fill ghosts and refined blocks are chosen per scalar by
+an integer id, and called through a `switch` whose cases are inlined: no
+function pointer, so they inline, vectorise, and can be offloaded.
+
+    @prolongation prolong_minmod (const Prolongation * pr) { ... }
+          /* static inline void __cwrap_prolongation_prolong_minmod (...) { ... }
+             const int prolong_minmod = 2; */
+    @prolongation prolong_minmod;
+          /* extern const int prolong_minmod; */
+    @prolongation (id) (&pr);
+          /* switch (id) { case 1: __cwrap_prolongation_prolong_linear ((&pr)); break;
+                           case 2: __cwrap_prolongation_prolong_minmod ((&pr)); break;
+                           ... default: __builtin_trap (); } */
+
+and the same with `@restriction` and `@boundary`.
+
+- **A definition** is at file scope, like a function: its parameters, its
+  body. Its name is the operator's id, an `int`: ids count from 1 per kind,
+  in the order of the definitions in the file; 0 is left for "the default".
+  A name defined twice is an error.
+- **A declaration** lets any other file use the id by name.
+- **A dispatch** is a statement: the id, then the arguments, evaluated
+  once. It reaches every operator of its kind defined before it in the
+  file, and none defined after; with none, it is an error. An id that is
+  none of them stops the run (`__builtin_trap`).
+- **So one file of a program dispatches,** and must see every definition.
+  In libb-amr that is `block-ghosts.c`, which includes the operators given
+  (`block-ops.h`, the defaults first, so that their ids are the same in
+  every program) and then the core (`block-ghosts-impl.h`). A program with
+  operators of its own builds its own such file instead of
+  `block-ghosts.c`; see libb-amr's `block-ghosts.h` and `tests/test_ghosts.c`.
+- **A scalar is given operators anywhere, at any time,** by their ids:
+  `scalar_set_ops (h, (ScalarOps) { .prolongation = prolong_minmod })`. That
+  marks its ghosts stale, to be made again by the new ones.
+
+Their bodies are plain C for now, written with libb-amr's `prolong_cells ()`
+and `boundary_cells ()`; the stencil syntax in them (`coarse (s)`,
+`child.x`, `foreach_child ()`) is to come.
 
 ---
 

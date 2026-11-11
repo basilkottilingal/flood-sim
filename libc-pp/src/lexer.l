@@ -282,6 +282,10 @@ PFX     (u8|u|U|L)
 
   /* A block macro: see translate.h. C has no other use for @. */
 "@loop"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_LOOP); }
+  /* A ghost operator, defined, declared or dispatched: see translate.h. */
+"@prolongation"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_OPERATOR); }
+"@restriction"/[^A-Za-z0-9_$\x80-\xff]   { AST (T_AT_OPERATOR); }
+"@boundary"/[^A-Za-z0-9_$\x80-\xff]      { AST (T_AT_OPERATOR); }
   /* A stencil loop: see translate.h. */
 "@foreach"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_FOREACH); }
 
