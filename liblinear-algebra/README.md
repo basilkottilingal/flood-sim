@@ -162,5 +162,8 @@ The smoothers' benchmark, by hand (any DIMENSION):
     when a loop reads a face vector only at the cell and one face up;
   - a smoother that relaxes the flux-form operator at level jumps, as the
     residual is, to bring the cycles back to the cell-centred form's.
+
+  Both are planned in libb-amr's README, Future plans, "Faces, fluxes and
+  vertices" (items 1, 2 and 6).
 - Coarsest level: an exact (or in-block multigrid) solve instead of m^2
   sweeps.

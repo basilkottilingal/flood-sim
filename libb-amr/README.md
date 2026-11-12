@@ -655,6 +655,74 @@ Deferred; none started.
    `ghosts_update_level (s, l)`, called explicitly. Still open: lazy
    ghosts per level, `coarse ()` inside `foreach ()`: see `multigrid.md`.
 
+## Faces, fluxes and vertices
+
+Deferred; none started. What is done is above ("Faces and fluxes",
+"Vertices"). These would make it faster or more exact.
+
+1. **A cheaper face ghost update for fluxes.** Reading a stale face vector
+   makes every ghost layer of every component in every direction, and
+   restricts every parent. A flux divergence reads only `F.x[]` and
+   `F.x[1]`: each block's faces and its upper face m, made to agree at
+   level jumps. Measured in liblinear-algebra's residual (2D, 268 leaves):
+   the face ghost update is 0.95 ms of 1.48, against 0.39 for the whole
+   cell-centred residual it replaced.
+   - **A partial update:** only the shared faces and the reflux: face m
+     from the node above, face 0 from a finer region below, and the
+     parents restricted only where a coarse leaf touches a finer region.
+   - **How a loop asks for it:** cwrap knows what a loop reads. If a face
+     vector is read only at offset 0 or 1 along its own axis, it could
+     call the partial update; any other read, the full one.
+   - **Or no ghosts at all for a flux:** keep the shared faces in the
+     owner's block only, and read face m from the neighbour. That is a
+     larger change to how faces are stored.
+2. **A flux-form smoother at level jumps (multigrid).** The residual is in
+   flux form, but the smoothers relax the cell stencil, so at a jump the
+   two operators differ. That costs cycles: 20 against 14 in 2D, 28
+   against 20 in 3D (red-black, liblinear-algebra's benchmark). A smoother
+   whose diagonal and neighbours come from the refluxed faces at a jump
+   would match the residual. With the partial update above, flux form
+   would be back near the cell-centred form's 47 ms (2D) and 602 ms (3D),
+   from 131 and 1913.
+3. **Solenoidal refinement of face velocities.** `prolong_face` gives a
+   new face across a coarse cell's middle the mean of the coarse cell's
+   two faces. A divergence-free face velocity can lose that property on
+   refinement. Basilisk's `refine_face_solenoidal` fixes the new interior
+   faces so every fine cell's divergence is the coarse one's (zero). This
+   is needed for a projection method, such as a non-hydrostatic pressure.
+   It would be a `@prolongation` bound per face vector with `ghost_ops`.
+4. **Second order across the axes for smooth face fields.** Along the
+   other axes `prolong_face` is piecewise constant: right for a flux (per
+   unit area, summed back exactly), first order for a smooth face field
+   such as a velocity. A variant with a limited slope across the other
+   axes, keeping the mean of the fine faces equal to the coarse face's,
+   would be second order and still conservative.
+5. **Boundary conditions of faces and vertices.** The ghosts beyond a wall
+   are made as a cell scalar's: a mirror of the cells.
+   - **Faces:** the normal component's wall face is the block's own (made
+     by `foreach_face ()`), so a flux through a wall is what the loop
+     says. But the ghost faces beyond it (index -1, m + 1) are mirrored
+     as cells, not as faces, and a stencil reaching them reads the wrong
+     place. Proper ones would mirror about the wall face: odd for the
+     normal component of a velocity, even for a tangential one.
+   - **Vertices:** a vertex on a wall is its owner's; beyond it, mirrored
+     about the wall vertex, not as cells.
+   - Both would be `@boundary` operators, defaults by location as the
+     restriction and prolongation are.
+6. **Faces and vertices on levels (multigrid).** `ghosts_update_level (s,
+   l)` treats a face or vertex scalar as a cell one. The solver needs only
+   `alpha`, made once by `ghosts_update_levels ()`. A flux-form smoother
+   (2) would need the faces of the depth-l grid to agree at its jumps:
+   the reflux of the depth-l grid.
+7. **Diagonal-only level jumps for vertices.** A vertex is the owner's
+   where blocks meet along an axis or across a wall, and corners take what
+   the cell machinery gives them. A corner that touches a finer region
+   only diagonally (no axis neighbour finer) gets the coarse side's
+   interpolation; the fine side's own vertex may differ by its own
+   computation. The tests cover axis-adjacent jumps and walls; a test
+   with a diagonal-only jump would tell whether it needs the owner's copy
+   too.
+
 ## Compile-time block size
 
 Under consideration; not started. The block size `m` is now an argument of
