@@ -807,6 +807,18 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     keeps every rule above, but cwrap writes no update or mark around it.
     Its caller updates the ghosts of that level (`ghosts_update_level (s,
     l)`) and marks what it wrote.
+  - **Loops over one colour of a checkerboard:** a stencil loop whose cell
+    loop gives `checkerboard`, as libb-amr's
+    `foreach_level_or_leaf_colour (l, colour)` (red-black Gauss-Seidel),
+    may read a scalar it writes at an odd sum of offsets: `p[1]`,
+    `p[0,-1]`, `p[2,1]`. Those cells have the other colour, which the loop
+    does not change, so there is no warning. An even sum (`p[1,1]`,
+    `p[2]`) is the cell's own colour, possibly changed already: a compile
+    error, from a static assertion gcc checks as it checks the reach, so
+    offsets written as constant expressions are checked too.
+    `foreach_neighbor ()` reading such a scalar is an error: it reaches
+    both colours. With `BAMR_BOTH` the loop visits every cell in a fixed
+    order, and the same reads are Gauss-Seidel in place.
 - **`foreach_neighbor (r)` moves the point,** as in Basilisk: its statement
   runs for each cell within `r` of the point along every axis, the point's
   own included, and `s[]`, `s[i,j]`, `x`, `y`, `z` and `Delta` are then

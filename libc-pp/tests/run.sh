@@ -466,6 +466,22 @@ check "a loop whose block loop gives ghosts_by_caller: no ghost update or mark a
   grep -q "^stencil_by_caller_bad.c:9: warning: 'p\[1\]' reads a neighbour of 'p', which this foreach () writes" stencil_by_caller_bad.log
 check "ghosts_by_caller keeps the rules: a write at an offset an error, a neighbour of a scalar written a warning" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_colour.c -o stencil_colour 2> stencil_colour.log &&
+  [ "$(./stencil_colour)" = "red 24 black 24 other 0" ] && [ ! -s stencil_colour.log ]
+check "a loop over one colour (checkerboard): a scalar it writes read at odd offsets, enum ones too, with no warning; each colour once" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_colour_bad.c -o stencil_colour_bad.o 2> stencil_colour_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_colour_bad.o ] &&
+  [ "$(grep -o '^stencil_colour_bad.c:[0-9]*:[0-9]*: error' stencil_colour_bad.log | cut -d: -f2 | tr '\n' ' ')" = "7 9 " ] &&
+  grep -q 'p\[1,1\] reads a cell of its own colour' stencil_colour_bad.log &&
+  grep -q 'p\[TWO\] reads a cell of its own colour' stencil_colour_bad.log
+check "a loop over one colour: a scalar it writes read at an even sum of offsets, a compile error (gcc's static assertion); another scalar, or an odd sum, not" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_colour_neighbor_bad.c -o stencil_colour_neighbor_bad.o 2> stencil_colour_neighbor_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_colour_neighbor_bad.o ] &&
+  grep -q "^stencil_colour_neighbor_bad.c:8: error: 'p\[\]' in foreach_neighbor () reads both colours of 'p'" stencil_colour_neighbor_bad.log
+check "a loop over one colour: foreach_neighbor () reading a scalar it writes, an error" $?
+
 "$cwrap" -dimension=2 -Wall -c stencil_dep.c -o stencil_dep.o 2> stencil_dep.log &&
   [ "$(grep -c 'warning:' stencil_dep.log)" = 1 ] &&
   grep -q "^stencil_dep.c:7: warning: 'p\[1,0\]' reads a neighbour of 'p', which this foreach () writes" stencil_dep.log &&

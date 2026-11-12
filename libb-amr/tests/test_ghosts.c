@@ -596,6 +596,51 @@ int main (void)
     CHECK (ok && cover < 1e-12 * vol && err < tol);
   }
 
+  /* 9d. the colours of the grid at each depth: red then black visit every
+   * cell once, each of the colour of its global index; BAMR_BOTH every
+   * cell, in place and in order: q[] = q[-1] + 1 counts 1 .. m along a
+   * row from a zero ghost */
+  {
+    scalar cnt, q;
+    int ok = 1;
+    for (int l = 0; l <= tree_get_depth (); l++) {
+      foreach_level_or_leaf (l)
+        cnt[] = 0;
+      for (int colour = BAMR_RED; colour <= BAMR_BLACK; colour++)
+        foreach_level_or_leaf_colour (l, colour)
+          cnt[] += 1;
+      /* the colour of each cell, by the loops themselves, which give the
+       * indices: the block's, m apart, and the cell's in it */
+      BlockShape sh = tree_block_shape ();
+      for (int colour = BAMR_RED; colour <= BAMR_BLACK; colour++)
+        foreach_level_or_leaf_block (l)
+          foreach_cell_colour (sh, 0, colour, block_parity (sh.m, IJK)) {
+            int g = i * sh.m + ci - sh.ox;
+#if dimension > 1
+            g += j * sh.m + cj - sh.g;
+#endif
+#if dimension > 2
+            g += k * sh.m + ck - sh.g;
+#endif
+            ok &= (g & 1) == colour;
+          }
+      foreach_level_or_leaf_colour (l, BAMR_BOTH)
+        cnt[] += 1;
+      foreach_level_or_leaf (l)
+        ok &= cnt[] == 2;
+      foreach_level_or_leaf (l)
+        q[] = 0;
+      ghosts_update_level (q, l);
+      foreach_level_or_leaf_colour (l, BAMR_BOTH)
+        q[] = q[-1] + 1;
+      double lo = 1e30, hi = 0;
+      foreach_level_or_leaf (l)
+        lo = fmin (lo, q[]), hi = fmax (hi, q[]);
+      ok &= lo == 1 && hi == tree_block_shape ().m;
+    }
+    CHECK (ok);
+  }
+
   /* 10. a coupled prolongation: the depth hl from the surface hl + zbl,
    * the bed zbl made first though hl's id is lower, at level jumps, walls
    * and in refined leaves; zbl stale makes hl stale; a cycle, a wrong

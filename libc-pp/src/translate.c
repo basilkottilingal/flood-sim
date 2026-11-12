@@ -2106,6 +2106,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
 {
   int multi = 0, has_coarse = 0, has_child = 0, *level, *is_child;
   int by_caller = 0;                      /* ghosts kept by the caller */
+  int checkerboard = 0;                   /* one colour of the cells */
+  int *parity;                            /* reads checked for the other one */
   const char *coarse_sblocks, *child_sblocks, *cc, *fc, *sgn;
   int cell_uses[NRESERVED] = { 0 }, (*mover_uses)[NRESERVED], *moved;
   const struct loop_def *leaf = def ? def->leaf : NULL;
@@ -2150,6 +2152,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   multi = loop_gives (cell, "cc") || loop_gives (cell, "fc");
   /* and loops whose ghosts their caller keeps: see translate.h */
   by_caller = loop_gives (leaf, "ghosts_by_caller");
+  /* and loops over one colour of a checkerboard: see translate.h */
+  checkerboard = loop_gives (cell, "checkerboard");
   has_coarse = loop_gives (leaf, "coarse_sblocks") && loop_gives (cell, "cc")
                && loop_gives (cell, "sgn");
   has_child = loop_gives (leaf, "child_sblocks") && loop_gives (cell, "fc");
@@ -2289,9 +2293,40 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   }
   if (*rejected > errors)
     return body;
+  /* Over one colour: a read at an offset of a scalar the loop writes must
+   * reach the other colour, which the loop does not change: an odd sum of
+   * the offsets, which gcc checks (below). foreach_neighbor () reaches
+   * both colours. */
+  parity = allocate ((size_t)loop->naccess * sizeof (*parity) + 1);
+  for (int a = 0; a < loop->naccess; a++) {
+    struct ast *access = loop->access[a];
+    const char *key;
+    int same = 0;
+
+    parity[a] = 0;
+    if (!checkerboard || wrote[a] || level[a] != 0
+        || (moved[a] < 0 && !stencil_has_offset (access)))
+      continue;
+    key = ghost_scalar_of (access, body).key;
+    for (int b = 0; b < loop->naccess; b++)
+      same |= wrote[b] && strcmp (ghost_scalar_of (loop->access[b], body).key,
+                                  key) == 0;
+    if (!same)
+      continue;
+    if (moved[a] >= 0)
+      stencil_error (rejected, access, "'%s' in foreach_neighbor () reads "
+                     "both colours of '%s', which %s (), a loop over one "
+                     "colour, writes", expression_text (access), key,
+                     def->name);
+    else
+      parity[a] = 1;
+  }
+  if (*rejected > errors)
+    return body;
   for (int r = 0; r < nneeded; r++)
     for (int w = 0; w < nwritten; w++)
-      if (!needed[r].all && strcmp (needed[r].key, written[w].key) == 0) {
+      if (!needed[r].all && !(checkerboard && !written[w].all)
+          && strcmp (needed[r].key, written[w].key) == 0) {
         const struct token *t = ast_first_token (needed[r].at);
         const struct token *u = ast_first_token (written[w].at);
 
@@ -2377,8 +2412,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       const char *cond = "1";
 
       for (int k = 0; k < n && k < 3; k++)
-        cond = arena_printf ("%s && (__cwrap_a%d) <= BAMR_COARSE_REACH "
-                             "&& (__cwrap_b%d) >= -BAMR_COARSE_REACH", cond, k, k);
+        cond = arena_printf ("%s && (int) (__cwrap_a%d) <= (int) BAMR_COARSE_REACH "
+                             "&& (int) (__cwrap_b%d) >= -(int) BAMR_COARSE_REACH", cond, k, k);
       index = arena_printf ("%s + (int) (0 * sizeof (struct { _Static_assert "
                             "(%s, %s); char __cwrap_c; }))", index, cond,
                             c_string (arena_printf ("%s: an offset is not a "
@@ -2393,11 +2428,25 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
 
       for (int k = 0; k < n && k < 3; k++)
         cond = moved[a] >= 0
-          ? arena_printf ("%s && (__cwrap_a%d) + (__cwrap_ra%d) <= BAMR_GHOSTS "
-                          "&& (__cwrap_b%d) - (__cwrap_rb%d) >= -BAMR_GHOSTS",
+          ? arena_printf ("%s && (int) (__cwrap_a%d) + (int) (__cwrap_ra%d) <= (int) BAMR_GHOSTS "
+                          "&& (int) (__cwrap_b%d) - (int) (__cwrap_rb%d) >= -(int) BAMR_GHOSTS",
                           cond, k, k, k, k)
-          : arena_printf ("%s && (__cwrap_a%d) <= BAMR_GHOSTS "
-                          "&& (__cwrap_b%d) >= -BAMR_GHOSTS", cond, k, k);
+          : arena_printf ("%s && (int) (__cwrap_a%d) <= (int) BAMR_GHOSTS "
+                          "&& (int) (__cwrap_b%d) >= -(int) BAMR_GHOSTS", cond, k, k);
+      if (parity[a]) {
+        const char *sum = "0";
+
+        for (int k = 0; k < n && k < 3; k++)
+          sum = arena_printf ("%s + (__cwrap_p%d)", sum, k);
+        index = arena_printf ("%s + (int) (0 * sizeof (struct { _Static_assert "
+                              "((%s) %% 2 != 0, %s); char __cwrap_c; }))", index,
+                              sum, c_string (arena_printf (
+                                "%s reads a cell of its own colour, which %s () "
+                                "may have changed: in a loop over one colour, a "
+                                "scalar it writes is read at an odd sum of "
+                                "offsets only", expression_text (access),
+                                def->name)));
+      }
       index = arena_printf ("%s + (int) (0 * sizeof (struct { _Static_assert "
                             "(%s, %s); char __cwrap_c; }))", index, cond,
                             c_string (arena_printf ("%s: an offset is not a "
@@ -2428,12 +2477,18 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     }
     /* copies for the assertion first: the offsets themselves move */
     for (int k = 0; k < n && k < 3; k++) {
-      const char *names[4] = { "__cwrap_a%d", "__cwrap_b%d",
-                               "__cwrap_ra%d", "__cwrap_rb%d" };
+      const char *names[5] = { "__cwrap_a%d", "__cwrap_b%d",
+                               "__cwrap_ra%d", "__cwrap_rb%d", "__cwrap_p%d" };
 
-      for (int q = 0; q < (moved[a] >= 0 ? 4 : 2); q++) {
-        struct ast *copy = ast_copy (q < 2 ? os[k]
-                                     : loop->mover[moved[a]]->child->next->next);
+      for (int q = 0; q < 5; q++) {
+        struct ast *copy;
+
+        if ((q == 2 || q == 3) && moved[a] < 0)
+          continue;
+        if (q == 4 && !(parity[a] && level[a] == 0))
+          continue;
+        copy = ast_copy (q < 2 || q == 4 ? os[k]
+                         : loop->mover[moved[a]]->child->next->next);
 
         each_leaf (copy, flatten_leaf, (void *)ast_first_token (access));
         fill_placeholder (e, arena_printf (names[q], k), copy);

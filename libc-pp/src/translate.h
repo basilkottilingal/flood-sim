@@ -261,7 +261,15 @@ void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
  * offsets and their reach checked, a write at an offset an error and a read
  * of a neighbour the loop writes a warning; but no ghost update or mark is
  * written around it: its caller updates the ghosts of that level, and marks
- * what it wrote. */
+ * what it wrote.
+ *
+ * A loop whose cell loop gives checkerboard visits the cells of one colour
+ * (libb-amr's foreach_level_or_leaf_colour (l, colour), red-black
+ * Gauss-Seidel), or every cell in a fixed order. A scalar it writes may be
+ * read at an offset whose sum is odd, the other colour: gcc checks it with
+ * a static assertion, as the reach, so a read of its own colour is a
+ * compile error; and none of the warning above. foreach_neighbor ()
+ * reading such a scalar is an error: it reaches both colours. */
 struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
                             struct ast *open, struct ast *args,
                             struct ast *close, int *rejected);

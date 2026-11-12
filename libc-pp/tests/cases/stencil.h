@@ -148,3 +148,19 @@ enum { BAMR_COARSE_REACH = 1 };
 }
 
 @foreach foreach_mock_level (int l) = mock_level (l) foreach_cell (tree_block_shape (), 0);
+
+/* One colour of a checkerboard, as libb-amr's foreach_level_or_leaf_colour
+ * (l, colour): the cells whose (i + j) has the parity colour, every other
+ * cell of a row; the cell loop gives checkerboard */
+@loop mock_colour_cells (BlockShape shape, int colour) : ci, cj, c, shape, checkerboard
+{
+  int checkerboard = 1;
+  (void) checkerboard;
+  for (int cj = shape.g; cj < shape.g + shape.m; cj++)
+    for (int ci = shape.ox + ((cj - shape.g + colour) & 1); ci < shape.ox + shape.m; ci += 2) {
+      int c = ci + cj * shape.sy;
+      {...}
+    }
+}
+
+@foreach foreach_mock_colour (int colour) = foreach_leaf () mock_colour_cells (tree_block_shape (), colour);

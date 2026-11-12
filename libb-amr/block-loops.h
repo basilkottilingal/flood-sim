@@ -691,10 +691,83 @@
   .. neighbour, and ghosts_mark_dirty (s) after writing s, if a foreach ()
   .. reads its neighbours later.
   */
+  /*
+  .. The colours of a checkerboard, for red-black Gauss-Seidel: a cell is
+  .. red if the sum of its global indices (at its level) is even, black if
+  .. odd; BAMR_BOTH is every cell, in a fixed order.
+  ..
+  .. foreach_cell_colour (shape, halo, colour, parity): the cells of one
+  .. colour, every other cell of a row, or every cell, i fastest. parity is
+  .. that of the block's first interior cell, m (i + j + k) mod 2
+  .. (block_parity ()): the colour is the global one whatever m. It gives
+  .. checkerboard: in the stencil loops over it, cwrap lets a scalar the loop
+  .. writes be read at an odd sum of offsets only, the other colour, which
+  .. the loop does not change (a static assertion, as the reach). With
+  .. BAMR_BOTH the same reads are in place, Gauss-Seidel in the order of the
+  .. cells. No vector pragma: the order within a block is kept, so the
+  .. result is the same for any threads.
+  */
+  enum { BAMR_RED = 0, BAMR_BLACK = 1, BAMR_BOTH = 2 };
+
+  #if dimension == 1
+  static inline int block_parity (int m, int i) { return (m * i) & 1; }
+  #elif dimension == 2
+  static inline int block_parity (int m, int i, int j) { return (m * (i + j)) & 1; }
+  #else
+  static inline int block_parity (int m, int i, int j, int k)
+  {
+    return (m * (i + j + k)) & 1;
+  }
+  #endif
+
+  @loop foreach_cell_colour (BlockShape shape, int halo, int colour, int parity)
+    : CIJK, c, shape, checkerboard
+  {
+    int checkerboard = 1;
+    (void) checkerboard;
+    assert (colour >= BAMR_RED && colour <= BAMR_BOTH);
+    int h = block_halo (shape, halo), step = colour == BAMR_BOTH ? 1 : 2;
+  #if dimension > 2
+    for (int ck = shape.g - h; ck < shape.g + shape.m + h; ck++)
+  #endif
+  #if dimension > 1
+    for (int cj = shape.g - h; cj < shape.g + shape.m + h; cj++)
+  #endif
+    {
+      int row = parity, base = 0;
+  #if dimension > 1
+      row += cj - shape.g, base += cj * shape.sy;
+  #endif
+  #if dimension > 2
+      row += ck - shape.g, base += ck * shape.sz;
+  #endif
+      /* the first x of the colour: x + row has its parity */
+      int first = step == 1 ? -h : -h + (((-h + row - colour) % 2) + 2) % 2;
+      for (int x = first; x < shape.m + h; x += step)
+      {
+        int ci = shape.ox + x;
+        int c = base + ci;
+        (void) c;
+        {...}
+      }
+    }
+  }
+
   @foreach foreach_level (int l)
     = foreach_level_block (l) foreach_cell (tree_block_shape (), 0);
   @foreach foreach_level_or_leaf (int l)
     = foreach_level_or_leaf_block (l) foreach_cell (tree_block_shape (), 0);
+
+  /*
+  .. One colour (BAMR_RED, BAMR_BLACK) of the grid at depth l, or every cell
+  .. of it in order (BAMR_BOTH): see foreach_cell_colour above. The leaves
+  .. are the grid at depth tree_get_depth (). Ghosts are the caller's, as in
+  .. foreach_level (l): ghosts_update_level (s, l) between the colours.
+  */
+  @foreach foreach_level_or_leaf_colour (int l, int colour)
+    = foreach_level_or_leaf_block (l)
+      foreach_cell_colour (tree_block_shape (), 0, colour,
+                           block_parity (tree_block_shape ().m, IJK));
 
   /*
   .. The ghost layers, as a constant that outlives the preprocessor: cwrap
