@@ -4,34 +4,6 @@
 #include "multigrid.h"
 #include "block-ghosts.h"
 
-/*
-.. The neighbours of the cell, face by face: n += alpha_f u_n and
-.. d += alpha_f, alpha_f the mean of alpha in the cell and the neighbour. In
-.. a stencil loop: the offsets are cwrap's s[i, j, k].
-*/
-#define MG_FACE(u, al, n, d, ...) do {                                      \
-    double w_ = 0.5 * ((double) al[] + al[__VA_ARGS__]);                     \
-    n += w_ * u[__VA_ARGS__];                                                \
-    d += w_;                                                                 \
-  } while (0)
-
-#if dimension == 1
-  #define MG_NEIGHBOURS(u, al, n, d) do {                                   \
-      MG_FACE (u, al, n, d, 1); MG_FACE (u, al, n, d, -1);                   \
-    } while (0)
-#elif dimension == 2
-  #define MG_NEIGHBOURS(u, al, n, d) do {                                   \
-      MG_FACE (u, al, n, d, 1); MG_FACE (u, al, n, d, -1);                   \
-      MG_FACE (u, al, n, d, 0, 1); MG_FACE (u, al, n, d, 0, -1);             \
-    } while (0)
-#else
-  #define MG_NEIGHBOURS(u, al, n, d) do {                                   \
-      MG_FACE (u, al, n, d, 1); MG_FACE (u, al, n, d, -1);                   \
-      MG_FACE (u, al, n, d, 0, 1); MG_FACE (u, al, n, d, 0, -1);             \
-      MG_FACE (u, al, n, d, 0, 0, 1); MG_FACE (u, al, n, d, 0, 0, -1);       \
-    } while (0)
-#endif
-
 static MGParams defaults (MGParams p)
 {
   int m = tree_block_shape ().m;
@@ -58,25 +30,44 @@ static MGParams defaults (MGParams p)
   return p;
 }
 
-void mg_helmholtz_operator (scalar a, scalar alpha, scalar lambda, scalar out)
+/*
+.. The operator, in flux form: g the fluxes alpha grad a through every face
+.. (foreach_face (), each face once), then on each leaf what they bring in,
+.. over its size, and lambda a. Read at level jumps, g is made to agree
+.. there first (cwrap, at the read): a coarse face's flux is the sum of the
+.. fine faces' on it, so what leaves a cell enters the next.
+*/
+static void fluxes (scalar a, face_vector alpha, face_vector g)
+{
+  foreach_face ()
+    g.x[] = (Real) (alpha.x[] * ((double) a[] - a[-1]) / Delta);
+}
+
+void mg_helmholtz_operator (scalar a, face_vector alpha, scalar lambda,
+                            scalar out)
 {
   assert (out != a);
+  face_vector g;
+  fluxes (a, alpha, g);
   foreach () {
-    double n = 0, d = 0;
-    MG_NEIGHBOURS (a, alpha, n, d);
-    out[] = (Real) ((n - d * a[]) / (Delta * Delta) + (double) lambda[] * a[]);
+    double div = 0;
+    foreach_dimension ()
+      div += (double) g.x[1] - g.x[];
+    out[] = (Real) (div / Delta + (double) lambda[] * a[]);
   }
 }
 
 /* res = b - the operator of a, on the leaves: the largest |res| */
-static double residual (scalar a, scalar b, scalar alpha, scalar lambda,
-                        scalar res)
+static double residual (scalar a, scalar b, face_vector alpha, scalar lambda,
+                        scalar res, face_vector g)
 {
+  fluxes (a, alpha, g);
   double max = 0;
   foreach () {
-    double n = 0, d = 0;
-    MG_NEIGHBOURS (a, alpha, n, d);
-    double r = b[] - ((n - d * a[]) / (Delta * Delta) + (double) lambda[] * a[]);
+    double div = 0;
+    foreach_dimension ()
+      div += (double) g.x[1] - g.x[];
+    double r = b[] - (div / Delta + (double) lambda[] * a[]);
     res[] = (Real) r;
     r = r < 0 ? -r : r;
     max = r > max ? r : max;
@@ -87,14 +78,17 @@ static double residual (scalar a, scalar b, scalar alpha, scalar lambda,
 /*
 .. A sweep of weighted Jacobi for the operator of da = res on the grid at
 .. depth l, its ghosts made first: dn the new values, then da between the
-.. old and the new.
+.. old and the new. alpha.x[] and alpha.x[1] the cell's two faces along x.
 */
-static void relax (scalar da, scalar res, scalar alpha, scalar lambda,
+static void relax (scalar da, scalar res, face_vector alpha, scalar lambda,
                    scalar dn, int l, double omega)
 {
   foreach_level_or_leaf (l) {
     double n = 0, d = 0, h2 = Delta * Delta;
-    MG_NEIGHBOURS (da, alpha, n, d);
+    foreach_dimension () {
+      n += alpha.x[] * (double) da[-1] + alpha.x[1] * (double) da[1];
+      d += (double) alpha.x[] + alpha.x[1];
+    }
     dn[] = (Real) ((n / h2 - res[]) / (d / h2 - lambda[]));
   }
   foreach_level_or_leaf (l)
@@ -106,18 +100,21 @@ static void relax (scalar da, scalar res, scalar alpha, scalar lambda,
 .. BAMR_BLACK), or on every cell in order (BAMR_BOTH): in place, reading
 .. the other colour, unchanged in the pass (cwrap checks the offsets).
 */
-static void relax_colour (scalar da, scalar res, scalar alpha, scalar lambda,
-                          int l, int colour)
+static void relax_colour (scalar da, scalar res, face_vector alpha,
+                          scalar lambda, int l, int colour)
 {
   foreach_level_or_leaf_colour (l, colour) {
     double n = 0, d = 0, h2 = Delta * Delta;
-    MG_NEIGHBOURS (da, alpha, n, d);
+    foreach_dimension () {
+      n += alpha.x[] * (double) da[-1] + alpha.x[1] * (double) da[1];
+      d += (double) alpha.x[] + alpha.x[1];
+    }
     da[] = (Real) ((n / h2 - res[]) / (d / h2 - lambda[]));
   }
 }
 
 /* one sweep of the smoother on level l, the ghosts made after each pass */
-static void sweep (scalar da, scalar res, scalar alpha, scalar lambda,
+static void sweep (scalar da, scalar res, face_vector alpha, scalar lambda,
                    scalar dn, int l, MGParams p)
 {
   switch (p.smoother) {
@@ -138,8 +135,8 @@ static void sweep (scalar da, scalar res, scalar alpha, scalar lambda,
 }
 
 /* one cycle: the residual res on the leaves, a corrected */
-static void cycle (scalar a, scalar res, scalar da, scalar dn, scalar alpha,
-                   scalar lambda, MGParams p)
+static void cycle (scalar a, scalar res, scalar da, scalar dn,
+                   face_vector alpha, scalar lambda, MGParams p)
 {
   tree_restrict (res);                  /* the residual on every level */
   int depth = tree_get_depth ();
@@ -164,43 +161,48 @@ static void cycle (scalar a, scalar res, scalar da, scalar dn, scalar alpha,
 }
 
 /* the cycles, dn Jacobi's new values (none for Gauss-Seidel) */
-static MGStats solve (scalar a, scalar b, scalar alpha, scalar lambda,
-                      scalar res, scalar da, scalar dn, MGParams p)
+static MGStats solve (scalar a, scalar b, face_vector alpha, scalar lambda,
+                      scalar res, scalar da, scalar dn, face_vector g,
+                      MGParams p)
 {
   /* the correction's walls: a's, which must be homogeneous */
   for (int f = 0; f < GHOST_FACES; f++)
     ghost_ops_set (da, GHOST_BOUNDARY, f, scalar_get_boundary (a, f), NULL, 0);
-  /* alpha and lambda on every level; alpha's ghosts at every node */
+  /* alpha and lambda on every level: alpha's faces restricted as fluxes
+   * (restriction_face), its ghosts at every node */
   tree_restrict (lambda);
-  ghosts_update_levels (alpha);
+  foreach_dimension ()
+    ghosts_update_levels (alpha.x);
   MGStats st = { 0, 0, 0 };
-  st.resb = st.resa = residual (a, b, alpha, lambda, res);
+  st.resb = st.resa = residual (a, b, alpha, lambda, res, g);
   while (st.i < p.itermax && st.resa > p.tolerance) {
     cycle (a, res, da, dn, alpha, lambda, p);
-    st.resa = residual (a, b, alpha, lambda, res);
+    st.resa = residual (a, b, alpha, lambda, res, g);
     st.i++;
   }
   return st;
 }
 
-MGStats mg_helmholtz (scalar a, scalar b, scalar alpha, scalar lambda,
+MGStats mg_helmholtz (scalar a, scalar b, face_vector alpha, scalar lambda,
                       MGParams p)
 {
   p = defaults (p);
   scalar res, da;
+  face_vector g;                        /* the fluxes of the residual */
   if (p.smoother == MG_JACOBI) {
     scalar dn;
-    return solve (a, b, alpha, lambda, res, da, dn, p);
+    return solve (a, b, alpha, lambda, res, da, dn, g, p);
   }
-  return solve (a, b, alpha, lambda, res, da, -1, p);
+  return solve (a, b, alpha, lambda, res, da, -1, g, p);
 }
 
 MGStats mg_poisson (scalar a, scalar b, MGParams p)
 {
-  scalar alpha, lambda;
-  foreach () {
-    alpha[] = 1;
+  face_vector alpha;
+  scalar lambda;
+  foreach_face ()
+    alpha.x[] = 1;
+  foreach ()
     lambda[] = 0;
-  }
   return mg_helmholtz (a, b, alpha, lambda, p);
 }

@@ -21,14 +21,26 @@ lambda, out)` applies the operator as the solver discretises it.
 
 ## The discretisation
 
-Cell-centred, on the leaves: the sum over a cell's faces of alpha_f (a_n -
-a) / Delta^2, plus lambda a, alpha_f the mean of alpha in the face's two
-cells. At a level jump the neighbour is the leaf's ghost, as the scalar's
-prolongation makes it.
+In flux form. `alpha` is a `face_vector`: `alpha.x` at a cell's lower face
+along x. The fluxes `g.x = alpha.x (a[] - a[-1]) / Delta` are made once per
+face (`foreach_face ()`), and on each leaf the operator is what they bring
+in, over its size, plus `lambda a`:
 
-Not in flux form: the integral of the solution is not kept exactly across
-level jumps. That needs face loops and flux correction (refluxing), which
-libb-amr does not have yet.
+    foreach_face ()
+      g.x[] = alpha.x[] * (a[] - a[-1]) / Delta;
+    foreach () {
+      double div = 0;
+      foreach_dimension ()
+        div += g.x[1] - g.x[];
+      out[] = div / Delta + lambda[] * a[];
+    }
+
+At a level jump a coarse face's flux is the mean of the fine faces' on it
+(refluxing, made by libb-amr when `g` is read). So the operator's integral
+over the leaves is what crosses the walls: none with zero-gradient walls,
+to round-off, level jumps included (`tests/test_poisson.c`, check 0). At a
+jump the fine side's flux reads the coarse leaf's ghost, as its
+prolongation makes it.
 
 ## The cycle
 
@@ -88,23 +100,33 @@ The design, and why red-black, are in `doc/red-black-gauss-seidel.pdf`
 
 | | 1D | 2D | 3D |
 |---|---|---|---|
-| worst residual ratio per cycle (adaptive, alpha = 1 + x, lambda = -1) | 0.13 | 0.21 | 0.28 |
-| its own discrete solution recovered, double | 7e-12 | 1e-12 | 1e-12 |
+| worst residual ratio per cycle (adaptive, alpha.x = 1 + x, lambda = -1; flux form) | 0.25 | 0.39 | 0.41 |
+| its own discrete solution recovered, double | 2e-13 | 7e-13 | 5e-13 |
+| the operator's integral, zero-gradient walls, random field | 2e-17 | 3e-18 | 3e-18 |
 | error ratio against sin pi x ..., uniform level 1 to 2 | 4.00 | 3.99 | 3.99 |
 
 **The smoothers against each other** (`tests/bench_smoothers.c`, -O2, double,
 an adaptive tree, from zero to the same tolerance; time in ms):
 
-| | Jacobi, 4 sweeps | red-black, 2 | in-block Gauss-Seidel, 2 |
+| flux form | Jacobi, 4 sweeps | red-black, 2 | in-block Gauss-Seidel, 3 |
 |---|---|---|---|
-| 1D, 73 leaves | 9 cycles, 1.3 | 11 cycles, 1.2 | 11 cycles, 1.4 |
-| 2D, 268 leaves | 13 cycles, 58.6 | 14 cycles, **46.9** | 16 cycles, 69.7 |
-| 3D, 92 leaves (377k cells) | 20 cycles, 1132 | 20 cycles, **602** | 22 cycles, 1386 |
+| 2D, 268 leaves | 20 cycles, 165 | 20 cycles, **131** | 19 cycles, 202 |
+| 3D, 92 leaves (377k cells) | 29 cycles, 2589 | 28 cycles, **1913** | 22 cycles, 1832 |
 
-Red-black is 1.25 times faster than Jacobi in 2D and 1.9 times in 3D. That
-is less than the 2.5 times per unit of smoothing of the design note: a
-cycle also restricts, prolongs, computes the residual and solves the
-coarsest level.
+**Flux form costs about three times the cell-centred form** it replaced
+(2D: 131 ms against 46.9; 3D: 1913 against 602), for two reasons:
+
+- **more cycles,** 20 against 14 in 2D, 28 against 20 in 3D. The residual
+  is in flux form but the smoother relaxes the cell stencil, so at level
+  jumps the two operators differ;
+- **a costlier residual,** 1.48 ms against 0.39 (2D, 268 leaves): fluxes
+  0.22, divergence 0.31, and **the face ghost update of the fluxes 0.95**.
+  It makes every ghost layer of every component, and restricts every
+  parent, where the divergence needs only each block's upper face and the
+  reflux.
+
+Both can be helped (see Not done yet); what the form buys is the integral
+kept at level jumps.
 
 ## Build and tests
 
@@ -135,6 +157,10 @@ The smoothers' benchmark, by hand (any DIMENSION):
 - Lazy ghosts per level: the solver updates them explicitly now
   (`ghosts_update_level`); cwrap could, as for `foreach ()`
   (`libb-amr/multigrid.md`).
-- Flux form and refluxing at level jumps.
+- **Flux form's cost:**
+  - a face ghost update that makes only the shared faces and the reflux,
+    when a loop reads a face vector only at the cell and one face up;
+  - a smoother that relaxes the flux-form operator at level jumps, as the
+    residual is, to bring the cycles back to the cell-centred form's.
 - Coarsest level: an exact (or in-block multigrid) solve instead of m^2
   sweeps.

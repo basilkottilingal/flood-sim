@@ -6,19 +6,21 @@
   ..
   ..   div (alpha grad a) + lambda a = b
   ..
-  .. cell-centred: on each leaf, sum over its faces of alpha_f (a_n - a) /
-  .. Delta^2, plus lambda a, alpha_f the mean of alpha in the two cells of
-  .. the face. At a level jump the neighbour is the leaf's ghost, as the
-  .. scalar's prolongation makes it: not in flux form, so the integral of
-  .. the solution is not kept exactly across level jumps (flux correction is
-  .. not done; see README.md).
+  .. in flux form, alpha a face_vector (alpha.x at a cell's lower face
+  .. along x): the fluxes g.x = alpha.x (a[] - a[-1]) / Delta through every
+  .. face, made once each (foreach_face ()); on each leaf, what they bring
+  .. in over its size, plus lambda a. At a level jump a coarse face's flux
+  .. is the mean of the fine faces' on it (refluxing, libb-amr): so the
+  .. operator's integral over the leaves is what crosses the walls, level
+  .. jumps included (none, with zero-gradient walls).
   ..
   .. The cycle, as Basilisk's mg_cycle (): the residual restricted to every
   .. level; then from the coarsest level up, the correction da set to zero
   .. on it, or prolonged into each finer level by the scalar's own
   .. prolongation, and relaxed on the grid of that depth
   .. (foreach_level_or_leaf (l), block-loops.h) by weighted Jacobi, its
-  .. ghosts made after each sweep (ghosts_update_level (), block-ghosts.h);
+  .. ghosts made after each sweep (ghosts_update_level (), block-ghosts.h),
+  .. the faces of alpha on that level read as they are;
   .. last, da added to a on the leaves.
   ..
   .. The coarsest level is a block of m^dimension cells at least, which the
@@ -35,9 +37,10 @@
   ..     at it.
   ..   - The tree must not change during a solve.
   ..
-  .. Fields are read on the leaves (a, b, alpha, lambda); a is the first
-  .. guess on entry, the solution on return. The parents of alpha and lambda
-  .. are restricted from their leaves, alpha's ghosts made at every node.
+  .. Fields are read on the leaves (a, b, alpha's faces, lambda); a is the
+  .. first guess on entry, the solution on return. The parents of alpha and
+  .. lambda are restricted from their leaves (alpha's faces as fluxes, the
+  .. mean of the fine faces), alpha's ghosts made at every node.
   */
 
   #include "tree.h"
@@ -77,7 +80,7 @@
   } MGStats;
 
   /* div (alpha grad a) + lambda a = b; p zeroed for the defaults */
-  MGStats mg_helmholtz (scalar a, scalar b, scalar alpha, scalar lambda,
+  MGStats mg_helmholtz (scalar a, scalar b, face_vector alpha, scalar lambda,
                         MGParams p);
 
   /* the Laplacian: alpha 1, lambda 0 */
@@ -85,7 +88,7 @@
 
   /* out = div (alpha grad a) + lambda a, on the leaves, as the solver
   .. discretises it */
-  void mg_helmholtz_operator (scalar a, scalar alpha, scalar lambda,
+  void mg_helmholtz_operator (scalar a, face_vector alpha, scalar lambda,
                               scalar out);
 
 #endif

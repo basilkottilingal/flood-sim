@@ -12,7 +12,8 @@
 
 @boundary bc_odd;
 
-scalar a, b, e, alpha, lambda;
+scalar a, b, e, lambda;
+face_vector alpha;
 
 static double now (void)
 {
@@ -56,16 +57,17 @@ int main (void)
     v *= sin (M_PI * z);
 #endif
     e[] = (Real) v;
-    alpha[] = (Real) (1 + x);
     lambda[] = -1;
   }
+  foreach_face ()
+    alpha.x[] = (Real) (1 + x);
   mg_helmholtz_operator (e, alpha, lambda, b);
   double dmin = tree_get_size () / (tree_block_shape ().m << tree_get_depth ());
   double tol = 100 * REAL_EPSILON * 4 * dimension * 2 / (dmin * dmin);
   int smoothers [3] = { MG_JACOBI, MG_RED_BLACK, MG_GAUSS_SEIDEL };
   const char * names [3] = { "jacobi", "red_black", "gauss_seidel" };
   for (int s = 0; s < 3; s++)
-    for (int nr = 1; nr <= 4; nr++) {
+    for (int nr = 2; nr <= 4; nr++) {   /* 1 diverges: refused */
       double best = 1e30;
       MGStats st = { 0, 0, 0 };
       for (int rep = 0; rep < 3; rep++) {

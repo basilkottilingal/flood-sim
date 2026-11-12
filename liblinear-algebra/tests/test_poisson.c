@@ -3,6 +3,7 @@
  * order for the Laplacian against the continuous solution, and the
  * parameters honoured. Walls: zero value (bc_odd). */
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include <cwrap/cache.h>
 #include "adapt.h"
@@ -11,7 +12,8 @@
 
 @boundary bc_odd;
 
-scalar a, b, e, alpha, lambda;
+scalar a, b, e, lambda, q, zero, out;
+face_vector alpha;
 
 static int checks, fails;
 #define CHECK(c) do {                                                      \
@@ -132,18 +134,41 @@ int main (void)
   ghost_ops (e, boundary.all (bc_odd));
 
   /* 1. exact for its own discretisation: b from the operator of e, on an
-   * adaptive tree, alpha = 1 + x, lambda = -1; a from zero */
+   * adaptive tree, alpha = 1 + x on the x faces (1 + y on the y ones),
+   * lambda = -1; a from zero */
   int deep = dimension == 3 ? 2 : 3;
   tree (deep + 1, 4);
   refine_near (deep, 0.2);
   CHECK (tree_get_depth () == deep && tree_get_depth_min () < deep);
   foreach () {
     e[] = (Real) exact (x, y, z);
-    alpha[] = (Real) (1 + x);
     lambda[] = -1;
     a[] = 0;
   }
+  foreach_face ()
+    alpha.x[] = (Real) (1 + x);
   mg_helmholtz_operator (e, alpha, lambda, b);
+
+  /* 0. the operator in flux form keeps what it moves: with zero-gradient
+   * walls and lambda 0, its integral over the leaves is none, level jumps
+   * included, for any field */
+  {
+    srand (3);
+    foreach () {
+      q[] = (Real) (rand () / (double) RAND_MAX);
+      zero[] = 0;
+    }
+    mg_helmholtz_operator (q, alpha, zero, out);
+    double total = 0, scale = 0;
+    foreach () {
+      double v = Delta;
+      for (int d = 1; d < dimension; d++)
+        v *= Delta;
+      total += out[] * v, scale += fabs (out[]) * v;
+    }
+    printf ("  the operator's integral: %.3g of its size\n", fabs (total) / scale);
+    CHECK (fabs (total) < 1e3 * REAL_EPSILON * scale);
+  }
   double floor = floor_of (2, 1);
   /* each smoother, the default (red-black) first */
   const int smoothers [3] = { MG_SMOOTHER_DEFAULT, MG_JACOBI, MG_GAUSS_SEIDEL };
