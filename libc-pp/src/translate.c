@@ -59,15 +59,42 @@ void translate_set_dimension (int d)
 /* The scalars in a tensor, at most */
 #define MAX_PARTS 9
 
-/* The type of cwrap's that specs name: scalar, vector or tensor, or NULL. */
+/* The type of cwrap's that specs name: scalar, vertex_scalar, face_vector,
+ * vector or tensor (the last two in 2 and 3 dimensions), or NULL. */
 static const char *scalar_type (const struct ast *specs)
 {
-  static const char *const types[] = { "scalar", "vector", "tensor" };
+  static const char *const types[] = { "scalar", "vertex_scalar", "face_vector",
+                                       "vector", "tensor" };
+  int n = !dimension ? 0 : dimension >= 2 ? 5 : 3;
 
-  for (int i = 0; i < (dimension >= 2 ? 3 : dimension); i++)
+  for (int i = 0; i < n; i++)
     if (has_token (specs, T_TYPE_NAME, types[i]))
       return types[i];
   return NULL;
+}
+
+/* How many members down to a scalar: 0 for a scalar or vertex_scalar, 1 for
+ * a vector or face_vector, 2 for a tensor. */
+static int type_depth (const char *type)
+{
+  return strcmp (type, "tensor") == 0 ? 2
+         : strcmp (type, "vector") == 0 || strcmp (type, "face_vector") == 0 ? 1 : 0;
+}
+
+/* Where the scalar of part k of a type is: 0, the centre; for a face_vector
+ * 1, 2, 3, its faces along x, y, z; for a vertex_scalar 4 (CWRAP_FACE_X ...,
+ * CWRAP_VERTEX of <scalar.h>). */
+static int part_location (const char *type, int k)
+{
+  return strcmp (type, "face_vector") == 0 ? 1 + k
+         : strcmp (type, "vertex_scalar") == 0 ? 4 : 0;
+}
+
+/* ", 2" for a slot's location, ", 0" for the centre: always written, as
+ * -Wextra warns of a field left out */
+static const char *slot_location (const char *type, int k)
+{
+  return arena_printf (", %d", part_location (type, k));
 }
 
 /* The scalars in a variable of the type that specs name, as the members to
@@ -82,9 +109,9 @@ static int scalar_parts (const struct ast *specs, const char *parts[MAX_PARTS])
 
   if (!type)
     return 0;
-  if (strcmp (type, "scalar") == 0)
+  if (type_depth (type) == 0)
     parts[n++] = "";
-  else if (strcmp (type, "vector") == 0)
+  else if (type_depth (type) == 1)
     for (int i = 0; i < dimension; i++)
       parts[n++] = arena_printf (".%s", axes[i]);
   else
@@ -157,7 +184,7 @@ void check_scalar_assignment (const struct scope_table *scopes,
   specs = declaring_specs (v->decl);
   if (!specs || !(type = scalar_type (specs)))
     return;
-  depth = strcmp (type, "scalar") == 0 ? 0 : strcmp (type, "vector") == 0 ? 1 : 2;
+  depth = type_depth (type);
   if (members > depth)
     return;
   diag (at->file, at->line, DIAG_WARNING, "'%s' changes %s '%s', whose value "
@@ -182,7 +209,8 @@ static void warn_scalar_initializer (const struct ast *init, const char *type)
 static struct ast *parse_snippet (const char *text)
 {
   static const char prelude[] = "typedef int scalar; typedef int vector; "
-                                 "typedef int tensor;";
+                                 "typedef int tensor; typedef int face_vector; "
+                                 "typedef int vertex_scalar;";
   size_t n = strlen (prelude) + strlen (text) + 1;
   char *source = allocate (n);
   struct ast *root, *first, *d;
@@ -199,7 +227,9 @@ static struct ast *parse_snippet (const char *text)
   fclose (in);
   if (!root)
     abort ();
-  first = root->child->next->next->next;  /* past the three typedefs */
+  first = root->child;                    /* past the prelude's typedefs */
+  for (int k = 0; k < 5; k++)
+    first = first->next;
   if (first->kind == AST_TOKEN)
     abort ();
   for (d = first; d->next->kind != AST_TOKEN; d = d->next)
@@ -397,16 +427,19 @@ struct ast *local_scalars (struct ast *decl, const char *function)
       for (int k = 0; k < nparts; k++)
         slots = arena_printf ("%s static const struct __cwrap_scalar_slot "
                               "__cwrap_local_slot_%d __attribute__ ((section "
-                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\" };",
+                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\"%s };",
                               slots, local_slot++, name, parts[k], named,
-                              parts[k]);
+                              parts[k], slot_location (type, k));
     } else {
       /* scalar x __attribute__ ((cleanup (...))) = __cwrap_scalar_new_named
        * ("x"); __cwrap_vector_new_named ((const char *const []) { "u.x",
        * "u.y" }) for a vector, and so for a tensor */
-      const char *maker = arena_printf ("__cwrap_scalar_new_named (\"%s\")", named);
+      const char *maker = part_location (type, 0)
+        ? arena_printf ("__cwrap_scalar_new_located (\"%s\", %d)", named,
+                        part_location (type, 0))
+        : arena_printf ("__cwrap_scalar_new_named (\"%s\")", named);
 
-      if (nparts > 1) {
+      if (type_depth (type) > 0) {
         const char *list = "";
 
         for (int k = 0; k < nparts; k++)
@@ -482,9 +515,10 @@ static void register_scalars (struct ast *root)
       for (int k = 0; k < nparts; k++)
         slots = arena_printf ("%s static const struct __cwrap_scalar_slot "
                               "__cwrap_scalar_slot_%d __attribute__ ((section "
-                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\" };",
+                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\"%s };",
                               slots, slot++, ast_declared_name (d), parts[k],
-                              ast_declared_name (d), parts[k]);
+                              ast_declared_name (d), parts[k],
+                              slot_location (scalar_type (specs), k));
       insert_all_before (next, parse_snippet (slots));
     }
   }
@@ -1255,7 +1289,8 @@ int check_global_free (const struct ast *fn, const struct ast *args)
   t = ast_token (fn);
   if (t->kind != T_IDENTIFIER || (strcmp (t->text, "scalar_free") != 0
                                   && strcmp (t->text, "vector_free") != 0
-                                  && strcmp (t->text, "tensor_free") != 0))
+                                  && strcmp (t->text, "tensor_free") != 0
+                                  && strcmp (t->text, "face_vector_free") != 0))
     return 0;
   if (!(decl = global_scalar_decl (args->child, &specs, &member)))
     return 0;
@@ -1351,7 +1386,7 @@ static int scalar_shape (const struct ast *e, int *depth, int *ind)
         || !(type = scalar_type (specs)) || has_token (specs, T_TYPEDEF, NULL)
         || (*ind = declarator_indirections (t->binding->decl)) < 0)
       return 0;
-    *depth = strcmp (type, "scalar") == 0 ? 0 : strcmp (type, "vector") == 0 ? 1 : 2;
+    *depth = type_depth (type);
     return 1;
   case AST_PAREN_EXPRESSION:
     return scalar_shape (e->child->next, depth, ind);

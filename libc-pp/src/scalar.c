@@ -36,6 +36,7 @@ static inline void pushbit (int b)
 .. a name.
 */
 static const char * names [NSCALAR_MAX];
+static unsigned char locations [NSCALAR_MAX];   /* CWRAP_CENTRE, ... */
 static unsigned long long born [NSCALAR_MAX], births;
 
 scalar scalar_new ()
@@ -48,6 +49,7 @@ scalar scalar_new ()
     abort ();
   }
   names [s] = "";
+  locations [s] = CWRAP_CENTRE;
   born [s] = ++births;
   if (scalar_new_hook)
     scalar_new_hook ((scalar) s);
@@ -59,6 +61,18 @@ scalar __cwrap_scalar_new_named (const char * name)
   scalar s = scalar_new ();
   names [s] = name ? name : "";
   return s;
+}
+
+scalar __cwrap_scalar_new_located (const char * name, int location)
+{
+  scalar s = __cwrap_scalar_new_named (name);
+  locations [s] = (unsigned char) location;
+  return s;
+}
+
+int scalar_location (scalar s)
+{
+  return scalar_in_use (s) ? locations [s] : CWRAP_CENTRE;
 }
 
 const char * scalar_name (scalar s)
@@ -111,6 +125,7 @@ void scalar_free (scalar s)
     if (scalar_free_hook)
       scalar_free_hook (s);
     names [s] = "";
+    locations [s] = CWRAP_CENTRE;
     pushbit ((int) s);
   }
 }
@@ -140,6 +155,6 @@ __attribute__ ((constructor (101))) static void number_global_scalars ()
   for (int s = 0; s < NSCALAR_MAX; s++)       /* all ids free */
     pushbit (s);
   for (const struct __cwrap_scalar_slot * p = __start_scalars; p < __stop_scalars; p++)
-    *p->s = __cwrap_scalar_new_named (p->name);
+    *p->s = __cwrap_scalar_new_located (p->name, p->location);
   n_global_scalars = (int) (__stop_scalars - __start_scalars);
 }

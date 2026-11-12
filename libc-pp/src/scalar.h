@@ -29,6 +29,30 @@
   typedef struct { vector x, y, z; } tensor;
   #endif
 
+  /*
+  .. Where a scalar's values are, in a cell (its location):
+  ..   face_vector F    F.x at the cell's lower face along x (i - 1/2), F.y
+  ..                    along y, F.z: a flux, a face velocity; in every
+  ..                    dimension, 1 included
+  ..   vertex_scalar v  at the cell's lower corner (i - 1/2, j - 1/2, ...)
+  ..   any other        at the cell's centre
+  .. A face_vector's scalars and a vertex_scalar are scalars, numbered and
+  .. freed as the others; scalar_location (s) tells the grid (libb-amr) where
+  .. they are. A scalar not made by cwrap (scalar_new ()) is at the centre.
+  */
+  #if CWRAP_DIMENSION == 1
+  typedef struct { scalar x; } face_vector;
+  #elif CWRAP_DIMENSION == 2
+  typedef struct { scalar x, y; } face_vector;
+  #else
+  typedef struct { scalar x, y, z; } face_vector;
+  #endif
+  typedef scalar vertex_scalar;
+
+  enum { CWRAP_CENTRE, CWRAP_FACE_X, CWRAP_FACE_Y, CWRAP_FACE_Z, CWRAP_VERTEX };
+
+  int scalar_location (scalar s);   /* CWRAP_CENTRE if not in use */
+
   /* The scalars at file scope, which take ids 0 to n_global_scalars - 1 */
   extern int n_global_scalars;
 
@@ -46,15 +70,21 @@
   const char * scalar_name (scalar s);
   scalar       scalar_find (const char * name);
 
-  /* For cwrap: scalar_new (), named name, a string literal */
+  /* For cwrap: scalar_new (), named name, a string literal; at location */
   scalar __cwrap_scalar_new_named (const char * name);
+  scalar __cwrap_scalar_new_located (const char * name, int location);
 
-  /* For cwrap: a scalar at file scope (or static in a function), its slot */
+  /* For cwrap: a scalar at file scope (or static in a function), its slot;
+  .. location 0 (left out) is the centre. The linker puts the slots of every
+  .. file one after the other, each object aligned as gcc chooses (16 bytes
+  .. for one of 16 or more on x86-64), and scalar.c walks them as an array:
+  .. so their size is fixed, and a multiple of any such alignment. */
   struct __cwrap_scalar_slot
   {
     scalar * s;
     const char * name;
-  };
+    int location;
+  } __attribute__ ((aligned (32)));
 
   /* api */
   scalar scalar_new    (void);         /* the lowest free id; aborts if none */
@@ -229,6 +259,45 @@
     vector_free (t.x);
   }
   #endif
+
+  /* For cwrap: face vectors, x, y (, z) at the faces of each axis */
+  static inline face_vector __cwrap_face_vector_new_named (const char * const * n)
+  {
+    /* initialised, so cwrap leaves these locals alone */
+    scalar x = __cwrap_scalar_new_located (n ? n [0] : 0, CWRAP_FACE_X);
+  #if CWRAP_DIMENSION == 1
+    return (face_vector) { x };
+  #else
+    scalar y = __cwrap_scalar_new_located (n ? n [1] : 0, CWRAP_FACE_Y);
+  #if CWRAP_DIMENSION == 2
+    return (face_vector) { x, y };
+  #else
+    scalar z = __cwrap_scalar_new_located (n ? n [2] : 0, CWRAP_FACE_Z);
+    return (face_vector) { x, y, z };
+  #endif
+  #endif
+  }
+
+  static inline void face_vector_free (face_vector f)
+  {
+  #if CWRAP_DIMENSION != 1 && CWRAP_DIMENSION != 2
+    scalar_free (f.z);
+  #endif
+  #if CWRAP_DIMENSION != 1
+    scalar_free (f.y);
+  #endif
+    scalar_free (f.x);
+  }
+
+  static inline void __cwrap_face_vector_free (face_vector * f)
+  {
+    face_vector_free (*f);
+  }
+
+  static inline void __cwrap_vertex_scalar_free (vertex_scalar * v)
+  {
+    scalar_free (*v);
+  }
 
   /* For cwrap: the cleanups of local vectors and tensors. */
   #if CWRAP_DIMENSION >= 2

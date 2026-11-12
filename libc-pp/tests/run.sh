@@ -219,9 +219,9 @@ check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
 check "-dimension=2: a vector has 2 scalars and a tensor 4, numbered or freed each" $?
 
 "$cwrap" -dimension=2 -translate tensor.c -o tensor.out 2> /dev/null &&
-  grep -q '^tensor t; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = { &t.x.x, "t.x.x" }; .*_slot_4 .* = { &t.x.y, "t.x.y" }; .*_slot_5 .* = { &t.y.x, "t.y.x" }; .*_slot_6 .* = { &t.y.y, "t.y.y" };$' tensor.out &&
+  grep -q '^tensor t; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = { &t.x.x, "t.x.x", 0 }; .*_slot_4 .* = { &t.x.y, "t.x.y", 0 }; .*_slot_5 .* = { &t.y.x, "t.y.x", 0 }; .*_slot_6 .* = { &t.y.y, "t.y.y", 0 };$' tensor.out &&
   grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = __cwrap_tensor_new_named ((const char \*const \[\]) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });$' tensor.out &&
-  grep -q '^  static vector kept; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.x, "sum.kept.x" }; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.y, "sum.kept.y" };$' tensor.out
+  grep -q '^  static vector kept; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.x, "sum.kept.x", 0 }; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.y, "sum.kept.y", 0 };$' tensor.out
 check "a tensor gets a slot for each scalar, t.x.x to t.y.y, on its line, each with its name" $?
 
 "$cwrap" -dimension=3 -Wall tensor.c -o tensor3 2> /dev/null &&
@@ -237,8 +237,8 @@ check "without -dimension, scalar and vector are the program's own names" $?
 check "-dimension takes only 1, 2 or 3" $?
 
 "$cwrap" -dimension=1 -translate scalar.c -o scalar.out 2> scalar.log
-[ "$(grep -o '__attribute__ ((section ("scalars"), used)) = { &[a-z]*, "[a-z]*" };' scalar.out |
-     sed 's/.*&//' | tr '\n' ' ')" = 'a, "a" }; b, "b" }; d, "d" }; s, "s" }; last, "last" }; ' ] &&
+[ "$(grep -o '__attribute__ ((section ("scalars"), used)) = { &[a-z]*, "[a-z]*", 0 };' scalar.out |
+     sed 's/.*&//' | tr '\n' ' ')" = 'a, "a", 0 }; b, "b", 0 }; d, "d", 0 }; s, "s", 0 }; last, "last", 0 }; ' ] &&
   grep -q '^scalar a; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_0 ' scalar.out &&
   grep -q '^extern scalar e;$' scalar.out && grep -q '^typedef scalar t;$' scalar.out &&
   grep -q '^int g (void) { scalar local = 0; return local; }$' scalar.out
@@ -250,7 +250,7 @@ check "the constructor numbers the global scalars 0 to 4" $?
 
 "$cwrap" -dimension=1 -translate scalar_local.c -o scalar_local.out &&
   grep -q '^  scalar a __attribute__ ((cleanup (__cwrap_scalar_free))) = __cwrap_scalar_new_named ("a");$' scalar_local.out &&
-  grep -q '^  static scalar s; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = { &s, "counted.s" };$' scalar_local.out &&
+  grep -q '^  static scalar s; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = { &s, "counted.s", 0 };$' scalar_local.out &&
   grep -q '^  scalar kept = scalar_new ();$' scalar_local.out
 check "local scalars get a named id from __cwrap_scalar_new_named (), and a cleanup that frees it" $?
 
@@ -481,6 +481,24 @@ check "a loop over one colour: a scalar it writes read at an even sum of offsets
 [ $? -ne 0 ] && [ ! -e stencil_colour_neighbor_bad.o ] &&
   grep -q "^stencil_colour_neighbor_bad.c:8: error: 'p\[\]' in foreach_neighbor () reads both colours of 'p'" stencil_colour_neighbor_bad.log
 check "a loop over one colour: foreach_neighbor () reading a scalar it writes, an error" $?
+
+ok=0
+for d in 1 2 3; do
+  case $d in
+    1) want='F.x F.x 1; v v 4; c c 0; G.x G.x 1; w w 4; inner 2 after 0 static 1' ;;
+    2) want='F.x F.x 1; F.y F.y 2; v v 4; c c 0; G.x G.x 1; w w 4; inner 3 after 0 static 1' ;;
+    3) want='F.x F.x 1; F.y F.y 2; F.z F.z 3; v v 4; c c 0; G.x G.x 1; w w 4; inner 4 after 0 static 1' ;;
+  esac
+  "$cwrap" -dimension=$d -Wall -Wextra located.c -o located 2> located.log &&
+    [ "$(./located)" = "$want" ] && [ ! -s located.log ] || ok=1
+done
+[ $ok = 0 ]
+check "face_vector (x, y, z at the faces) and vertex_scalar: located and named, global, local, static; 1-3D" $?
+
+"$cwrap" -dimension=2 -c located_free.c -o located_free.o 2> located_free.log
+[ $? -ne 0 ] && [ ! -e located_free.o ] &&
+  grep -q "^located_free.c:4: error: face_vector_free () of 'F', a global face_vector" located_free.log
+check "face_vector_free () of a global face_vector, an error" $?
 
 "$cwrap" -dimension=2 -Wall -c stencil_dep.c -o stencil_dep.o 2> stencil_dep.log &&
   [ "$(grep -c 'warning:' stencil_dep.log)" = 1 ] &&

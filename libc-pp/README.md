@@ -188,6 +188,22 @@ everything below about scalars applies to each of them, in the order
 `x, y (, z)`, and for a tensor `x.x, x.y, ..., y.x, ...`. `scalar.o` is linked
 into every program, whatever the dimension.
 
+**Where the values are.** In every dimension, 1 included, two more types say
+where a scalar's values sit in a cell:
+
+- `face_vector F;`: a struct of scalars `F.x` (`F.y`, `F.z`), each at the
+  cell's lower face along its axis (at i - 1/2 for `F.x`): fluxes, face
+  velocities;
+- `vertex_scalar v;`: a scalar at the cell's lower corner.
+
+They are numbered, named and freed like the others (`face_vector_free ()`;
+a global one never). `scalar_location (s)` gives where a scalar is:
+`CWRAP_CENTRE`, `CWRAP_FACE_X`, `_Y`, `_Z` or `CWRAP_VERTEX`. The grid
+(libb-amr) reads it to treat such scalars as faces or vertices. A slot
+carries the location, `{ &F.x, "F.x", 1 }`, and a local face vector gets
+`__cwrap_face_vector_new_named ()`, a vertex scalar
+`__cwrap_scalar_new_located ("v", 4)`.
+
 ### File-scope scalars
 
     scalar h, u, v;      // ids 0, 1, 2 ... in the order the linker sees them
