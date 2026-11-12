@@ -96,26 +96,30 @@ static int ghost_ops_fail (const char * format, ...)
 static const char * const ghost_kinds [] = { "prolongation", "restriction",
                                              "boundary" };
 
+/* a scalar in a message: its name (scalar.h), or "unnamed", with its id */
+#define SNAME(s) (scalar_name (s) ? scalar_name (s) : "unnamed")
+
 int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
 {
   assert (s >= 0 && s < NSCALAR_MAX && kind >= 0 && kind <= GHOST_BOUNDARY);
   int need = ghost_op_uses (kind, op);
   if (need < 0)
-    return ghost_ops_fail ("ghost_ops: scalar %d: no %s with the id %d\n",
-                           (int) s, ghost_kinds [kind], op);
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): no %s with the id %d\n",
+                           SNAME (s), (int) s, ghost_kinds [kind], op);
   if (n != need)
-    return ghost_ops_fail ("ghost_ops: scalar %d: its %s %d depends on %d "
-                           "scalar%s, not %d\n", (int) s, ghost_kinds [kind],
-                           op, need, need == 1 ? "" : "s", n);
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): its %s %d depends on %d "
+                           "scalar%s, not %d\n", SNAME (s), (int) s,
+                           ghost_kinds [kind], op, need, need == 1 ? "" : "s", n);
   if (n > GHOST_USES_MAX)
-    return ghost_ops_fail ("ghost_ops: scalar %d: %d scalars depended on, %d "
-                           "at most (GHOST_USES_MAX)\n", (int) s, n,
-                           GHOST_USES_MAX);
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): %d scalars depended on, "
+                           "%d at most (GHOST_USES_MAX)\n", SNAME (s), (int) s,
+                           n, GHOST_USES_MAX);
   for (int k = 0; k < n; k++)
     if (uses [k] < 0 || uses [k] >= n_global_scalars)
-      return ghost_ops_fail ("ghost_ops: scalar %d: scalar %d, which its %s "
-                             "depends on, is not global\n", (int) s,
-                             (int) uses [k], ghost_kinds [kind]);
+      return ghost_ops_fail ("ghost_ops: scalar %s (%d): scalar %s (%d), which "
+                             "its %s depends on, is not global\n", SNAME (s),
+                             (int) s, SNAME (uses [k]), (int) uses [k],
+                             ghost_kinds [kind]);
   ScalarOps old = scalar_ops [s];
   int * id = kind == GHOST_PROLONGATION ? &scalar_ops [s].prolongation
            : kind == GHOST_RESTRICTION ? &scalar_ops [s].restriction
@@ -131,8 +135,9 @@ int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
   if (c >= 0) {
     scalar_ops [s] = old;
     ghost_dependents_rebuild ();
-    return ghost_ops_fail ("ghost_ops: scalar %d: its operators would depend "
-                           "on itself, through scalar %d\n", (int) s, c);
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): its operators would "
+                           "depend on itself, through scalar %s (%d)\n",
+                           SNAME (s), (int) s, SNAME (c), c);
   }
   ghosts_mark_dirty (s);      /* made by the old ones: made again */
   return 0;
@@ -144,9 +149,9 @@ void scalar_set_ops (scalar s, ScalarOps ops)
   if (ghost_op_uses (GHOST_PROLONGATION, ops.prolongation) > 0
       || ghost_op_uses (GHOST_RESTRICTION, ops.restriction) > 0
       || ghost_op_uses (GHOST_BOUNDARY, ops.boundary) > 0) {
-    ghost_ops_fail ("scalar_set_ops: scalar %d: an operator that depends on "
-                    "scalars is bound with ghost_ops (), which names them\n",
-                    (int) s);
+    ghost_ops_fail ("scalar_set_ops: scalar %s (%d): an operator that depends "
+                    "on scalars is bound with ghost_ops (), which names them\n",
+                    SNAME (s), (int) s);
     return;
   }
   for (int k = 0; k < GHOST_USES_MAX; k++)

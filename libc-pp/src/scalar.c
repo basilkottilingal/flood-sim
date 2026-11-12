@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "scalar.h"
 
@@ -29,6 +30,13 @@ static inline void pushbit (int b)
   bits [b/64] |= 1ull << (b & 63);
 }
 
+/*
+.. Names: a pointer each, never a copy (scalar.h); and the order in which the
+.. ids were taken, so that scalar_find () gives the last made of a name.
+*/
+static const char * names [NSCALAR_MAX];
+static unsigned long long born [NSCALAR_MAX], births;
+
 scalar scalar_new ()
 {
   int s = popbit ();
@@ -38,9 +46,41 @@ scalar scalar_new ()
              NSCALAR_MAX);
     abort ();
   }
+  names [s] = NULL;
+  born [s] = ++births;
   if (scalar_new_hook)
     scalar_new_hook ((scalar) s);
   return (scalar) s;
+}
+
+scalar scalar_new_named (const char * name)
+{
+  scalar s = scalar_new ();
+  names [s] = name;
+  return s;
+}
+
+const char * scalar_name (scalar s)
+{
+  return scalar_in_use (s) ? names [s] : NULL;
+}
+
+void scalar_set_name (scalar s, const char * name)
+{
+  if (scalar_in_use (s))
+    names [s] = name;
+}
+
+scalar scalar_find (const char * name)
+{
+  int found = -1;
+  if (!name)
+    return -1;
+  for (int s = 0; s < NSCALAR_MAX; s++)
+    if (scalar_in_use (s) && names [s] && strcmp (names [s], name) == 0
+        && (found < 0 || born [s] > born [found]))
+      found = s;
+  return (scalar) found;
 }
 
 int scalar_in_use (scalar s)
@@ -62,8 +102,9 @@ void scalar_free (scalar s)
   */
   if (s >= 0 && s < n_global_scalars)
   {
-    fprintf (stderr, "scalar_free: scalar %d is global, numbered once for "
-             "the whole run: it is never freed\n", (int) s);
+    fprintf (stderr, "scalar_free: scalar %s (%d) is global, numbered once "
+             "for the whole run: it is never freed\n",
+             names [s] ? names [s] : "unnamed", (int) s);
     abort ();
   }
   /*
@@ -74,6 +115,7 @@ void scalar_free (scalar s)
   {
     if (scalar_free_hook)
       scalar_free_hook (s);
+    names [s] = NULL;
     pushbit ((int) s);
   }
 }
@@ -94,15 +136,15 @@ int scalar_count ()
 .. program with none. Priority 101 runs this before other constructors, so
 .. every id is free before any code can ask for one.
 */
-extern scalar * const __start_scalars [] __attribute__ ((weak));
-extern scalar * const __stop_scalars [] __attribute__ ((weak));
+extern const struct __cwrap_scalar_slot __start_scalars [] __attribute__ ((weak));
+extern const struct __cwrap_scalar_slot __stop_scalars [] __attribute__ ((weak));
 int n_global_scalars = 0;
 
 __attribute__ ((constructor (101))) static void number_global_scalars ()
 {
   for (int s = 0; s < NSCALAR_MAX; s++)       /* all ids free */
     pushbit (s);
-  for (scalar * const * p = __start_scalars; p < __stop_scalars; p++)
-    **p = scalar_new ();
+  for (const struct __cwrap_scalar_slot * p = __start_scalars; p < __stop_scalars; p++)
+    *p->s = scalar_new_named (p->name);
   n_global_scalars = (int) (__stop_scalars - __start_scalars);
 }

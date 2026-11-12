@@ -28,6 +28,10 @@ struct var {
   unsigned hash;
   int loop;               /* declared in the @loop definition with this
                            * serial, as a parameter or a local; else 0 */
+  const struct var *hides;  /* the declaration of the same name it hides,
+                           * from an outer scope, or NULL */
+  int scalar_depth;       /* a scalar's name: 0 its own, 1 qualified by its
+                           * function (f.h), n > 1 also numbered (f.h.n) */
   struct var *chain;      /* next in the hash bucket */
 };
 

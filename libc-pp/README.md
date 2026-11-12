@@ -46,7 +46,6 @@ On top of C11 with GNU extensions, cwrap adds:
 13. [Limitations](#limitations)
 14. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
 15. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
-16. [Future: scalar names](#future-scalar-names)
 
 ---
 
@@ -193,24 +192,25 @@ into every program, whatever the dimension.
 
     scalar h, u, v;      // ids 0, 1, 2 ... in the order the linker sees them
 
-- **Each one gets a slot,** on its own line, so no line numbers move:
+- **Each one gets a slot,** its address and its name, on its own line, so no
+  line numbers move:
 
-      scalar h; static scalar *const __cwrap_scalar_slot_0
-        __attribute__ ((section ("scalars"), used)) = &h;
+      scalar h; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_0
+        __attribute__ ((section ("scalars"), used)) = { &h, "h" };
 
   A vector or tensor gets one slot for each of its scalars. In 2 dimensions,
   `tensor t;` gets four, all on its line:
 
-      static scalar *const __cwrap_scalar_slot_0 __attribute__ ((section ("scalars"), used)) = &t.x.x;
-      static scalar *const __cwrap_scalar_slot_1 __attribute__ ((section ("scalars"), used)) = &t.x.y;
-      static scalar *const __cwrap_scalar_slot_2 __attribute__ ((section ("scalars"), used)) = &t.y.x;
-      static scalar *const __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = &t.y.y;
+      static const struct __cwrap_scalar_slot __cwrap_scalar_slot_0 ... = { &t.x.x, "t.x.x" };
+      static const struct __cwrap_scalar_slot __cwrap_scalar_slot_1 ... = { &t.x.y, "t.x.y" };
+      static const struct __cwrap_scalar_slot __cwrap_scalar_slot_2 ... = { &t.y.x, "t.y.x" };
+      static const struct __cwrap_scalar_slot __cwrap_scalar_slot_3 ... = { &t.y.y, "t.y.y" };
 
 - **The linker joins the slots of every file** between `__start_scalars` and
   `__stop_scalars`.
 - **A constructor in `scalar.c`, at priority 101, numbers them** before `main`
-  and before any other constructor. So scalars across separately compiled
-  files get ids 0 to n-1 with no gaps.
+  and before any other constructor, and names them. So scalars across
+  separately compiled files get ids 0 to n-1 with no gaps.
 - **`n_global_scalars`** holds n.
 - **Not numbered:**
   - `extern` declarations
@@ -222,7 +222,7 @@ into every program, whatever the dimension.
 
     void f (void)
     {
-      scalar x;                 // x = scalar_new (), freed as the scope ends
+      scalar x;                 // x = scalar_new_named ("x"), freed as the scope ends
       static scalar s;          // numbered at startup, like a global
       scalar k = scalar_new (); // yours: freed only when you call scalar_free
       vector u = vector_new (); // the same: vector_free (u) when done
@@ -230,18 +230,19 @@ into every program, whatever the dimension.
 
 - **`scalar x;` becomes**
 
-      scalar x __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new ();
+      scalar x __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new_named ("x");
 
   so `scalar_free (x)` runs however the scope ends: the end of the block,
   `return`, `break`, `continue` or `goto`. Scalars are freed in reverse order.
 - **A vector or tensor gets an id for each scalar,** and a cleanup that frees
   them, last first:
 
-      tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = tensor_new ();
+      tensor w __attribute__ ((cleanup (__cwrap_tensor_free)))
+        = tensor_new_named ((const char *const []) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });
 
 - **`static scalar s;`** becomes `static scalar s;` followed by one slot for each
   of its scalars, as declarations of their own on the same line. They are
-  numbered with the globals.
+  numbered with the globals, and named after their function: `f.s`.
 - **Left alone:** pointers, arrays, names with an initializer, and `extern`,
   `register` and thread-local scalars.
 
@@ -252,6 +253,50 @@ values. This covers `=`, the compound assignments, and `++` and `--`. It also
 covers a whole vector or tensor, or part of one, as in `v = w`, `t.y = v` and
 `t.x.y = 1`. The warning names the operator and what it changes, and a note
 shows the declaration.
+
+### Names
+
+Every scalar cwrap numbers or makes is named after its declaration, so that
+messages, output and visualisation can say `h` and not `scalar 7`:
+
+    scalar h;                  /* "h" */
+    vector u;                  /* "u.x", "u.y" */
+    void f (void)
+    {
+      scalar tmp;              /* "tmp": it hides no scalar */
+      scalar h;                /* "f.h": it hides the global h */
+      {
+        scalar h;              /* "f.h.2": it hides f.h */
+      }
+      static scalar kept;      /* "f.kept": static, always its function's */
+    }
+
+- **No allocation, no copy:** a name is a pointer to a string literal that
+  cwrap writes, in the slot of a global or in `scalar_new_named ("tmp")`;
+  `scalar.c` keeps the pointer.
+- **A local that hides another scalar of its name** (a global, or a local of
+  an outer block) is named after its function, `f.h`, and a deeper one is
+  numbered, `f.h.2`, `f.h.3`, so that the scalars alive in one scope never
+  share a name. cwrap sees what each declaration hides when it reads it. In a
+  `@loop` definition, the loop's name stands for the function's.
+- **Two functions may each have a `tmp` alive at once** (one calls the
+  other): names are labels, not keys, and `scalar_find ()` gives the last
+  made.
+- **API (`src/scalar.h`):**
+
+  | | |
+  |---|---|
+  | `scalar_new_named (name)` | `scalar_new ()`, named |
+  | `scalar_name (s)` | its name, or `NULL` (no name, or not in use) |
+  | `scalar_set_name (s, name)` | names or renames `s`; the string must outlive it, it is not copied |
+  | `scalar_find (name)` | the scalar in use with that name, the last made if several; -1 if none |
+
+  `vector_new_named (names)` and `tensor_new_named (names)` take an array of
+  names, in the order of their scalars.
+- **`scalar_new ()` gives none,** a freed scalar loses its, and its id's next
+  scalar starts with none.
+- **libb-amr's messages use them:** `ghost_ops: scalar zbl (1): its operators
+  would depend on itself, through scalar hl (0)`.
 
 ### A global scalar is never freed
 
@@ -1205,49 +1250,3 @@ Still open: whether a V that is not a name means "cache only", or also covers
 other structs with `n` and `a`, and arrays reached through a path, such as
 `foreach (x in s.arr)`. Arrays need their length from the type, which again
 means stage 3.
-
----
-
-## Future: scalar names
-
-*Deferred (2026-11-11). Not started.*
-
-The aim: every scalar knows the name it was declared with, so that messages,
-output and visualisation can say `h` rather than `scalar 7`.
-
-    scalar h;              /* scalar_name (h) is "h" */
-    vector u;              /* "u.x", "u.y" */
-    void f (void) {
-      scalar tmp;          /* "tmp", while it lives */
-    }
-
-### Proposed
-
-- **The name comes from the declaration,** written by cwrap, nothing for the
-  user to add: the variable's name, and for a vector or tensor its members
-  (`u.x`, `t.x.y`).
-- **Global scalars:** each slot of the section `scalars` already holds the
-  variable's address; it would hold its name too, a pair `{ &h, "h" }`, and
-  `scalar.c`, which numbers them at start-up, records the names with the ids.
-- **Local scalars:** `scalar tmp;` already becomes
-  `scalar tmp __attribute__ ((cleanup (...))) = scalar_new ();`; it would
-  become `... = scalar_new_named ("tmp")`. A freed id forgets its name.
-- **Scalars made by hand:** `scalar_new ()` gives no name (`NULL`), and
-  `scalar_set_name (s, "depth")` gives one, or replaces one, at run time.
-- **API (`src/scalar.h`):** `const char * scalar_name (scalar s)`, and
-  `scalar_find (const char * name)`, the id of the scalar in use with that
-  name, or -1.
-- **Users of it:**
-  - libb-amr's messages: `ghost_ops: scalar h: ...` instead of `scalar 7`;
-  - output and visualisation (libview, libwebgl): fields by name;
-  - reading a field from a file or a command line by name.
-
-### Questions
-
-1. **Names that clash:** two functions each with a local `tmp`, alive at
-   once. Allowed (names are labels, not keys), or qualified (`f.tmp`), or an
-   error for `scalar_find` only?
-2. **`static` scalars in a function:** named `kept`, or `f.kept`?
-3. **An explicit name in the declaration** (`scalar h "depth";`?): wanted,
-   or only `scalar_set_name ()` at run time? The first needs new syntax, which
-   the attribute binding of operators was dropped for.

@@ -334,7 +334,39 @@ static struct ast *parse_block_item (const char *text)
   return item;
 }
 
-struct ast *local_scalars (struct ast *decl)
+static const struct ast *declarator_specs (const struct ast *d);
+static int declarator_indirections (const struct ast *d);
+static struct token *declared_token (struct ast *d);
+
+/* Does v declare a scalar, vector or tensor, plainly (not a pointer)? */
+static int names_scalar (const struct var *v)
+{
+  const struct ast *specs;
+
+  return v && v->kind == SCOPE_VARIABLE && v->decl
+         && (specs = declarator_specs (v->decl)) && scalar_type (specs)
+         && declarator_indirections (v->decl) == 0;
+}
+
+/* The name of the scalars a local declarator d declares, before .x, .y:
+ * "x", "f.x" or "f.x.n" (see translate.h). Records its depth in its var. */
+static const char *local_scalar_name (struct ast *d, const char *function,
+                                      int is_static)
+{
+  struct token *t = declared_token (d);
+  struct var *v = t ? (struct var *)t->binding : NULL;
+  const char *id = ast_declared_name (d), *f = function ? function : "?";
+  int depth = is_static;
+
+  if (v && names_scalar (v->hides) && depth < v->hides->scalar_depth + 1)
+    depth = v->hides->scalar_depth + 1;
+  if (v)
+    v->scalar_depth = depth;
+  return depth == 0 ? id : depth == 1 ? arena_printf ("%s.%s", f, id)
+                                      : arena_printf ("%s.%s.%d", f, id, depth);
+}
+
+struct ast *local_scalars (struct ast *decl, const char *function)
 {
   struct ast *item = decl, *specs, *list, *with_slots;
   const char *parts[MAX_PARTS], *type, *slots = "";
@@ -353,23 +385,39 @@ struct ast *local_scalars (struct ast *decl)
   nparts = scalar_parts (specs, parts);
   is_static = has_token (specs, T_STATIC, NULL);
   for (struct ast *d = list->child, *next; d; d = next) {
-    const char *name = ast_declared_name (d);
+    const char *name = ast_declared_name (d), *named;
 
     next = d->next;
     if (!plain_name (d))
       continue;
+    named = local_scalar_name (d, function, is_static);
     if (is_static) {
-      /* static vector s; static scalar *const slot ... = &s.x; ... */
+      /* static vector s; static const struct __cwrap_scalar_slot slot ...
+       * = { &s.x, "f.s.x" }; ... */
       for (int k = 0; k < nparts; k++)
-        slots = arena_printf ("%s static scalar *const __cwrap_local_slot_%d "
-                              "__attribute__ ((section (\"scalars\"), used)) = &%s%s;",
-                              slots, local_slot++, name, parts[k]);
+        slots = arena_printf ("%s static const struct __cwrap_scalar_slot "
+                              "__cwrap_local_slot_%d __attribute__ ((section "
+                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\" };",
+                              slots, local_slot++, name, parts[k], named,
+                              parts[k]);
     } else {
-      /* scalar x __attribute__ ((cleanup (...))) = scalar_new (); and the
-       * same with vector_new () or tensor_new () */
+      /* scalar x __attribute__ ((cleanup (...))) = scalar_new_named ("x");
+       * vector_new_named ((const char *const []) { "u.x", "u.y" }) for a
+       * vector, and so for a tensor */
+      const char *maker = arena_printf ("scalar_new_named (\"%s\")", named);
+
+      if (nparts > 1) {
+        const char *list = "";
+
+        for (int k = 0; k < nparts; k++)
+          list = arena_printf ("%s%s\"%s%s\"", list, k ? ", " : "", named,
+                               parts[k]);
+        maker = arena_printf ("%s_new_named ((const char *const []) { %s })",
+                             type, list);
+      }
       struct ast *item = parse_block_item (arena_printf (
-        "%s __v __attribute__ ((cleanup (__cwrap_%s_free))) = %s_new ();",
-        type, type, type));
+        "%s __v __attribute__ ((cleanup (__cwrap_%s_free))) = %s;",
+        type, type, maker));
       struct ast *init = item->child->next->child;
       struct ast *placeholder = init->child->child;
 
@@ -430,11 +478,13 @@ static void register_scalars (struct ast *root)
         warn_scalar_initializer (d, scalar_type (specs));
       if (!plain_name (d))
         continue;
-      /* one slot for each scalar: &t.x.x, &t.x.y, ... for a tensor */
+      /* one slot for each scalar, and its name: { &t.x.x, "t.x.x" }, ... */
       for (int k = 0; k < nparts; k++)
-        slots = arena_printf ("%s static scalar *const __cwrap_scalar_slot_%d "
-                              "__attribute__ ((section (\"scalars\"), used)) = &%s%s;",
-                              slots, slot++, ast_declared_name (d), parts[k]);
+        slots = arena_printf ("%s static const struct __cwrap_scalar_slot "
+                              "__cwrap_scalar_slot_%d __attribute__ ((section "
+                              "(\"scalars\"), used)) = { &%s%s, \"%s%s\" };",
+                              slots, slot++, ast_declared_name (d), parts[k],
+                              ast_declared_name (d), parts[k]);
       insert_all_before (next, parse_snippet (slots));
     }
   }

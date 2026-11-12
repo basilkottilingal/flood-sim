@@ -55,6 +55,8 @@ struct parse_status {
   int loop_serial;
   struct stencil_loop *stencil;  /* the foreach () being parsed, or NULL */
   struct stencil_def *stencils;  /* @foreach definitions, newest first */
+  const char *function;   /* the function whose body is parsed, for the
+                           * names of its scalars */
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -70,7 +72,9 @@ struct parse_status {
 /* A declaration in a block, whose scalars and caches get what cwrap gives
  * them: decl, or decl followed by more items. */
 #define LOCAL_DECLARATION(decl)                                         \
-  (status->rejected += local_caches (decl), local_scalars (decl))
+  (status->rejected += local_caches (decl),                             \
+   local_scalars (decl, status->cur_loop ? status->cur_loop->name       \
+                                         : status->function))
 
 #define N(KIND, ...)                                                    \
   ast_node (AST_##KIND, (struct ast *[]) { __VA_ARGS__ },               \
@@ -111,9 +115,14 @@ static struct ast *declared_leaf (const struct ast *d)
 static void declare (struct scope_table *scopes, struct parse_status *status,
                      const struct ast *declarator, enum scope_kind kind)
 {
-  bind_name (status, scope_add (scopes, ast_declared_name (declarator), kind,
-                                declarator),
-             declared_leaf (declarator));
+  const char *name = ast_declared_name (declarator);
+  const struct var *hidden = name ? scope_find (scopes, name) : NULL;
+  struct var *v = scope_add (scopes, name, kind, declarator);
+
+  /* what it hides, for the name of a scalar: see local_scalars () */
+  if (v && hidden != v)
+    v->hides = hidden;
+  bind_name (status, v, declared_leaf (declarator));
 }
 
 static void loop_error (struct parse_status *status, const struct ast *at,
@@ -379,12 +388,15 @@ external_declaration:
   ;
 
 function_definition:
-    decl_specs_typed specs_done declarator enter_function compound_statement
-    leave_function
+    decl_specs_typed specs_done declarator
+                                  { status->function = ast_declared_name ($3);
+                                    $$ = NULL; }
+    enter_function compound_statement leave_function
                                   /* the name is in scope after the definition
                                    * too, as `foreach ()` must know */
                                   { declare (scopes, status, $3, SCOPE_VARIABLE);
-                                    $$ = N (FUNCTION_DEFINITION, $1, $3, $4, $5); }
+                                    $$ = N (FUNCTION_DEFINITION, $1, $3, $5, $6);
+                                    (void) $4; }
   ;
 
 /* A block macro: see translate.h. The parameters and the body share a scope,
@@ -1472,7 +1484,7 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
-  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL, NULL };
+  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL, NULL, NULL };
   int lineno = 1;
   int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 

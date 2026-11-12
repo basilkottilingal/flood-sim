@@ -219,10 +219,10 @@ check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
 check "-dimension=2: a vector has 2 scalars and a tensor 4, numbered or freed each" $?
 
 "$cwrap" -dimension=2 -translate tensor.c -o tensor.out 2> /dev/null &&
-  grep -q '^tensor t; static scalar \*const __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = &t.x.x; .*_slot_4 .* = &t.x.y; .*_slot_5 .* = &t.y.x; .*_slot_6 .* = &t.y.y;$' tensor.out &&
-  grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = tensor_new ();$' tensor.out &&
-  grep -q '^  static vector kept; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.x; static scalar \*const __cwrap_local_slot_[0-9]* .* = &kept.y;$' tensor.out
-check "a tensor gets a slot for each scalar, t.x.x to t.y.y, on its line" $?
+  grep -q '^tensor t; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = { &t.x.x, "t.x.x" }; .*_slot_4 .* = { &t.x.y, "t.x.y" }; .*_slot_5 .* = { &t.y.x, "t.y.x" }; .*_slot_6 .* = { &t.y.y, "t.y.y" };$' tensor.out &&
+  grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = tensor_new_named ((const char \*const \[\]) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });$' tensor.out &&
+  grep -q '^  static vector kept; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.x, "sum.kept.x" }; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* .* = { &kept.y, "sum.kept.y" };$' tensor.out
+check "a tensor gets a slot for each scalar, t.x.x to t.y.y, on its line, each with its name" $?
 
 "$cwrap" -dimension=3 -Wall tensor.c -o tensor3 2> /dev/null &&
   [ "$(./tensor3 | tr '\n' ' ')" = "0 1 2 4 5 7 8 16 16 40 16 2312 " ]
@@ -237,22 +237,22 @@ check "without -dimension, scalar and vector are the program's own names" $?
 check "-dimension takes only 1, 2 or 3" $?
 
 "$cwrap" -dimension=1 -translate scalar.c -o scalar.out 2> scalar.log
-[ "$(grep -o '__attribute__ ((section ("scalars"), used)) = &[a-z]*;' scalar.out |
-     sed 's/.*&//' | tr '\n' ' ')" = "a; b; d; s; last; " ] &&
-  grep -q '^scalar a; static scalar \*const __cwrap_scalar_slot_0 ' scalar.out &&
+[ "$(grep -o '__attribute__ ((section ("scalars"), used)) = { &[a-z]*, "[a-z]*" };' scalar.out |
+     sed 's/.*&//' | tr '\n' ' ')" = 'a, "a" }; b, "b" }; d, "d" }; s, "s" }; last, "last" }; ' ] &&
+  grep -q '^scalar a; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_0 ' scalar.out &&
   grep -q '^extern scalar e;$' scalar.out && grep -q '^typedef scalar t;$' scalar.out &&
   grep -q '^int g (void) { scalar local = 0; return local; }$' scalar.out
-check "each global scalar gets a slot in the section scalars" $?
+check "each global scalar gets a slot in the section scalars, with its name" $?
 
 "$cwrap" -dimension=1 -w scalar.c -o scalar 2> scalar.log; ./scalar
 [ $? = 10 ]
 check "the constructor numbers the global scalars 0 to 4" $?
 
 "$cwrap" -dimension=1 -translate scalar_local.c -o scalar_local.out &&
-  grep -q '^  scalar a __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new ();$' scalar_local.out &&
-  grep -q '^  static scalar s; static scalar \*const __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = &s;$' scalar_local.out &&
+  grep -q '^  scalar a __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new_named ("a");$' scalar_local.out &&
+  grep -q '^  static scalar s; static const struct __cwrap_scalar_slot __cwrap_local_slot_[0-9]* __attribute__ ((section ("scalars"), used)) = { &s, "counted.s" };$' scalar_local.out &&
   grep -q '^  scalar kept = scalar_new ();$' scalar_local.out
-check "local scalars get an id from scalar_new (), and a cleanup that frees it" $?
+check "local scalars get a named id from scalar_new_named (), and a cleanup that frees it" $?
 
 "$cwrap" -dimension=1 -Wall scalar_local.c -o scalar_local 2> scalar_local.log &&
   [ "$(./scalar_local | tr '\n' ' ')" = "16 in use 3 kept 2 gs 1 globals 2 " ] &&
@@ -422,8 +422,13 @@ check "a global scalar is never freed: at file scope, static, extern, a member, 
   (ulimit -c 0; ./scalar_global_abort > scalar_global_abort.out 2> scalar_global_abort.err
    echo $? > scalar_global_abort.rc) 2> /dev/null &&
   [ "$(cat scalar_global_abort.rc)" -ne 0 ] && [ ! -s scalar_global_abort.out ] &&
-  grep -q "^scalar_free: scalar 0 is global, numbered once for the whole run: it is never freed" scalar_global_abort.err
+  grep -q "^scalar_free: scalar zb (0) is global, numbered once for the whole run: it is never freed" scalar_global_abort.err
 check "a global scalar freed through a pointer stops the run" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra scalar_names.c -o scalar_names 2> scalar_names.log &&
+  [ "$(./scalar_names)" = "h zb u.x u.y | inner.h inner.h.2 1 1 inner.kept tmp 1 inner.u.x inner.u.y | - made 1 - -1" ] &&
+  [ ! -s scalar_names.log ]
+check "scalar names: as declared, a local hiding a scalar qualified, deeper numbered, static its function's, found, set, forgotten" $?
 
 "$cwrap" -dimension=2 -c stencil_foreach_bad.c -o stencil_foreach_bad.o 2> stencil_foreach_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_foreach_bad.o ] &&

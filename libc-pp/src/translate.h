@@ -22,10 +22,19 @@ void check_scalar_assignment (const struct scope_table *scopes,
 /* The euclidean dimension, 1 to 3, from -dimension=; 0 turns scalars off. */
 void translate_set_dimension (int dimension);
 
-/* Rewrites the scalars that decl, a declaration in a function, declares:
+/* Rewrites the scalars that decl, a declaration in function, declares:
  *
- *   scalar x;          becomes  scalar x __attribute__ ((cleanup (...))) = scalar_new ();
- *   static scalar s;   becomes  static scalar s; static scalar *const slot ... = &s;
+ *   scalar x;          becomes  scalar x __attribute__ ((cleanup (...)))
+ *                                 = scalar_new_named ("x");
+ *   static scalar s;   becomes  static scalar s; static const struct
+ *                                 __cwrap_scalar_slot slot ... = { &s, "f.s" };
+ *
+ * Each is named after its declaration, a string literal, so nothing is
+ * copied or allocated: "x", or "f.x" if it hides another scalar of that name
+ * (a global, or a local of an outer block: then "f.x.2", "f.x.3", ...), so
+ * that two scalars alive in one scope never share a name; a static one is
+ * always "f.s". A vector's are "u.x", "u.y", .... function may be a @loop's
+ * name, in its definition.
  *
  * so that x gets an id from scalar_new (), and scalar_free (x) runs however
  * its scope ends, while s is numbered at startup like a global scalar. A
@@ -33,7 +42,7 @@ void translate_set_dimension (int dimension);
  * names with an initializer, and extern, register and thread-local scalars are
  * left alone. The parser calls this as it reduces a declaration in a block,
  * and uses what it returns: decl, or decl with its slots after it. */
-struct ast *local_scalars (struct ast *decl);
+struct ast *local_scalars (struct ast *decl, const char *function);
 
 /* The loop `foreach (v in V) body`, given its tokens and body, rewritten as
  *
