@@ -801,6 +801,12 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     `foreach () { p[] = x; q[] = p[1,0] - p[-1,0]; }` reads the ghosts of
     `p` stale, and its neighbours old or new by the order of the cells.
     Write `p` in a `foreach ()` of its own first.
+  - **Loops whose ghosts the caller keeps:** a stencil loop whose block
+    loop gives `ghosts_by_caller`, as libb-amr's `foreach_level (l)` and
+    `foreach_level_or_leaf (l)` (one level of the tree, for multigrid),
+    keeps every rule above, but cwrap writes no update or mark around it.
+    Its caller updates the ghosts of that level (`ghosts_update_level (s,
+    l)`) and marks what it wrote.
 - **`foreach_neighbor (r)` moves the point,** as in Basilisk: its statement
   runs for each cell within `r` of the point along every axis, the point's
   own included, and `s[]`, `s[i,j]`, `x`, `y`, `z` and `Delta` are then

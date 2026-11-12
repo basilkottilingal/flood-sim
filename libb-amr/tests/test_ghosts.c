@@ -526,6 +526,76 @@ int main (void)
     CHECK (prolongation_in_range (&pr));
   }
 
+  /* 9c. the grid at each depth l (multigrid): its cells cover the domain
+   * once; a linear field on every node, parents too, has every ghost of
+   * the grid exact after ghosts_update_level (u, l), which marks u stale;
+   * on a full level, foreach_level (l) covers the domain too */
+  {
+    BlockShape sh = tree_block_shape ();
+    double vol = 1, err = 0, cover = 0;
+    for (int a = 0; a < dimension; a++)
+      vol *= tree_get_size ();
+    int ok = 1;
+    for (int l = 0; l <= tree_get_depth (); l++) {
+      double sum = 0;
+      foreach_level_or_leaf (l) {
+        double v = Delta;
+        for (int a = 1; a < dimension; a++)
+          v *= Delta;
+        sum += v;
+      }
+      cover = fmax (cover, fabs (sum - vol));
+      if (l <= tree_get_depth_min ()) {
+        double full = 0;
+        foreach_level (l) {
+          double v = Delta;
+          for (int a = 1; a < dimension; a++)
+            v *= Delta;
+          full += v;
+        }
+        cover = fmax (cover, fabs (full - vol));
+      }
+      morton (TREE_ROOT_INDEX) {
+        Real * b = block_data (sblocks, u);
+        block_cells (sh, 0) {
+          XOF (x);
+          double r [3];
+          centre ((Index) {IJKL}, x, r);
+          b [c] = (Real) linear (r);
+        }
+      }
+      ghosts_update (u);                  /* clean: then marked by it */
+      /* every ghost wrong, and the parents coarser than l: what a coarse
+       * leaf reads of them must come from the grid, restricted */
+      morton (TREE_ROOT_INDEX) {
+        Real * b = block_data (sblocks, u);
+        int parent = level < l && !(node->flags & BAMR_NODE_LEAF);
+        block_cells (sh, sh.g) {
+          XOF (x);
+          int out = parent;
+          for (int a = 0; a < dimension; a++)
+            out |= x [a] < 0 || x [a] >= sh.m;
+          if (out)
+            b [c] = (Real) 1e30;
+        }
+      }
+      ghosts_update_level (u, l);
+      ok &= ghosts_is_dirty (u);
+      foreach_level_or_leaf_block (l) {
+        const Real * b = block_data (sblocks, u);
+        block_cells (sh, sh.g) {
+          XOF (x);
+          double r [3];
+          centre ((Index) {IJKL}, x, r);
+          err = fmax (err, fabs (b [c] - linear (r)));
+        }
+      }
+    }
+    fprintf (stderr, "  (levels 0 to %d: cover %g, ghost error %g)\n",
+             tree_get_depth (), cover, err);
+    CHECK (ok && cover < 1e-12 * vol && err < tol);
+  }
+
   /* 10. a coupled prolongation: the depth hl from the surface hl + zbl,
    * the bed zbl made first though hl's id is lower, at level jumps, walls
    * and in refined leaves; zbl stale makes hl stale; a cycle, a wrong

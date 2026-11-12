@@ -437,6 +437,10 @@
   ..                                  parents is not 0
   ..   ghosts_update_list (n, s, parents)   the function under them all
   ..
+  ..   ghosts_update_level (s, l)    the ghosts of the grid at depth l
+  ..                        (foreach_level_or_leaf (l), block-loops.h), for
+  ..                        multigrid: the parents coarser than l restricted
+  ..                        from that grid, not from the leaves; s alone
   ..   tree_restrict (s)    each parent: its restriction, finest first
   ..   block_ghosts (p, s)  the ghosts of the node p only. The coarser leaves
   ..                        around it must have valid ghosts, and the parents
@@ -455,6 +459,7 @@
                         (int []) {__VA_ARGS__}, 1)
 
   void ghosts_update_list    (int n, const int * s, int parents);
+  void ghosts_update_level   (int s, int l);
   void ghosts_update_scalars (int parents);
 
   /*

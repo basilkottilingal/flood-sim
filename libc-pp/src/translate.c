@@ -2105,6 +2105,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                               struct ast *body, int *rejected)
 {
   int multi = 0, has_coarse = 0, has_child = 0, *level, *is_child;
+  int by_caller = 0;                      /* ghosts kept by the caller */
   const char *coarse_sblocks, *child_sblocks, *cc, *fc, *sgn;
   int cell_uses[NRESERVED] = { 0 }, (*mover_uses)[NRESERVED], *moved;
   const struct loop_def *leaf = def ? def->leaf : NULL;
@@ -2147,6 +2148,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
 
   /* Loops over two levels, by what their loops give: see translate.h */
   multi = loop_gives (cell, "cc") || loop_gives (cell, "fc");
+  /* and loops whose ghosts their caller keeps: see translate.h */
+  by_caller = loop_gives (leaf, "ghosts_by_caller");
   has_coarse = loop_gives (leaf, "coarse_sblocks") && loop_gives (cell, "cc")
                && loop_gives (cell, "sgn");
   has_child = loop_gives (leaf, "child_sblocks") && loop_gives (cell, "fc");
@@ -2300,6 +2303,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
         diag (u->file, u->line, DIAG_NOTE, "'%s' is written here",
               expression_text (written[w].at));
       }
+  if (by_caller)
+    nwritten = nneeded = 0;               /* checked above; none emitted */
   if ((nwritten || nneeded) && !has_ghosts) {
     stencil_error (rejected, kw, "foreach () keeps the ghosts of the scalars "
                    "it writes up to date: it needs ghosts_mark_dirty (), "

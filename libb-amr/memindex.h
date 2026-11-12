@@ -23,6 +23,8 @@
 #ifndef _MEMINDEX_H_
 #define _MEMINDEX_H_
 
+  #include <stddef.h>                     /* NULL */
+
   #ifndef dimension
   #  error "dimension must be defined as 1, 2 or 3"
   #elif (dimension < 1) || (dimension > 3)

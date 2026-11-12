@@ -585,8 +585,10 @@ Deferred; none started.
    along a row instead of recomputed. Only worth it if 2D prolongation
    shows up in a profile: after the range check, the wavelet in 2D is
    faster than the old in-block one for every operator.
-5. **Multigrid:** `coarse ()` inside `foreach ()` and the loops it needs,
-   with four questions open: see `multigrid.md`.
+5. **Multigrid:** a first version is done (`liblinear-algebra`): the
+   loops over a level (`foreach_level (l)`, `foreach_level_or_leaf (l)`)
+   and `ghosts_update_level (s, l)`, called explicitly. Still open: lazy
+   ghosts per level, `coarse ()` inside `foreach ()`: see `multigrid.md`.
 
 ## Compile-time block size
 

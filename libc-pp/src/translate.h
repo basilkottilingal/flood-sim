@@ -254,7 +254,14 @@ void stencil_mover_begin (struct stencil_loop *loop, struct ast *kw,
  *
  * In such a loop, an offset on the point's own level (s[1]) and
  * foreach_neighbor () are errors, and no ghost is tracked: it runs inside
- * the ghost update itself. coarse () only reads. */
+ * the ghost update itself. coarse () only reads.
+ *
+ * A loop whose block loop gives ghosts_by_caller (libb-amr's foreach_level
+ * (l), on a level of the tree, not its leaves) has every rule of foreach (),
+ * offsets and their reach checked, a write at an offset an error and a read
+ * of a neighbour the loop writes a warning; but no ghost update or mark is
+ * written around it: its caller updates the ghosts of that level, and marks
+ * what it wrote. */
 struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
                             struct ast *open, struct ast *args,
                             struct ast *close, int *rejected);

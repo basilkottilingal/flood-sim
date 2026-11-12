@@ -131,3 +131,20 @@ enum { BAMR_COARSE_REACH = 1 };
 
 @foreach foreach_up () = mock_up () mock_up_cells (tree_block_shape ());
 @foreach foreach_down () = mock_down () mock_down_cells (tree_block_shape (), child);
+
+/* A loop on a level whose ghosts its caller keeps, as libb-amr's
+ * foreach_level (l): the leaves here, at level l; its block loop gives
+ * ghosts_by_caller, so no update or mark is written around it */
+@loop mock_level (int l) : i, j, level, sblocks, ghosts_by_caller
+{
+  int ghosts_by_caller = 1;
+  (void) ghosts_by_caller;
+  for (int i = 0; i < NLEAF; i++) {
+    int j = 0, level = l;
+    (void) j, (void) level;
+    void *** sblocks = leaf_blocks (i);
+    {...}
+  }
+}
+
+@foreach foreach_mock_level (int l) = mock_level (l) foreach_cell (tree_block_shape (), 0);

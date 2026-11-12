@@ -494,6 +494,39 @@ void tree_restrict (int s)
       @restriction (o.restriction, o.restriction_uses) (tc->all [q].p, s);
 }
 
+/*
+.. The ghosts of the grid at depth l, foreach_level_or_leaf (l), for s
+.. alone: what the levels of a multigrid cycle need, without the
+.. restriction of the leaves that ghosts_update () does first, as on level
+.. l s is a field of its own (a correction).
+..   1. The parents of levels depth_min .. l - 1, finest first, restricted
+..      from the grid: a coarse leaf of the grid reads its neighbours of its
+..      own level, which may be parents. Below depth_min no leaf is coarser
+..      than l, and nothing is restricted. Their values are overwritten.
+..   2. The ghosts of the grid's leaves coarser than l, coarsest first, as
+..      a finer one at a level jump prolongs from their first ghost layer;
+..      then of its nodes of level l.
+.. Then s is marked stale: its leaves' ghosts are the grid's now, and a
+.. foreach () reading them makes them again. What s's operators depend on
+.. is not updated: s's alone.
+*/
+void ghosts_update_level (int s, int l)
+{
+  const TreeCaches * tc = tree_caches ();
+  int L = block_level_clamp (l);
+  if (L < 0)
+    return;
+  for (int k = L - 1; k >= tree_get_depth_min (); k--)
+    for (int q = tc->level_first [k]; q < tc->level_first [k + 1]; q++)
+      if (tree_has_children (tc->by_level [q].node))
+        block_restrict (tc->by_level [q].p, s);
+  for (int q = tc->leaf_first [0]; q < tc->leaf_first [L]; q++)
+    block_ghosts (tc->leaves_by_level [q].p, s);
+  for (int q = tc->level_first [L]; q < tc->level_first [L + 1]; q++)
+    block_ghosts (tc->by_level [q].p, s);
+  ghosts_mark_dirty (s);
+}
+
 void ghosts_update_list (int n, const int * given, int parents)
 {
   if (n <= 0)

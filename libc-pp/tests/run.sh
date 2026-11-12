@@ -454,6 +454,18 @@ check "@foreach: a call inside a stencil loop to a function that runs one, direc
   [ "$(./stencil_ghosts)" = "updated 0 4 | stale 14" ] && [ ! -s stencil_ghosts.log ]
 check "foreach (): the ghosts of a scalar read at an offset, updated only if written since; A[k] stands for all of A" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_by_caller.c -o stencil_by_caller 2> stencil_by_caller.log &&
+  [ "$(./stencil_by_caller)" = "level: updated | stale 0; then: updated | stale 1" ] &&
+  [ ! -s stencil_by_caller.log ]
+check "a loop whose block loop gives ghosts_by_caller: no ghost update or mark around it, foreach () still marking" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_by_caller_bad.c -o stencil_by_caller_bad.o 2> stencil_by_caller_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_by_caller_bad.o ] &&
+  [ "$(grep -o '^stencil_by_caller_bad.c:[0-9]*: error' stencil_by_caller_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 " ] &&
+  grep -q "^stencil_by_caller_bad.c:6: error: 'p\[1\]' writes a cell other than its own" stencil_by_caller_bad.log &&
+  grep -q "^stencil_by_caller_bad.c:9: warning: 'p\[1\]' reads a neighbour of 'p', which this foreach () writes" stencil_by_caller_bad.log
+check "ghosts_by_caller keeps the rules: a write at an offset an error, a neighbour of a scalar written a warning" $?
+
 "$cwrap" -dimension=2 -Wall -c stencil_dep.c -o stencil_dep.o 2> stencil_dep.log &&
   [ "$(grep -c 'warning:' stencil_dep.log)" = 1 ] &&
   grep -q "^stencil_dep.c:7: warning: 'p\[1,0\]' reads a neighbour of 'p', which this foreach () writes" stencil_dep.log &&

@@ -1,7 +1,26 @@
 # Multigrid: a plan
 
-*Deferred (2026-11-11). Nothing here is implemented yet. It touches libb-amr
-(loops, ghost state) and cwrap (`libc-pp`: rules of stencil loops).*
+*Planned 2026-11-11. A first version is done (2026-11-12), smaller than
+this plan: the solver is `liblinear-algebra/multigrid.[ch]`.*
+
+**Done, as decided then:**
+- `foreach_level (l)` and `foreach_level_or_leaf (l)` (A), on the tree's
+  lists by level (`tree_caches ()`), in `block-loops.h`.
+- `ghosts_update_level (s, l)` (C, in part): the ghosts of the grid at depth
+  l, the parents coarser than l restricted from that grid first. The
+  restriction is needed after all: a coarse leaf of the grid reads its
+  neighbours of its own level, which may be parents. Called explicitly by
+  the solver: the level loops give `ghosts_by_caller`, and cwrap writes no
+  update or mark around them.
+- The residual goes down by the scalar's restriction (`tree_restrict`), the
+  correction up by its prolongation (`block_prolong`): no `coarse ()` in a
+  level loop, and none of B, D or E needed yet.
+- The root (question 4): settled, as the tree always keeps level 1
+  (`tree ()`, `adapt_wavelet ()`).
+
+**Still open:** stale bits per level and lazy updates by cwrap (C), then
+`coarse ()` in `foreach ()` (B), the `filling` marker (D) and the reach per
+loop (E). The plan below is as it was written.
 
 The aim: geometric multigrid on the block tree, written with cwrap's stencil
 syntax, as in Basilisk: `coarse ()` read from loops over levels, and in

@@ -607,6 +607,70 @@
   }
 
   /*
+  .. The blocks of one level l of the tree, for multigrid, from the tree's
+  .. lists (tree_caches ()), with IJKL, node and sblocks:
+  ..
+  ..   foreach_level_block (l)          every node of level l, leaves and
+  ..                                    parents
+  ..   foreach_level_or_leaf_block (l)  the grid at depth l: the leaves
+  ..                                    coarser than l, coarsest first, then
+  ..                                    every node of level l
+  ..
+  .. Below tree_get_depth_min () the two are the same, every level being
+  .. full. They give ghosts_by_caller: in the stencil loops over them
+  .. (foreach_level (l), foreach_level_or_leaf (l), below) cwrap writes no
+  .. ghost update or mark; the caller updates the ghosts of the level
+  .. (ghosts_update_level (), block-ghosts.h) and marks what it wrote. The
+  .. tree must not change in them.
+  */
+  static inline int block_level_clamp (int l)
+  {
+    return l < 0 ? -1 : l > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH : l;
+  }
+
+  @loop foreach_level_block (int l) : IJKL, node, sblocks, ghosts_by_caller
+  {
+    const TreeCaches * tc = tree_caches ();
+    unsigned generation = tree_generation;
+    int ghosts_by_caller = 1, L = block_level_clamp (l);
+    (void) ghosts_by_caller;
+    int q0 = L < 0 ? 0 : tc->level_first [L], q1 = L < 0 ? 0 : tc->level_first [L + 1];
+    for (int q = q0; q < q1; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_level");
+      INDEX_UNPACK (tc->by_level [q].p);
+      BAMRNode * node = tc->by_level [q].node;
+      void *** sblocks = node->s;
+      (void) node, (void) sblocks;
+      {...}
+    }
+  }
+
+  @loop foreach_level_or_leaf_block (int l) : IJKL, node, sblocks, ghosts_by_caller
+  {
+    const TreeCaches * tc = tree_caches ();
+    unsigned generation = tree_generation;
+    int ghosts_by_caller = 1, L = block_level_clamp (l);
+    (void) ghosts_by_caller;
+    /* the leaves of levels 0 .. L - 1, then the nodes of level L */
+    int nleaf = L < 0 ? 0 : tc->leaf_first [L] - tc->leaf_first [0];
+    int nlevel = L < 0 ? 0 : tc->level_first [L + 1] - tc->level_first [L];
+    for (int q = 0; q < nleaf + nlevel; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_level_or_leaf");
+      const TreeItem * it = q < nleaf ? &tc->leaves_by_level [q]
+                                      : &tc->by_level [tc->level_first [L] + q - nleaf];
+      INDEX_UNPACK (it->p);
+      BAMRNode * node = it->node;
+      void *** sblocks = node->s;
+      (void) node, (void) sblocks;
+      {...}
+    }
+  }
+
+  /*
   .. Stencil loops, for cwrap's s[] (see libc-pp/README.md, "Stencils"):
   ..
   ..   foreach () { ... }    every interior cell of every leaf, the ghosts
@@ -618,6 +682,19 @@
   .. does that, not a stencil loop.
   */
   @foreach foreach () = foreach_leaf () foreach_cell (tree_block_shape (), 0);
+
+  /*
+  .. On one level, for multigrid (see foreach_level_block above): every
+  .. interior cell of every node of level l, or of the grid at depth l. The
+  .. rules of foreach () hold, offsets and their reach checked, but the
+  .. ghosts are the caller's: ghosts_update_level (s, l) before reading a
+  .. neighbour, and ghosts_mark_dirty (s) after writing s, if a foreach ()
+  .. reads its neighbours later.
+  */
+  @foreach foreach_level (int l)
+    = foreach_level_block (l) foreach_cell (tree_block_shape (), 0);
+  @foreach foreach_level_or_leaf (int l)
+    = foreach_level_or_leaf_block (l) foreach_cell (tree_block_shape (), 0);
 
   /*
   .. The ghost layers, as a constant that outlives the preprocessor: cwrap
