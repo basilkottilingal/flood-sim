@@ -56,19 +56,21 @@ static int ghost_uses_of (int s, int * d)
   return n;
 }
 
-/* ghost_dependents again, from every scalar's operators, and through them */
+/* ghost_dependents again, from every scalar's operators, and through them:
+.. over the scalars in use only, as an id not in use has none (reset when
+.. made and when freed), and what one depends on is global, so in use */
 static void ghost_dependents_rebuild (void)
 {
   int d [GHOST_DEPS_MAX];
 
   memset (ghost_dependents, 0, sizeof ghost_dependents);
-  for (int s = 0; s < NSCALAR_MAX; s++)
+  foreach_scalar (s)
     for (int k = 0, n = ghost_uses_of (s, d); k < n; k++)
       ghost_dependents [d [k]][s / 64] |= 1ull << (s % 64);
   for (int changed = 1; changed; ) {
     changed = 0;
-    for (int t = 0; t < NSCALAR_MAX; t++)
-      for (int s = 0; s < NSCALAR_MAX; s++)
+    foreach_scalar (t)
+      foreach_scalar (s)
         if ((ghost_dependents [t][s / 64] >> (s % 64)) & 1)
           for (int w = 0; w < GHOSTS_DIRTY_WORDS; w++)
             if (ghost_dependents [s][w] & ~ghost_dependents [t][w]) {
@@ -81,7 +83,7 @@ static void ghost_dependents_rebuild (void)
 /* a scalar that depends on itself, or -1 */
 static int ghost_dependents_cycle (void)
 {
-  for (int s = 0; s < NSCALAR_MAX; s++)
+  foreach_scalar (s)
     if ((ghost_dependents [s][s / 64] >> (s % 64)) & 1)
       return s;
   return -1;
