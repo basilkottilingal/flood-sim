@@ -73,12 +73,51 @@
     BAMR_NODE_COARSEN = 16,       /* may be coarsened, with its family */
   } BAMRNodeFlags;
 
-  typedef struct
+  typedef struct BAMRNode_
   {
     int flags;
     int pid;
     void *** s;     /* s [id/w][id%w]: the block of scalar id, or NULL */
   } BAMRNode;
+
+  /*
+  .. The tree's nodes in lists, made again only after the tree changes
+  .. (tree (), tree_refine (), tree_coarsen (), tree_destroy (), and so
+  .. adapt_wavelet ()): what the loops over the tree read, instead of
+  .. walking it each time. Each list is in Morton order (morton-curve.h: a
+  .. leaf as it is reached, a parent after its children), so that a loop over
+  .. one visits the nodes as the walk did.
+  ..
+  ..   tree_caches ()   the lists, made again first if the tree changed
+  ..   tree_generation  changes with the tree: a loop over a list checks it,
+  ..                    and stops the run (tree_changed_under ()) if the
+  ..                    tree changed during the loop: refine or coarsen
+  ..                    after the loop, not in it.
+  */
+  typedef struct
+  {
+    Index p;
+    struct BAMRNode_ * node;
+  } TreeItem;
+
+  typedef struct
+  {
+    const TreeItem * all;          /* every node                       */
+    int nall;
+    const TreeItem * leaves;       /* the leaves                       */
+    int nleaves;
+    const TreeItem * by_level;     /* every node of level l: by_level
+                                      [level_first [l] .. level_first
+                                      [l + 1])                         */
+    int level_first [BAMR_MAX_DEPTH + 2];
+    const TreeItem * leaves_by_level;  /* the same, leaves only        */
+    int leaf_first [BAMR_MAX_DEPTH + 2];
+    int depth;                     /* the deepest level with a node    */
+  } TreeCaches;
+
+  const TreeCaches * tree_caches (void);
+  extern unsigned tree_generation;
+  void tree_changed_under (const char * loop);
 
   /*
   .. tree_node (IJKL): the node there, or NULL. tree_is_allocated (IJKL):

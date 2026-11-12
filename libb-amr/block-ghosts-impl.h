@@ -378,47 +378,15 @@ void block_ghosts (Index p, int s)
 /* every node, level by level                                             */
 /* ---------------------------------------------------------------------- */
 
-/*
-.. The nodes, by level: at [first [l] .. first [l + 1]) those of level l,
-.. leaves only, or parents too. Each in Morton order.
-*/
-typedef struct
-{
-  Index * at;
-  int first [BAMR_MAX_DEPTH + 2];
-  int depth;
-} Levels;
-
-static Levels levels_new (int parents)
-{
-  Levels L = { .depth = tree_get_depth () };
-  int count [BAMR_MAX_DEPTH + 1] = {0};
-  morton (TREE_ROOT_INDEX)
-    if (parents || (node->flags & BAMR_NODE_LEAF))
-      count [level]++;
-  L.first [0] = 0;
-  for (int l = 0; l <= L.depth; l++)
-    L.first [l + 1] = L.first [l] + count [l];
-  L.at = malloc ((size_t) (L.first [L.depth + 1] + 1) * sizeof (Index));
-  if (!L.at)
-    abort ();
-  int next [BAMR_MAX_DEPTH + 1];
-  for (int l = 0; l <= L.depth; l++)
-    next [l] = L.first [l];
-  morton (TREE_ROOT_INDEX)
-    if (parents || (node->flags & BAMR_NODE_LEAF))
-      L.at [next [level]++] = (Index) {IJKL};
-  return L;
-}
-
 /* each parent, finest first: in Morton order a parent comes after its
-.. children, so one pass from the leaves up */
+.. children, so one pass over the tree's list from the leaves up */
 void tree_restrict (int s)
 {
   ScalarOps o = scalar_get_ops (s);
-  morton (TREE_ROOT_INDEX)
-    if (tree_has_children (node))
-      @restriction (o.restriction, o.restriction_uses) ((Index) {IJKL}, s);
+  const TreeCaches * tc = tree_caches ();
+  for (int q = 0; q < tc->nall; q++)
+    if (tree_has_children (tc->all [q].node))
+      @restriction (o.restriction, o.restriction_uses) (tc->all [q].p, s);
 }
 
 void ghosts_update_list (int n, const int * given, int parents)
@@ -428,7 +396,10 @@ void ghosts_update_list (int n, const int * given, int parents)
   /* each after those it depends on, the stale ones of those with them */
   int s [NSCALAR_MAX];
   n = ghost_order (n, given, s);
-  Levels L = levels_new (1);
+  /* the nodes by level, each in Morton order: the tree's list */
+  const TreeCaches * tc = tree_caches ();
+  const TreeItem * at = tc->by_level;
+  const int * first = tc->level_first;
   ScalarOps * o = malloc ((size_t) n * sizeof (ScalarOps));
   if (!o)
     abort ();
@@ -436,28 +407,27 @@ void ghosts_update_list (int n, const int * given, int parents)
     o [q] = scalar_get_ops (s [q]);
 
   /* 1. restriction, finest first; within a level, at once */
-  for (int l = L.depth - 1; l >= 0; l--)
+  for (int l = tc->depth - 1; l >= 0; l--)
   {
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
-    for (int b = L.first [l]; b < L.first [l + 1]; b++)
-      if (tree_has_children (index_node (L.at [b])))
+    for (int b = first [l]; b < first [l + 1]; b++)
+      if (tree_has_children (at [b].node))
         for (int q = 0; q < n; q++)
-          @restriction (o [q].restriction, o [q].restriction_uses) (L.at [b], s [q]);
+          @restriction (o [q].restriction, o [q].restriction_uses) (at [b].p, s [q]);
   }
 
   /* 2. the ghosts, coarsest first; within a level, at once */
-  for (int l = 0; l <= L.depth; l++)
+  for (int l = 0; l <= tc->depth; l++)
   {
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
-    for (int b = L.first [l]; b < L.first [l + 1]; b++)
-      if (parents || (index_node (L.at [b])->flags & BAMR_NODE_LEAF))
+    for (int b = first [l]; b < first [l + 1]; b++)
+      if (parents || (at [b].node->flags & BAMR_NODE_LEAF))
         for (int q = 0; q < n; q++)
-          block_ghosts (L.at [b], s [q]);
+          block_ghosts (at [b].p, s [q]);
   }
   for (int q = 0; q < n; q++)
     ghosts_dirty [s [q] / 64] &= ~(1ull << (s [q] % 64));
   free (o);
-  free (L.at);
 }
 
 void ghosts_update_dirty (int n, const int * s)

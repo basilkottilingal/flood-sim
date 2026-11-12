@@ -1,6 +1,40 @@
-# Traversals from caches, not from morton (): a plan
+# Traversals from caches, not from morton ()
 
-*Deferred (2026-11-11). Nothing here is implemented yet.*
+*Done (2026-11-12), as below; the plan it followed is kept after it.*
+
+## What there is
+
+- **The lists** (`tree.h`, `tree_caches ()`): every node, the leaves, and
+  each by level (`by_level` with `level_first`, `leaves_by_level` with
+  `leaf_first`), each entry an `Index` and its node's pointer, all in Morton
+  order. Plain arrays in `tree.c` that only grow: no allocation for each
+  update, and not cwrap caches, as a static flag is all they need.
+- **Made again only when read after a change:** `tree.c` marks them
+  (`caches_are_dirty`, and `tree_generation` counts the changes) where a
+  node is made or freed (`add_children ()`, `remove_children ()`), at the
+  root (`tree ()`) and in `tree_destroy ()`. Every refinement and coarsening,
+  `adapt_wavelet ()`'s too, goes through these. One `morton ()` walk makes
+  them all.
+- **Read by:** `foreach_leaf ()`, `foreach_leaf_parallel ()` (no gathering
+  of its own any more), `foreach_node ()` (new, `morton-curve.h`: every node),
+  `tree_restrict ()`, the ghost update (its lists by level, which it
+  allocated and walked twice for at every call), `grid_scalar_alloc_blocks
+  ()`, `grid_scalar_free_blocks ()`, the counts of `grid-scalar.c`, adapt.c
+  and `tree_block_indices ()`. `morton ()` is left for the lists themselves
+  and for a subtree.
+- **A change of the tree during such a loop stops the run**
+  (`tree_changed_under ()`): each loop checks `tree_generation` at each
+  node, one compare per block. No code here did that: each collects first,
+  then refines or coarsens.
+- **Measured** (3D, 687 leaves, -O2): a `foreach_leaf ()` over the leaves
+  0.37 µs, from 7.1 µs walking the tree; one over their cells about 4%
+  faster; the ghost update the same, within noise (the ghosts dominate it).
+  Every cell of every block bit for bit as before (1D-3D, double and float).
+- **Tested** (`tests/test_tree.c`): the lists against a walk, node for node
+  and by level, after refining and after coarsening; a refinement in
+  `foreach_leaf ()` stopping the run, in a child process.
+
+## The plan it followed
 
 The aim: loops over the tree read a list of nodes kept in a cwrap `cache`,
 made again only when the tree changes. `morton ()` walks the tree only to

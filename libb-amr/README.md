@@ -126,6 +126,17 @@ scalars it updates, and a new or freed scalar starts clean. Writes through
 `block_data ()` by hand mark nothing: call `ghosts_update ()`, or
 `ghosts_mark_dirty ()`.
 
+## Tree caches
+
+The loops over the tree (`foreach_leaf ()`, `foreach_leaf_parallel ()`,
+`foreach_node ()`, the ghost update, restriction, block allocation) read
+lists of the tree's nodes, `tree_caches ()` (`tree.h`): every node, the
+leaves, and each by level, in Morton order. They are made again, by one
+walk, only when read after the tree changed (`tree ()`, `tree_refine ()`,
+`tree_coarsen ()`, `tree_destroy ()`): a `foreach_leaf ()` no longer walks
+the tree (0.37 µs over 687 leaves in 3D, from 7.1 µs). The tree must not
+change during such a loop: that stops the run. See `traversal-caches.md`.
+
 ## Tests
 
     sh tests/run.sh
@@ -135,7 +146,8 @@ It builds each test in `tests/` with cwrap (`CWRAP`, by default
 (`-DBAMR_SINGLE`), under AddressSanitizer and UBSan, and fails on any warning:
 - `test_pool.c`: the hot and cold free lists, with page faults counted;
 - `test_tree.c`: counts, the scalar hooks, Morton order, refinement, and the
-  loops of `tree.h`;
+  loops of `tree.h`; the tree's lists against a walk after refining and
+  coarsening, and a change of the tree in `foreach_leaf ()` stopping it;
 - `test_blocks.c`: every loop of `block-loops.h` against `block_cells`, in
   both layouts and every halo, and `block_at ()`;
 - `test_ghosts.c`:

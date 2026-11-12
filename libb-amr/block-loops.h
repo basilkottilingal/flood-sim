@@ -559,40 +559,49 @@
 
   /*
   .. foreach_leaf () { ... }: every leaf block, in Morton order, with IJKL,
-  .. node and sblocks. 'continue' goes to the next leaf.
+  .. node and sblocks. 'continue' goes to the next leaf. It reads the tree's
+  .. list of leaves (tree_caches (), tree.h), made again only after the tree
+  .. changes: no walk. The tree must not change in it.
   */
   @loop foreach_leaf () : IJKL, node, sblocks
   {
-    morton (TREE_ROOT_INDEX)
-      if (node->flags & BAMR_NODE_LEAF)
-        {...}
+    const TreeCaches * tc = tree_caches ();
+    const TreeItem * items = tc->leaves;
+    unsigned generation = tree_generation;
+    for (int q = 0, n = tc->nleaves; q < n; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_leaf");
+      INDEX_UNPACK (items [q].p);
+      BAMRNode * node = items [q].node;
+      void *** sblocks = node->s;
+      (void) node, (void) sblocks;
+      {...}
+    }
   }
 
   /*
   .. foreach_leaf_parallel () { ... }: the leaf blocks shared out among
-  .. threads, dynamically, as blocks differ in cost. The leaves are gathered
-  .. first, in Morton order, so that neighbouring blocks tend to go to the
-  .. same thread. Each block must be thread safe: no break, and nothing
-  .. shared written. Without OpenMP, foreach_leaf () in Morton order.
+  .. threads, dynamically, as blocks differ in cost, in Morton order, so
+  .. that neighbouring blocks tend to go to the same thread. Each block must
+  .. be thread safe: no break, and nothing shared written. Without OpenMP,
+  .. foreach_leaf () in Morton order.
   ..
-  .. The gathering is a traversal of the tree for each use. Code that runs
-  .. many of these between two refinements can keep the list in a cache
-  .. whose update gathers it and mark it dirty when the tree changes.
+  .. The list is the tree's, kept between changes (tree_caches ()): no walk,
+  .. no gathering of its own.
   */
   @loop foreach_leaf_parallel () : IJKL, node, sblocks
   {
-    cache (Index) leaves;
-    cache_reserve (leaves, tree_get_nleaves ());
-    morton (TREE_ROOT_INDEX)
-      if (node->flags & BAMR_NODE_LEAF)
-        cache_push (leaves, (Index) {IJKL});
-    Index * list = leaves.a;
-    int n = leaves.n;
+    const TreeCaches * tc = tree_caches ();
+    const TreeItem * items = tc->leaves;
+    int n = tc->nleaves;
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
     for (int b = 0; b < n; b++)
     {
-      INDEX_UNPACK (list [b]);
-      BAMR_NODE_ENV ();
+      INDEX_UNPACK (items [b].p);
+      BAMRNode * node = items [b].node;
+      void *** sblocks = node->s;
+      (void) node, (void) sblocks;
       {...}
     }
   }

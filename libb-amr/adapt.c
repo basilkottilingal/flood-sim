@@ -133,7 +133,7 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   .. decides the coarsening too.
   */
   cache (Index) merge;
-  morton (TREE_ROOT_INDEX) {
+  foreach_node () {
     if (!tree_has_children (node) || level < minlevel)
       continue;
     int all = 1;
@@ -150,7 +150,7 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
     st.coarsened += tree_coarsen (p);
 
   /* 4. clear the flags */
-  morton (TREE_ROOT_INDEX)
+  foreach_node ()
     node->flags &= ~(BAMR_NODE_REFINE | BAMR_NODE_COARSEN);
   return st;
 }

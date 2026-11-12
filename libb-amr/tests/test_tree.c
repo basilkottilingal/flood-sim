@@ -2,6 +2,9 @@
  * morton-curve.h, and refinement. Includes tree.c to refine. */
 #include "tree.c"
 #include "morton-curve.h"
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; \
@@ -10,6 +13,55 @@ static int checks, fails;
 scalar a, b;
 
 static int ipow (int x, int e) { int r = 1; while (e--) r *= x; return r; }
+
+/* the tree's lists (tree_caches ()) against a walk, node for node, in its
+.. order; and by level, each level's nodes in that order */
+static int caches_agree (void)
+{
+  const TreeCaches * tc = tree_caches ();
+  int q = 0, ql = 0, bad = 0;
+  morton (TREE_ROOT_INDEX) {
+    bad += q >= tc->nall || tc->all [q].node != node || tc->all [q].p.level != level;
+    q++;
+    if (node->flags & BAMR_NODE_LEAF) {
+      bad += ql >= tc->nleaves || tc->leaves [ql].node != node;
+      ql++;
+    }
+  }
+  bad += q != tc->nall || ql != tc->nleaves || q != tree_get_nblocks ()
+         || ql != tree_get_nleaves ();
+  for (int l = 0; l <= BAMR_MAX_DEPTH; l++) {
+    for (int b = tc->level_first [l]; b < tc->level_first [l + 1]; b++)
+      bad += tc->by_level [b].p.level != l;
+    for (int b = tc->leaf_first [l]; b < tc->leaf_first [l + 1]; b++)
+      bad += tc->leaves_by_level [b].p.level != l
+             || !(tc->leaves_by_level [b].node->flags & BAMR_NODE_LEAF);
+  }
+  bad += tc->level_first [BAMR_MAX_DEPTH + 1] != q
+         || tc->leaf_first [BAMR_MAX_DEPTH + 1] != ql;
+  return !bad;
+}
+
+/* does refining in foreach_leaf () stop the run? in a child process */
+static int change_in_loop_stops (void)
+{
+  fflush (stdout);
+  pid_t pid = fork ();
+  if (pid == 0) {
+    struct rlimit none = { 0, 0 };
+    setrlimit (RLIMIT_CORE, &none);
+    if (!freopen ("/dev/null", "w", stderr))
+      _exit (2);
+    int r = 0;
+    foreach_leaf ()
+      if (r++ == 0)
+        tree_refine ((Index) {IJKL});
+    _exit (0);                        /* not reached: stopped */
+  }
+  int status = 0;
+  waitpid (pid, &status, 0);
+  return WIFSIGNALED (status) && WTERMSIG (status) == SIGABRT;
+}
 
 static int nblocks (int s)
 {
@@ -98,6 +150,9 @@ int main (void)
     neighborhood_of (centre, 1) { if (n == 2) break; n++; }
     CHECK (n == 2);
 
+    /* the tree's lists, after refining: as a walk */
+    CHECK (caches_agree ());
+
     /* coarsening the chain back: depth follows the highest bit */
     Index q = p;
     for (int l = 3; l >= 1; l--) {
@@ -113,6 +168,9 @@ int main (void)
       CHECK (G (level_bits) == scan_bits () && tree_get_depth () == l
              && tree_get_depth_min () == 1);
     }
+    /* and after coarsening; a change of the tree in a loop over it stops */
+    CHECK (caches_agree ());
+    CHECK (change_in_loop_stops ());
     tree_destroy ();
     CHECK (G (level_bits) == 0 && tree_get_depth () == 0 && tree_get_depth_min () == 0);
   }

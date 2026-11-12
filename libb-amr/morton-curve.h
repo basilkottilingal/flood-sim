@@ -53,6 +53,30 @@
   }
 
   /*
+  .. foreach_node () { ... }: every node, in the order of morton (TREE_ROOT_
+  .. INDEX), with IJKL, node and sblocks, from the tree's list of nodes
+  .. (tree_caches (), tree.h), made again only after the tree changes: no
+  .. walk. morton () itself is left for that list, and for a subtree. The
+  .. tree must not change in it; 'continue' goes to the next node.
+  */
+  @loop foreach_node () : IJKL, node, sblocks
+  {
+    const TreeCaches * tc = tree_caches ();
+    const TreeItem * items = tc->all;
+    unsigned generation = tree_generation;
+    for (int q = 0, n = tc->nall; q < n; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_node");
+      INDEX_UNPACK (items [q].p);
+      BAMRNode * node = items [q].node;
+      void *** sblocks = node->s;
+      (void) node, (void) sblocks;
+      {...}
+    }
+  }
+
+  /*
   .. API
   .. tree_block_indices (&c) puts the Index of every node in c, in the order
   .. of morton (), after emptying it. c is the caller's: a cache cannot be

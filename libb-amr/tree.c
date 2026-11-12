@@ -33,6 +33,23 @@ static int G(nleaves) [BAMR_MAX_DEPTH + 1];
 static uint32_t G(level_bits) = 0;
 LevelIndex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;       /* the root, which has no siblings */
+
+/*
+.. The lists of the tree's nodes (tree.h), made again by one walk when read
+.. after a change. Their arrays only grow: no allocation for each update.
+*/
+static int caches_are_dirty = 1;
+unsigned tree_generation = 0;
+static TreeItem * c_all, * c_leaves, * c_by_level, * c_leaves_by_level;
+static int c_cap = 0;
+static TreeCaches caches;
+
+/* the tree changes: at each node made or freed, and with tree (), tree_destroy () */
+static void caches_changed (void)
+{
+  caches_are_dirty = 1;
+  tree_generation++;
+}
 static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
 
 /*
@@ -63,6 +80,10 @@ static void terminal_add (int l, int n)
 
 void tree_destroy (void)
 {
+  caches_changed ();
+  free (c_all), free (c_leaves), free (c_by_level), free (c_leaves_by_level);
+  c_all = c_leaves = c_by_level = c_leaves_by_level = NULL;
+  c_cap = 0;
   for (int l = 0; l <= BAMR_MAX_DEPTH; ++l)
   {
     lidx_destroy (& G(layers) [l]);
@@ -100,6 +121,7 @@ static int add_children (int IJKLargs)
     return 0;
   BAMR_NODE_ENV ();
   assert (node && !is_parent ());
+  caches_changed ();
   node->flags |= BAMR_NODE_HAS_CHILDREN;
   LevelIndex * m = & G (layers) [level + 1];
   int len = 1 << (level + 1);
@@ -155,6 +177,7 @@ static void remove_children (int IJKLargs)
 {
   BAMR_NODE_ENV ();
   assert (node && is_parent ());
+  caches_changed ();
   BAMRNode * parent = node, * family = NULL;
   void *** t [TREE_NCHILDREN];
   int c = 0;
@@ -304,6 +327,7 @@ static int grid_init (int depthmax, int blockdepth)
   LevelIndex * m = & G (layers) [level];
   BAMRNode * node = allocate_root ();
   node->flags |= BAMR_NODE_LEAF;
+  caches_changed ();
   lidx_assign (m, IJK, 1 << level, node);
   G (nb)  = 1;
   G (nlb) = 1;
@@ -338,6 +362,69 @@ void tree_shift_resize (double x0, double y0, double z0, double h0)
 {
   assert (h0 > 0.);
   G(x0) = x0, G(y0) = y0, G(z0) = z0, G (h0) = h0;
+}
+
+/* the lists again, by one walk: every node and the leaves in Morton order,
+.. then each by level, still in that order */
+static void caches_update (void)
+{
+  int n = G(nb), na = 0, nl = 0, depth = 0;
+  if (n > c_cap) {
+    c_all = realloc (c_all, (size_t) n * sizeof (TreeItem));
+    c_leaves = realloc (c_leaves, (size_t) n * sizeof (TreeItem));
+    c_by_level = realloc (c_by_level, (size_t) n * sizeof (TreeItem));
+    c_leaves_by_level = realloc (c_leaves_by_level, (size_t) n * sizeof (TreeItem));
+    if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level)
+      abort ();
+    c_cap = n;
+  }
+  int count [BAMR_MAX_DEPTH + 1] = {0}, lcount [BAMR_MAX_DEPTH + 1] = {0};
+  morton (TREE_ROOT_INDEX) {
+    TreeItem it = { (Index) {IJKL}, node };
+    assert (na < n);
+    c_all [na++] = it;
+    count [level]++;
+    if (node->flags & BAMR_NODE_LEAF) {
+      c_leaves [nl++] = it;
+      lcount [level]++;
+    }
+    if (level > depth)
+      depth = level;
+  }
+  caches.level_first [0] = caches.leaf_first [0] = 0;
+  for (int l = 0; l <= BAMR_MAX_DEPTH; l++) {
+    caches.level_first [l + 1] = caches.level_first [l] + count [l];
+    caches.leaf_first [l + 1] = caches.leaf_first [l] + lcount [l];
+  }
+  int next [BAMR_MAX_DEPTH + 1], lnext [BAMR_MAX_DEPTH + 1];
+  for (int l = 0; l <= BAMR_MAX_DEPTH; l++)
+    next [l] = caches.level_first [l], lnext [l] = caches.leaf_first [l];
+  for (int q = 0; q < na; q++) {
+    int l = c_all [q].p.level;
+    c_by_level [next [l]++] = c_all [q];
+    if (c_all [q].node->flags & BAMR_NODE_LEAF)
+      c_leaves_by_level [lnext [l]++] = c_all [q];
+  }
+  caches.all = c_all, caches.nall = na;
+  caches.leaves = c_leaves, caches.nleaves = nl;
+  caches.by_level = c_by_level;
+  caches.leaves_by_level = c_leaves_by_level;
+  caches.depth = depth;
+  caches_are_dirty = 0;
+}
+
+const TreeCaches * tree_caches (void)
+{
+  if (caches_are_dirty)
+    caches_update ();
+  return &caches;
+}
+
+void tree_changed_under (const char * loop)
+{
+  fprintf (stderr, "%s (): the tree changed during the loop: refine or "
+           "coarsen after it, not in it\n", loop);
+  abort ();
 }
 
 double tree_get_origin (int axis)

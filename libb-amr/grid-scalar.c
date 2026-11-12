@@ -158,13 +158,13 @@ void grid_scalar_alloc_blocks (scalar s)
   if (!pool_block)        /* no tree yet: tree () allocates them */
     return;
   root_block (index_node (TREE_ROOT_INDEX)->s, s);
-  morton (TREE_ROOT_INDEX) {
-    if (tree_has_children (node)) {
+  const TreeCaches * tc = tree_caches ();
+  for (int q = 0; q < tc->nall; q++)
+    if (tree_has_children (tc->all [q].node)) {
       void *** t [TREE_NCHILDREN];
-      children_tables ((Index) {IJKL}, t);
+      children_tables (tc->all [q].p, t);
       family_block (t, s, 0);
     }
-  }
 }
 
 void grid_scalar_free_blocks (scalar s)
@@ -181,13 +181,13 @@ void grid_scalar_free_blocks (scalar s)
     pool_free (pool_block, root [s/w][s%w]);
     root [s/w][s%w] = NULL;
   }
-  morton (TREE_ROOT_INDEX) {
-    if (tree_has_children (node)) {
+  const TreeCaches * tc = tree_caches ();
+  for (int q = 0; q < tc->nall; q++)
+    if (tree_has_children (tc->all [q].node)) {
       void *** t [TREE_NCHILDREN];
-      children_tables ((Index) {IJKL}, t);
+      children_tables (tc->all [q].p, t);
       family_block_free (t, s);
     }
-  }
 }
 
 /*
@@ -199,7 +199,7 @@ long grid_scalar_blocks_attached (void)
   long n = 0;
   if (!pool_block)
     return 0;
-  morton (TREE_ROOT_INDEX) {
+  foreach_node () {
     foreach_scalar (s)
       if (sblocks [s/w] && sblocks [s/w][s%w])
         n++;
@@ -216,7 +216,7 @@ int grid_scalar_check (void)
   if (!pool_block)
     return 1;
   long attached = 0, slots = 0, groups = 0, tables = 0, missing = 0;
-  morton (TREE_ROOT_INDEX) {
+  foreach_node () {
     tables++;
     foreach_scalar (s)
       if (sblocks [s/w] && sblocks [s/w][s%w])
