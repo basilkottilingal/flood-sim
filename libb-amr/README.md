@@ -105,7 +105,7 @@ in 3D for m = 16 (1.42× for m = 32).
 
 Not done yet: periodic boundaries, and flux correction (refluxing) at
 coarse-fine faces, which conservation needs whichever way ghosts are
-stored.
+stored. See Future plans, "Ghost operators and adaptation".
 
 **The same stencil with cwrap's `foreach ()`** (see `../libc-pp/README.md`,
 "Stencils"):
@@ -539,6 +539,115 @@ steps, in order:
    memindex without `MADV_NOHUGEPAGE`, to quantify the blow-up seen elsewhere.
 6. **Later, for MPI or GPU:** the nodes already give Morton order, so a
    linear octree (C) can be built in one traversal of the leaves.
+
+## Ghost operators and adaptation
+
+Deferred; none started.
+
+1. **Periodic boundaries.** Kept for later when the per-face boundaries
+   were done (`boundary.left (op)`, ..., `boundary.all (op)`). A periodic
+   pair of faces needs more than an operator: `block_ghosts ()` would fill
+   the regions beyond such a face from the node on the other side of the
+   domain, copied or prolonged like any neighbour; `neighbors_of ()` and
+   the 2:1 balance would wrap around too; and the walls of those faces
+   would be skipped.
+2. **A refinement operator, `@refine`, apart from the prolongation.**
+   Basilisk has both. Now one operator fills the children of a refined
+   block and the ghosts at a level jump, so the two agree: a fine cell
+   reads the same values beside a coarse leaf before and after it is
+   refined. The defaults (`prolong_linear`, `prolong_minmod`) keep the
+   mean of the children, which is the main reason Basilisk needs a
+   separate one (its bilinear default does not).
+   - **Where it would differ:** new cells must keep the integral, while a
+     ghost need only be smooth and accurate. Refinement runs once per new
+     cell, so it can be expensive: a reconstruction, a solenoidal fill of
+     face fields. And it can reach further, as the parent's ghosts are all
+     valid.
+   - **The case that decides it for the flood model:** if `zb` is read
+     again from the DEM when a cell is refined, the children's mean `zb`
+     is not the parent's. A lake-at-rest prolongation of `h` then gains or
+     loses water at each refinement; a refinement operator would keep the
+     surface flat and correct `h` to the parent's mean depth.
+   - **As planned:** an optional fourth kind, `ghost_ops (h, refine
+     (op, zb))`, the same ids, dependencies and order as the others;
+     `block_prolong ()` takes it when bound, the prolongation otherwise;
+     the docs to say that two operators lose the agreement above.
+3. **Operators of a scalar freed with no tree.** The hooks of
+   `grid-scalar.c` reset a scalar's operators when it is made and freed,
+   but only while a tree exists. A scalar freed without one keeps its
+   bindings, and the next scalar given its id inherits them. The
+   dependencies are rebuilt over the scalars in use only, so a free id's
+   bindings count for nothing meanwhile. The fix: reset them in the free
+   path whether or not a tree exists.
+4. **Prolongation's bookkeeping per cell.** `prolong_points` computes the
+   coarse cell, its half and two `block_at ()` for each fine cell. Its
+   range is checked once per call now; the indices could also be stepped
+   along a row instead of recomputed. Only worth it if 2D prolongation
+   shows up in a profile: after the range check, the wavelet in 2D is
+   faster than the old in-block one for every operator.
+5. **Multigrid:** `coarse ()` inside `foreach ()` and the loops it needs,
+   with four questions open: see `multigrid.md`.
+
+## Compile-time block size
+
+Under consideration; not started. The block size `m` is now an argument of
+`tree ()` (`blockdepth`, at least 4: m >= 16), and `tree_block_shape ()`
+makes the shape again at each call: a call into tree.c and an assert,
+about 1.6 ns, for every node of every loop over the tree.
+
+**Measured first: a global shape is not worth it.** A global, set once by
+`tree ()` and returned by `tree_block_shape ()`, cut the call to 0.26 ns,
+but saved only about 2% of a light `foreach ()` (2D, m 16), and nothing
+measurable in `tree_restrict ()`, prolongation, ghost updates or 3D: each
+node does hundreds to thousands of cell operations. It was reverted.
+
+**The lever is a constant m:** `-DBAMR_BLOCK_M=M`. Then m, the strides and
+every loop bound are constants: index arithmetic folds, loops of known
+trip counts unroll and vectorise (gcc 11 vectorises none of the cell loops
+at `-O2` now), scratch blocks and GPU tiles get static sizes, and a GPU
+kernel its shape. Without the option, a default fit to the target.
+
+What the default depends on:
+
+| factor | pushes m | example |
+|---|---|---|
+| ghost overhead, ((m+2g)^d - m^d)/m^d | larger | 2D: 56% at m 16, 27% at 32; 3D: 95% at 16, 42% at 32 |
+| a block of each scalar a stencil reads, in L1 or L2 | smaller in 3D | 3D, m 16: 64 KiB a scalar, more than a 48 KiB L1 |
+| vector width, rows on whole vectors | its multiples | AVX2, AVX-512 |
+| GPU: m^d threads, 1024 at most a block; shared memory | 16 in 2D, tiles in 3D | 16^3 = 4096 needs tiles |
+| adaptivity: the block is the unit of refinement | smaller | narrow rivers on a coarse floodplain |
+
+The last is the problem's, not the machine's: the default can only be a
+guess fit to the hardware, which the user overrides.
+
+The plan, in order:
+1. **Prototype and measure.** With `BAMR_BLOCK_M` set,
+   `tree_block_shape ()` returns a constant; every function copies it into
+   a local, so gcc folds the fields with no other change. Time `foreach
+   ()`, prolongation and ghost updates in 2D and 3D, and go on only for
+   10% or more.
+2. **Defaults in the header,** from the build's own macros (`dimension`,
+   `__AVX512F__`, ...), never by probing the machine that compiles: a
+   build on a login node runs on compute nodes, and the same source and
+   flags must give the same binary.
+3. **cwrap's driver picks m when offloading.** gcc compiles the host and
+   the device passes apart, each seeing its own macros: a default in the
+   header could differ between the two, and the blocks with it. The
+   driver sees every flag once, and passes the same `-DBAMR_BLOCK_M` to
+   both. A small table of libb-amr's, documented as such: cwrap stays a
+   C translator.
+4. **A mismatch must not link.** tree.c defines `bamr_block_m_<M>`, which
+   the header makes every file reference: a file built with another m is
+   an undefined symbol, not wrong indices. The binary records m, so that a
+   run reports it.
+5. **`tree ()` without `blockdepth`** (or asserting it equals m for a
+   while); `tree (5, 4)` in the tests and libpinn follows. `BAMR_BLOCK_M=0`
+   could keep today's run-time m, through the same `tree_block_shape ()`,
+   while the two are compared. The tests gain a block-size axis, 16 and 32
+   at least.
+6. **Optional, opt-in: measured tuning.** Time a ghost update and a
+   `foreach ()` for each candidate m on the machine itself, and keep the
+   fastest, as FFTW keeps its wisdom. Never the silent default.
 
 # Comparison of AMR implementations
 
