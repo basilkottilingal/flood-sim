@@ -337,6 +337,18 @@ struct stencil_loop *stencil_loop_begin (struct stencil_loop *outer,
  * a scalar, returns the access, added to loop. Otherwise returns NULL for
  * base[offsets], an ordinary subscript, and for base[] reports an error and
  * returns a subscript. A scalar outside foreach () is an error too. */
+/* foreach_dimension () statement, with -dimension=: the statement once for
+ * each axis, as in Basilisk. The first as written; in the next, x becomes y,
+ * y z, z x (in 2 dimensions x and y swap), and so on: the names x, y, z (the
+ * cell's coordinates, a member .x), the names ending in _x, _y, _z, and the
+ * offsets of s[i, j, k] and coarse (s, i, j, k), permuted the same way:
+ * s[1] becomes s[0,1]. In a stencil loop the copies' accesses are the
+ * loop's, as the statement's. The copies follow it on its last line: no
+ * line moves. In 1 dimension, the statement as it is. */
+struct ast *foreach_dimension (struct stencil_loop *loop, struct ast *kw,
+                               struct ast *open, struct ast *close,
+                               struct ast *body);
+
 struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
                             struct ast *open, struct ast *offsets,
                             struct ast *close, int *rejected);

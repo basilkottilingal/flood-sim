@@ -244,6 +244,7 @@ PFX     (u8|u|U|L)
 "foreach"/[ \t\r\f\v\n]*"("[ \t\r\f\v\n]*")"  { AST (stencil_word (yyextra)); }
 "foreach_neighbor"      { AST (mover_word (yyextra, yytext, T_FOREACH_NEIGHBOR)); }
 "foreach_child"         { AST (mover_word (yyextra, yytext, T_FOREACH_CHILD)); }
+"foreach_dimension"     { AST (mover_word (yyextra, yytext, T_FOREACH_DIMENSION)); }
 "foreach"               { AST (cache_word (yyextra, yytext, T_FOREACH)); }
 "cache"                 { AST (cache_word (yyextra, yytext, T_CACHE)); }
 

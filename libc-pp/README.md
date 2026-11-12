@@ -835,6 +835,22 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
     `foreach_neighbor ()` reading such a scalar is an error: it reaches
     both colours. With `BAMR_BOTH` the loop visits every cell in a fixed
     order, and the same reads are Gauss-Seidel in place.
+- **`foreach_dimension ()` writes a statement once for every axis,** as in
+  Basilisk. The statement is written for x. In the next copy x becomes y,
+  y becomes z, z becomes x (in 2D x and y swap), and so on. This applies
+  to the names `x`, `y`, `z` (coordinates, members `.x`, `child.x`), to
+  names ending in `_x`, `_y`, `_z`, and to the offsets of `s[...]` and
+  `coarse (s, ...)`, which are permuted the same way:
+
+      foreach ()
+        foreach_dimension ()
+          g.x[] = (p[1] - p[-1]) / (2 * Delta);  /* g.y[] from p[0,1], p[0,-1] */
+
+  The copies follow the statement on its last line, so no line moves. In
+  a stencil loop their accesses are the loop's, with every rule. It works
+  outside stencil loops too (`u_x`, `v.x`), and in 1D it is the statement
+  as written. libb-amr's `prolong_linear` and `prolong_minmod` are written
+  with it.
 - **`foreach_neighbor (r)` moves the point,** as in Basilisk: its statement
   runs for each cell within `r` of the point along every axis, the point's
   own included, and `s[]`, `s[i,j]`, `x`, `y`, `z` and `Delta` are then

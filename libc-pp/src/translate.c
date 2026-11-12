@@ -1619,6 +1619,132 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
   return node;
 }
 
+/* foreach_dimension (): see translate.h */
+
+/* the axis of a name's letter, or -1: x, y, z as the dimension has them */
+static int axis_of (char c)
+{
+  int a = c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1;
+  return a < dimension ? a : -1;
+}
+
+/* x, y, z, and names ending in _x, _y, _z, rotated r axes on */
+static void rotate_leaf (struct ast *leaf, void *rp)
+{
+  static const char axes[] = "xyz";
+  struct token *t = &((struct ast_leaf *)leaf)->tok;
+  int r = *(const int *)rp, a;
+  size_t n;
+
+  if (t->kind != T_IDENTIFIER && t->kind != T_TYPE_NAME)
+    return;
+  n = strlen (t->text);
+  if (n == 1 && (a = axis_of (t->text[0])) >= 0)
+    t->text = arena_printf ("%c", axes[(a + r) % dimension]);
+  else if (n > 2 && t->text[n - 2] == '_' && (a = axis_of (t->text[n - 1])) >= 0)
+    t->text = arena_printf ("%.*s%c", (int)(n - 1), t->text, axes[(a + r) % dimension]);
+}
+
+/* the offsets of an access, s[i, j, k] or coarse (s, i, j, k), permuted:
+ * the one along axis a moves to axis a + r */
+static void rotate_offsets (struct ast *access, int r, const struct token *at)
+{
+  struct ast *open = access->child->next, *off = open->next, *os[4], *p[3] = { 0 };
+  struct ast *list = NULL;
+  int n;
+
+  if (off == access->last)
+    return;                               /* s[]: the cell itself */
+  n = stencil_offsets (off, os, 4);
+  for (int d = 0; d < n && d < dimension; d++)
+    p[(d + r) % dimension] = ast_copy (os[d]);
+  for (int d = 0; d < dimension; d++) {
+    struct ast *e = p[d] ? p[d] : new_token (T_CONSTANT, "0", at);
+
+    e->parent = e->next = NULL;
+    if (!list)
+      list = e;
+    else {
+      struct ast *kids[3] = { list, new_token (',', ",", at), e };
+
+      list = ast_node (AST_COMMA, kids, 3);
+    }
+  }
+  ast_replace (off, list);
+}
+
+static void grow_access (struct stencil_loop *loop)
+{
+  if (loop->naccess == loop->cap) {
+    struct ast **a = allocate ((size_t)(loop->cap = 2 * loop->cap + 8) * sizeof (*a));
+
+    if (loop->naccess)
+      memcpy (a, loop->access, (size_t)loop->naccess * sizeof (*a));
+    loop->access = a;
+  }
+}
+
+static void grow_mover (struct stencil_loop *loop)
+{
+  if (loop->nmover == loop->mcap) {
+    struct ast **m = allocate ((size_t)(loop->mcap = 2 * loop->mcap + 4) * sizeof (*m));
+
+    if (loop->nmover)
+      memcpy (m, loop->mover, (size_t)loop->nmover * sizeof (*m));
+    loop->mover = m;
+  }
+}
+
+/* the accesses and movers of a copy: rotated, and the loop's */
+static void register_copy (struct stencil_loop *loop, struct ast *n, int r,
+                           const struct token *at)
+{
+  if (n->kind == AST_TOKEN)
+    return;
+  if (n->kind == AST_STENCIL_ACCESS || n->kind == AST_STENCIL_COARSE) {
+    rotate_offsets (n, r, at);
+    if (loop) {
+      grow_access (loop);
+      loop->access[loop->naccess++] = n;
+    }
+  }
+  else if (n->kind == AST_STENCIL_MOVER && loop) {
+    grow_mover (loop);
+    loop->mover[loop->nmover++] = n;
+  }
+  for (struct ast *k = n->child; k; k = k->next)
+    register_copy (loop, k, r, at);
+}
+
+struct ast *foreach_dimension (struct stencil_loop *loop, struct ast *kw,
+                               struct ast *open, struct ast *close,
+                               struct ast *body)
+{
+  struct ast *block = ast_new (AST_COMPOUND_STATEMENT), *items = ast_new (AST_BLOCK_ITEMS);
+  const struct token *at = last_token (body);
+  const char *trivia = arena_printf ("%s%s%s", ast_token (kw)->trivia,
+                                     ast_token (open)->trivia,
+                                     ast_token (close)->trivia);
+  struct ast *copies[3];
+
+  /* the copies first, from the statement as written */
+  for (int r = 1; r < dimension; r++) {
+    copies[r] = ast_copy (body);
+    each_leaf (copies[r], rotate_leaf, &r);
+    each_leaf (copies[r], flatten_leaf, (void *)at);
+    register_copy (loop, copies[r], r, at);
+  }
+  /* { statement copy copy }: the brace on the line of the keyword */
+  ast_add (block, new_token ('{', "{", ast_token (kw)));
+  first_token (block)->trivia = trivia;
+  ast_add (items, body);
+  for (int r = 1; r < dimension; r++)
+    ast_add (items, copies[r]);
+  ast_add (block, items);
+  ast_add (block, new_token ('}', "}", at));
+  return block;
+}
+
 /* Is n under root? */
 static int is_under (const struct ast *n, const struct ast *root)
 {

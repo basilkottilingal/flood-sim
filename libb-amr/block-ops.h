@@ -23,13 +23,8 @@
   scalar s = pr->s;
   foreach_prolongation (pr) {
     RealSum v = coarse (s);
-    v += child.x * (coarse (s, 1) - coarse (s, -1)) / 8.;
-#if dimension > 1
-    v += child.y * (coarse (s, 0, 1) - coarse (s, 0, -1)) / 8.;
-#endif
-#if dimension > 2
-    v += child.z * (coarse (s, 0, 0, 1) - coarse (s, 0, 0, -1)) / 8.;
-#endif
+    foreach_dimension ()
+      v += child.x * (coarse (s, 1) - coarse (s, -1)) / 8.;
     s[] = (Real) v;
   }
 }
@@ -44,16 +39,9 @@ static inline RealSum minmod (RealSum a, RealSum b)
   scalar s = pr->s;
   foreach_prolongation (pr) {
     RealSum v = coarse (s);
-    v += child.x * minmod ((RealSum) coarse (s, 1) - coarse (s),
-                           (RealSum) coarse (s) - coarse (s, -1)) / 4.;
-#if dimension > 1
-    v += child.y * minmod ((RealSum) coarse (s, 0, 1) - coarse (s),
-                           (RealSum) coarse (s) - coarse (s, 0, -1)) / 4.;
-#endif
-#if dimension > 2
-    v += child.z * minmod ((RealSum) coarse (s, 0, 0, 1) - coarse (s),
-                           (RealSum) coarse (s) - coarse (s, 0, 0, -1)) / 4.;
-#endif
+    foreach_dimension ()
+      v += child.x * minmod ((RealSum) coarse (s, 1) - coarse (s),
+                             (RealSum) coarse (s) - coarse (s, -1)) / 4.;
     s[] = (Real) v;
   }
 }

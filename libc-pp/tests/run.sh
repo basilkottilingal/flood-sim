@@ -495,6 +495,15 @@ done
 [ $ok = 0 ]
 check "face_vector (x, y, z at the faces) and vertex_scalar: located and named, global, local, static; 1-3D" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_dimension.c -lm -o stencil_dimension 2> stencil_dimension.log &&
+  [ "$(./stencil_dimension)" = "gradient 12 good 0 bad; g 3 6; coordinates 0" ] &&
+  [ ! -s stencil_dimension.log ]
+check "foreach_dimension (): the statement per axis, .x .y members, x y, names in _x, offsets permuted (s[1] to s[0,1])" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_dimension_lines.c -o stencil_dimension_lines.o 2> stencil_dimension_lines.log &&
+  grep -q "^stencil_dimension_lines.c:10:7: warning: unused variable" stencil_dimension_lines.log
+check "foreach_dimension (): the copies on the statement's last line, no later line moved" $?
+
 "$cwrap" -dimension=2 -c located_free.c -o located_free.o 2> located_free.log
 [ $? -ne 0 ] && [ ! -e located_free.o ] &&
   grep -q "^located_free.c:4: error: face_vector_free () of 'F', a global face_vector" located_free.log

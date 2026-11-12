@@ -340,6 +340,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token AT_FOREACH "@foreach" STENCIL_NAME
 %token FOREACH_NEIGHBOR "foreach_neighbor"
 %token FOREACH_CHILD "foreach_child"
+%token FOREACH_DIMENSION "foreach_dimension"
 %token AT_OPERATOR "@prolongation, @restriction or @boundary"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
@@ -1085,6 +1086,9 @@ iteration_statement:
                                     $$ = NULL; }
     statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, $3, $4, $6);
                                     (void) $5; }
+  /* foreach_dimension (): the statement once per axis, rotated */
+  | FOREACH_DIMENSION '(' ')' statement
+                                  { $$ = foreach_dimension (status->stencil, $1, $2, $3, $4); }
   /* foreach_child (): the point moved to each child of its cell */
   | FOREACH_CHILD '(' ')'         { stencil_mover_begin (status->stencil, $1, &status->rejected);
                                     $$ = NULL; }
