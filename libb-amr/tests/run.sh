@@ -2,6 +2,11 @@
 # libb-amr's tests, in 1, 2 and 3 dimensions, double and float, under
 # AddressSanitizer and UBSan. Run from libb-amr:  sh tests/run.sh
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap).
+# JOBS: the tests built and run at once (default: the processors).
+# QUICK=1: the pool, then tree, blocks, ghosts, adapt and stencil in 1, 2
+# and 3 dimensions, double and float, only: no OpenMP, alignment, other
+# level indices or MADV_FREE. After each change; the whole before a commit,
+# with tests/bit/compare.sh (every cell bit for bit against HEAD).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
 lib=$(pwd)
 dir=$(mktemp -d)
@@ -14,16 +19,78 @@ fails=0
 # in place of block-ghosts.c (block-ghosts.h)
 gsrc=$(echo "$src" | sed "s| $lib/block-ghosts.c||")
 
-run () {   # name, dimension, extra flags, sources...
-  name=$1 d=$2 extra=$3; shift 3
-  if "$cwrap" -dimension=$d $flags $extra "$@" -lm -o "$dir/t" 2> "$dir/log" &&
-     ! grep -v 'mem_destroy\|^In file\|^ *[0-9]* |\|^ *|' "$dir/log" | grep -q 'warning\|error' &&
-     out=$("$dir/t" 2>&1); then
-    echo "ok   $name, ${d}D ${extra:-double}: $(echo "$out" | tail -1)"
-  else
-    echo "FAIL $name, ${d}D ${extra:-double}"; cat "$dir/log"; echo "$out" | tail -5
-    fails=$((fails + 1))
+# Each library source is built once per build (dimension and flags), its
+# object shared by the tests of that build; the tests are built and run
+# JOBS at a time (default: the number of processors), their results
+# printed in order as they come.
+jobs=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+n=0 printed=0 pids=
+
+build_key () {   # dimension, extra flags: a directory per build
+  echo "$1 $flags $2" | cksum | cut -d' ' -f1
+}
+
+objects () {   # dimension, extra flags, sources...: built if not yet, in parallel
+  d=$1 extra=$2; shift 2
+  o=$dir/o$(build_key "$d" "$extra"); mkdir -p "$o"
+  own=
+  for f in "$@"; do
+    b=$o/$(basename "$f" .c)
+    [ -e "$b.done" ] && continue
+    ( "$cwrap" -dimension=$d $flags $extra -c "$f" -o "$b.o" 2> "$b.log"
+      : > "$b.done" ) &
+    own="$own $!"
+  done
+  [ -n "$own" ] && wait $own
+}
+
+drain () {   # print the results that are in, in order
+  while [ "$printed" -lt "$n" ] && [ -e "$dir/r$((printed + 1))" ]; do
+    printed=$((printed + 1))
+    cat "$dir/r$printed"
+  done
+}
+
+run () {   # name, dimension, extra flags, the test, library sources...
+  name=$1 d=$2 extra=$3 test=$4; shift 4
+  objects "$d" "$extra" "$@"
+  o=$dir/o$(build_key "$d" "$extra")
+  objs= logs=
+  for f in "$@"; do
+    b=$o/$(basename "$f" .c)
+    objs="$objs $b.o" logs="$logs $b.log"
+  done
+  n=$((n + 1))
+  r=$dir/r$n label="$name, ${d}D ${extra:-double}"
+  (
+    cat $logs > "$r.log"
+    out=
+    if "$cwrap" -dimension=$d $flags $extra "$test" $objs -lm -o "$r.t" 2>> "$r.log" &&
+       ! grep -v 'mem_destroy\|^In file\|^ *[0-9]* |\|^ *|' "$r.log" | grep -q 'warning\|error' &&
+       out=$("$r.t" 2>&1); then
+      echo "ok   $label: $(echo "$out" | tail -1)" > "$r.tmp"
+    else
+      { echo "FAIL $label"; cat "$r.log"; echo "$out" | tail -5; } > "$r.tmp"
+    fi
+    rm -f "$r.t"
+    mv "$r.tmp" "$r"
+  ) &
+  pids="$pids $!"
+  set -- $pids
+  if [ $# -ge "$jobs" ]; then
+    wait "$1"; shift; pids="$*"
   fi
+  drain
+}
+
+finish () {   # wait for every test, print the rest, count the failures
+  wait
+  drain
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    head -1 "$dir/r$i" | grep -q '^FAIL' && fails=$((fails + 1))
+  done
 }
 
 # the pool, giving memory back either way: MADV_DONTNEED (1) or MADV_FREE (0)
@@ -44,6 +111,11 @@ for prec in "" "-DBAMR_SINGLE"; do
     run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
   done
 done
+if [ -n "$QUICK" ]; then
+  finish
+  [ "$fails" = 0 ] && echo "all passed (quick)"
+  exit "$fails"
+fi
 # with OpenMP: threads, simd and the offload pragmas (run on the host here)
 flags="$flags -fopenmp"
 export OMP_NUM_THREADS=4
@@ -88,5 +160,6 @@ for d in 2 3; do
   run ghosts $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_ghosts.c "$lib/tree.c" $gsrc
   run adapt  $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_adapt.c "$lib/tree.c" $src
 done
+finish
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

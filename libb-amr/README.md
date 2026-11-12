@@ -145,9 +145,22 @@ change during such a loop: that stops the run. See `traversal-caches.md`.
 
 ## Tests
 
-    sh tests/run.sh
+    QUICK=1 sh tests/run.sh      # after a change: about 40 s
+    sh tests/bit/compare.sh      # every cell bit for bit against HEAD: 20 s
+    sh tests/run.sh              # before a commit: the whole
 
-It builds each test in `tests/` with cwrap (`CWRAP`, by default
+`QUICK=1` runs the pool, then tree, blocks, ghosts, adapt and stencil in 1,
+2 and 3 dimensions, double and float; the whole adds OpenMP, the aligned
+layout, the other level indices and `MADV_FREE`. Each library source is
+built once per build and shared by its tests, which run `JOBS` at once (by
+default, the processors). `tests/bit/compare.sh [REF]` builds
+`tests/bit/checksum.c` against the working tree and against `REF` (`HEAD`
+by default): it refines, fills ghosts with given operators, adapts, and
+hashes every cell of every block; `TIMING=1` also times
+`ghosts_update_levels ()` (`tests/bit/timing.c`). A `REF` whose API
+`checksum.c` does not build against fails, and says so.
+
+`tests/run.sh` builds each test in `tests/` with cwrap (`CWRAP`, by default
 `../libc-pp/build/cwrap`), in 1, 2 and 3 dimensions, in double and float
 (`-DBAMR_SINGLE`), under AddressSanitizer and UBSan, and fails on any warning:
 - `test_pool.c`: the hot and cold free lists, with page faults counted;
