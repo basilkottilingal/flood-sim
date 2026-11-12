@@ -753,6 +753,103 @@
     }
   }
 
+  /*
+  .. Faces (libc-pp's face_vector: F.x at a cell is its lower face along x).
+  .. A block's faces along axis a are at a = 0 .. m, face m in the ghost
+  .. layer. Each face is made once, by its owner: a block makes its faces 0
+  .. to m - 1, and face m too where no node of its level is above it along a
+  .. (a wall, or a coarser leaf). So at a level jump the fine side makes the
+  .. faces; the coarse side's face there is made too, and replaced by their
+  .. mean when the ghosts of the face vector are made (block_ghosts ()):
+  .. the fluxes agree, and what leaves one cell enters the next.
+  ..
+  ..   foreach_leaf_faces (axis)   the leaves, with face_last: 1 if the
+  ..                               block makes its face m along axis
+  ..   foreach_face_cells (shape, axis, last)  the faces of a block along
+  ..                               axis, ci, cj, ck and c those of the cell
+  ..                               whose lower face it is; gives face_axis
+  ..
+  .. foreach_face_x () (_y, _z), and foreach_face (): every face of the
+  .. leaves, by axis, the body written for x and rotated (cwrap's
+  .. stencil_by_axis ()); x, y, z are the face's centre.
+  */
+  static inline int block_neighbour_at_level (Index p, int axis, int dir)
+  {
+    int n = 1 << p.level, in = 1;
+    if (axis == 0)
+      p.i += dir, in = p.i >= 0 && p.i < n;
+  #if dimension > 1
+    else if (axis == 1)
+      p.j += dir, in = p.j >= 0 && p.j < n;
+  #endif
+  #if dimension > 2
+    else
+      p.k += dir, in = p.k >= 0 && p.k < n;
+  #endif
+    return in && index_is_allocated (p);
+  }
+
+  @loop foreach_leaf_faces (int axis) : IJKL, node, sblocks, face_last
+  {
+    const TreeCaches * tc = tree_caches ();
+    const TreeItem * items = tc->leaves;
+    unsigned generation = tree_generation;
+    for (int q = 0, n = tc->nleaves; q < n; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_face");
+      INDEX_UNPACK (items [q].p);
+      BAMRNode * node = items [q].node;
+      void *** sblocks = node->s;
+      int face_last = !block_neighbour_at_level (items [q].p, axis, 1);
+      (void) node, (void) sblocks, (void) face_last;
+      {...}
+    }
+  }
+
+  @loop foreach_face_cells (BlockShape shape, int axis, int last)
+    : CIJK, c, shape, face_axis
+  {
+    int face_axis = axis;
+    (void) face_axis;
+    int hi [3] = { 1, 1, 1 };
+    for (int a = 0; a < dimension; a++)
+      hi [a] = shape.m + (a == axis ? last : 0);
+    int x [3] = { 0, 0, 0 };
+  #if dimension > 2
+    for (x [2] = 0; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
+    for (x [1] = 0; x [1] < hi [1]; x [1]++)
+  #endif
+    for (x [0] = 0; x [0] < hi [0]; x [0]++)
+    {
+      int ci = shape.ox + x [0];
+  #if dimension > 1
+      int cj = shape.g + x [1];
+      (void) cj;
+  #endif
+  #if dimension > 2
+      int ck = shape.g + x [2];
+      (void) ck;
+  #endif
+      int c = (int) block_at (shape, x);
+      (void) ci, (void) c;
+      {...}
+    }
+  }
+
+  @foreach foreach_face_x ()
+    = foreach_leaf_faces (0) foreach_face_cells (tree_block_shape (), 0, face_last);
+  #if dimension > 1
+  @foreach foreach_face_y ()
+    = foreach_leaf_faces (1) foreach_face_cells (tree_block_shape (), 1, face_last);
+  #endif
+  #if dimension > 2
+  @foreach foreach_face_z ()
+    = foreach_leaf_faces (2) foreach_face_cells (tree_block_shape (), 2, face_last);
+  #endif
+
   @foreach foreach_level (int l)
     = foreach_level_block (l) foreach_cell (tree_block_shape (), 0);
   @foreach foreach_level_or_leaf (int l)

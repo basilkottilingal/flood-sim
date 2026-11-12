@@ -132,6 +132,45 @@ scalars it updates, and a new or freed scalar starts clean. Writes through
 `block_data ()` by hand mark nothing: call `ghosts_update ()`, or
 `ghosts_mark_dirty ()`.
 
+## Faces and fluxes
+
+A `face_vector F` (cwrap) holds at each cell its lower faces: `F.x` at
+i - 1/2. A block's faces along x are at i = 0 .. m, face m in the ghost
+layer, so a face vector takes the same blocks as any scalar.
+
+    foreach_face ()                               /* every face, once */
+      F.x[] = (s[] - s[-1]) / Delta;              /* rotated for F.y, F.z */
+    foreach () {
+      double div = 0;
+      foreach_dimension ()
+        div += (F.x[1] - F.x[]) / Delta;          /* what leaves the cell */
+      ...
+    }
+
+- **Each face is made once,** by its owner. A block makes its faces 0 to
+  m - 1, and face m too where no node of its level is above it (a wall,
+  a coarser leaf). So at a level jump the fine side makes the faces.
+- **Fluxes agree at level jumps (refluxing), automatically.** A loop that
+  writes F marks it stale, as for any scalar. The next loop that reads it,
+  at an offset or at its cell, has its ghosts made first, by cwrap. For a
+  face scalar, the ghosts are made as for a cell scalar, except for the
+  faces where two blocks meet:
+  - the parents' faces are the mean of their children's
+    (`restriction_face`), including their upper face m;
+  - a block keeps the face m it made;
+  - a coarse leaf takes the face it shares with a finer region from that
+    region's parent.
+
+  Every coarse face is then the mean of the fine faces on it, so what
+  leaves one cell enters the next. The sum of the net fluxes over the
+  leaves is zero to round-off (`tests/test_faces.c`).
+- **Refining** gives new faces by `prolong_face`. A fine face lying on a
+  coarse one takes its value, one across a coarse cell's middle the mean
+  of its two faces. **Coarsening** restricts by `restriction_face`. These
+  are the defaults of a face scalar (by `scalar_location ()`).
+- In `foreach_face ()`, `x`, `y`, `z` are the face's centre.
+  `foreach_face_x ()` (`_y`, `_z`) loops over one axis only.
+
 ## Tree caches
 
 The loops over the tree (`foreach_leaf ()`, `foreach_leaf_parallel ()`,

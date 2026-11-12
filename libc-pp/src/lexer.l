@@ -103,6 +103,16 @@ static int identifier_kind (struct lexer *lx, const char *name)
     return T_LOOP_NAME;
   if (v && v->kind == SCOPE_STENCIL)
     return T_STENCIL_NAME;
+  /* N, a stencil loop by axis, if N_x is one (stencil_by_axis ()) */
+  if (!v && stencil_enabled ()) {
+    char axis[256];
+    const struct var *w;
+
+    snprintf (axis, sizeof (axis), "%s_x", name);
+    w = scope_find (lx->scopes, axis);
+    if (w && w->kind == SCOPE_STENCIL)
+      return T_STENCIL_NAME;
+  }
   return T_IDENTIFIER;
 }
 

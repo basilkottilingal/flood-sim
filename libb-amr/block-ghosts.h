@@ -503,6 +503,9 @@
   }
 
   void ghosts_update_dirty (int n, const int * s);
+  /* those of s [0..n) stale and not at the centre (faces, vertices): for a
+  .. read at the cell (cwrap) */
+  void ghosts_update_dirty_located (int n, const int * s);
   void tree_restrict  (int s);
   void block_ghosts   (Index p, int s);
   void block_prolong  (Index p, int s);

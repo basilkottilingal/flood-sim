@@ -250,10 +250,11 @@ ScalarOps scalar_get_ops (scalar s)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
   ScalarOps o = scalar_ops [s];
+  int face = scalar_location (s) >= CWRAP_FACE_X && scalar_location (s) <= CWRAP_FACE_Z;
   if (!o.prolongation)
-    o.prolongation = prolong_linear;
+    o.prolongation = face ? prolong_face : prolong_linear;
   if (!o.restriction)
-    o.restriction = restriction_mean;
+    o.restriction = face ? restriction_face : restriction_mean;
   return o;
 }
 
@@ -304,6 +305,37 @@ void block_prolong (Index p, int s)
     pr.off [2] = ((c >> 2) & 1) * m, pr.hi [2] = m;
   #endif
     @prolongation (o.prolongation, o.prolongation_uses) (&pr);
+  }
+  /*
+  .. A face scalar along a: the children whose upper faces along a lie on
+  .. the parent's (the upper half) take them too, at their face m, in the
+  .. ghost layer: where no node of their level is above, those are theirs
+  .. (block_ghosts () keeps them), the parent's face there, each fine face
+  .. the coarse one it lies on.
+  */
+  int loc = scalar_location (s);
+  if (loc >= CWRAP_FACE_X && loc <= CWRAP_FACE_Z)
+  {
+    int a = loc - CWRAP_FACE_X;
+    const Real * coarse = block_data (index_node (p)->s, s);
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+    {
+      if (!((c >> a) & 1))
+        continue;
+      Real * fine = block_data (index_node (index_child (p, c))->s, s);
+      int hi [3] = { 1, 1, 1 }, x [3] = { 0, 0, 0 };
+      for (int d = 0; d < dimension; d++)
+        hi [d] = d == a ? m + 1 : m;
+      for (x [2] = a == 2 ? m : 0; x [2] < hi [2]; x [2]++)
+      for (x [1] = a == 1 ? m : 0; x [1] < hi [1]; x [1]++)
+      for (x [0] = a == 0 ? m : 0; x [0] < hi [0]; x [0]++)
+      {
+        int X [3] = { 0, 0, 0 };
+        for (int d = 0; d < dimension; d++)
+          X [d] = d == a ? m : (x [d] + ((c >> d) & 1) * m) / 2;
+        fine [block_at (sh, x)] = coarse [block_at (sh, X)];
+      }
+    }
   }
 }
 
@@ -369,7 +401,82 @@ void block_restrict (Index p, int s)
 .. the same level in that direction, rows copied; or, if there is none,
 .. the leaf one level coarser covering it, prolonged.
 */
+static void block_ghosts_cells (Index p, int s);
+
+/* the faces along a at X of block b, out to buffer (put 0) or back (put 1):
+.. every transverse interior place */
+static void face_row (BlockShape sh, Real * b, int a, int X, Real * buf, int put)
+{
+  int hi [3] = { 1, 1, 1 }, x [3] = { 0, 0, 0 }, k = 0;
+  for (int d = 0; d < dimension; d++)
+    hi [d] = d == a ? X + 1 : sh.m;
+  for (x [2] = a == 2 ? X : 0; x [2] < hi [2]; x [2]++)
+  for (x [1] = a == 1 ? X : 0; x [1] < hi [1]; x [1]++)
+  for (x [0] = a == 0 ? X : 0; x [0] < hi [0]; x [0]++)
+  {
+    long c = block_at (sh, x);
+    if (put)
+      b [c] = buf [k++];
+    else
+      buf [k++] = b [c];
+  }
+}
+
+/*
+.. The ghosts of p for s. A face scalar (a face_vector's component along a)
+.. as a cell one, but for its faces along a at the block's edges, where two
+.. blocks meet:
+..   - face m, the upper one: kept as the block made it, where no node of
+..     its level is above (a wall, a coarser leaf): the fine side's faces;
+..     else that node's face 0, copied as any ghost: at a finer region, the
+..     node is a parent whose faces are the mean of its children's
+..     (restriction_face), so the fluxes agree;
+..   - face 0, the lower one: where the node below is a parent (a finer
+..     region), its face m, the mean of the fine faces there.
+*/
 void block_ghosts (Index p, int s)
+{
+  int loc = scalar_location (s);
+  if (loc < CWRAP_FACE_X || loc > CWRAP_FACE_Z)
+  {
+    block_ghosts_cells (p, s);
+    return;
+  }
+  int a = loc - CWRAP_FACE_X;
+  assert (a < dimension);
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m, row = 1;
+  for (int d = 0; d < dimension; d++)
+    row *= d == a ? 1 : m;
+  Real * b = block_data (index_node (p)->s, s), saved [row];
+  int keep = !block_neighbour_at_level (p, a, 1);
+  if (keep)
+    face_row (sh, b, a, m, saved, 0);
+  block_ghosts_cells (p, s);
+  if (keep)
+    face_row (sh, b, a, m, saved, 1);
+  if (block_neighbour_at_level (p, a, -1))
+  {
+    Index lo = p;
+    if (a == 0)
+      lo.i--;
+  #if dimension > 1
+    else if (a == 1)
+      lo.j--;
+  #endif
+  #if dimension > 2
+    else
+      lo.k--;
+  #endif
+    if (tree_has_children (index_node (lo)))
+    {
+      face_row (sh, block_data (index_node (lo)->s, s), a, m, saved, 0);
+      face_row (sh, b, a, 0, saved, 1);
+    }
+  }
+}
+
+static void block_ghosts_cells (Index p, int s)
 {
   BlockShape sh = tree_block_shape ();
   int m = sh.m, g = sh.g, l = p.level, nb = 1 << l;
@@ -566,6 +673,17 @@ void ghosts_update_list (int n, const int * given, int parents)
   for (int q = 0; q < n; q++)
     ghosts_dirty [s [q] / 64] &= ~(1ull << (s [q] % 64));
   free (o);
+}
+
+void ghosts_update_dirty_located (int n, const int * s)
+{
+  int list [NSCALAR_MAX], k = 0;
+  for (int q = 0; q < n && k < NSCALAR_MAX; q++)
+    if (s [q] >= 0 && s [q] < NSCALAR_MAX && scalar_in_use (s [q])
+        && ghosts_is_dirty (s [q]) && scalar_location (s [q]) != CWRAP_CENTRE)
+      list [k++] = s [q];
+  if (k)
+    ghosts_update_dirty (k, list);
 }
 
 void ghosts_update_dirty (int n, const int * s)

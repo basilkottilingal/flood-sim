@@ -1309,6 +1309,11 @@ int stencil_enabled (void)
   return dimension > 0;
 }
 
+int stencil_dimension (void)
+{
+  return dimension;
+}
+
 /* The pointers and arrays a declarator wraps around its name: how many
  * subscripts or `*` go from the variable to its type. -1 for a function. */
 static int declarator_indirections (const struct ast *d)
@@ -1740,6 +1745,50 @@ struct ast *foreach_dimension (struct stencil_loop *loop, struct ast *kw,
   ast_add (items, body);
   for (int r = 1; r < dimension; r++)
     ast_add (items, copies[r]);
+  ast_add (block, items);
+  ast_add (block, new_token ('}', "}", at));
+  return block;
+}
+
+struct ast *stencil_by_axis (struct stencil_loop *loop,
+                             const struct stencil_def *const defs[3],
+                             struct ast *args, int has_ghosts, int has_located,
+                             int has_reach, int has_coarse_reach,
+                             struct ast *kw, struct ast *body, int *rejected)
+{
+  struct ast *block = ast_new (AST_COMPOUND_STATEMENT), *items = ast_new (AST_BLOCK_ITEMS);
+  const struct token *at = last_token (body);
+  struct ast *copies[3], *argss[3], *loops_out[3];
+  struct stencil_loop *loops[3];
+
+  /* the copies first, from the statement as written */
+  copies[0] = body, loops[0] = loop, argss[0] = args;
+  for (int r = 1; r < dimension; r++) {
+    copies[r] = ast_copy (body);
+    each_leaf (copies[r], rotate_leaf, &r);
+    each_leaf (copies[r], flatten_leaf, (void *)at);
+    loops[r] = allocate (sizeof (*loops[r]));
+    loops[r]->outer = loop->outer;
+    loops[r]->at = loop->at;
+    loops[r]->name = defs[r]->name;
+    loops[r]->errors = loop->errors;
+    register_copy (loops[r], copies[r], r, at);
+    argss[r] = args ? ast_copy (args) : NULL;
+    if (argss[r])
+      each_leaf (argss[r], flatten_leaf, (void *)at);
+  }
+  for (int r = 0; r < dimension; r++) {
+    struct ast *name = r ? new_token (T_IDENTIFIER, defs[r]->name, at)
+                         : new_token (T_IDENTIFIER, defs[0]->name, ast_token (kw));
+
+    loops_out[r] = stencil_loop_end (loops[r], defs[r], argss[r], has_ghosts,
+                                     has_located, has_reach, has_coarse_reach,
+                                     name, copies[r], rejected);
+  }
+  ast_add (block, new_token ('{', "{", ast_token (kw)));
+  first_token (block)->trivia = ast_token (kw)->trivia;
+  for (int r = 0; r < dimension; r++)
+    ast_add (items, loops_out[r]);
   ast_add (block, items);
   ast_add (block, new_token ('}', "}", at));
   return block;
@@ -2261,7 +2310,7 @@ static int loops_give_position (const struct loop_def *leaf,
 
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, int has_reach,
+                              int has_ghosts, int has_located, int has_reach,
                               int has_coarse_reach, struct ast *kw,
                               struct ast *body, int *rejected)
 {
@@ -2276,7 +2325,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   struct ast *ps[MAX_LOOP_PARAMS], *vs[MAX_LOOP_PARAMS];
   int nparams = 0, nargs = 0;
   struct ghost_scalar written[MAX_GHOST_SCALARS], needed[MAX_GHOST_SCALARS];
-  int nwritten = 0, nneeded = 0, *wrote;
+  struct ghost_scalar located[MAX_GHOST_SCALARS];   /* read at the cell */
+  int nwritten = 0, nneeded = 0, nlocated = 0, *wrote;
   static const char *const strides[] = { "", " * %s.sy", " * %s.sz" };
   const struct token *at = ast_token (kw);
   struct stencil_block blocks[MAX_STENCIL_BLOCKS];
@@ -2451,6 +2501,15 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       add_ghost_scalar (written, &nwritten, ghost_scalar_of (access, body));
     else if (offset)
       add_ghost_scalar (needed, &nneeded, ghost_scalar_of (access, body));
+    else if (nlocated < MAX_GHOST_SCALARS) {
+      /* read at its cell: a face's or a vertex's may be stale there too
+       * (refluxing changes a block's own faces); which, is known as it
+       * runs (scalar_location ()). Plain scalars only. */
+      struct ghost_scalar g = ghost_scalar_of (access, body);
+
+      if (g.scalar)
+        add_ghost_scalar (located, &nlocated, g);
+    }
   }
   if (*rejected > errors)
     return body;
@@ -2501,6 +2560,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       }
   if (by_caller)
     nwritten = nneeded = 0;               /* checked above; none emitted */
+  if (by_caller || !has_located)
+    nlocated = 0;
   if ((nwritten || nneeded) && !has_ghosts) {
     stencil_error (rejected, kw, "foreach () keeps the ghosts of the scalars "
                    "it writes up to date: it needs ghosts_mark_dirty (), "
@@ -2759,10 +2820,18 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
         text = arena_printf ("const double %s = 0;", stencil_reserved[r]);
       else
         text = arena_printf ("const double %s = __cwrap_%s_%d + (%s - %s.%s) "
-                             "* __cwrap_Delta_%d;", stencil_reserved[r],
+                             "* __cwrap_Delta_%d%s;", stencil_reserved[r],
                              stencil_reserved[r], serial,
                              STENCIL_NAME (cell->name, cijk[r], inner), shape,
-                             first[r], serial);
+                             first[r], serial,
+                             /* a loop over faces: the face's centre, half
+                              * a cell down its axis */
+                             loop_gives (cell, "face_axis")
+                             ? arena_printf (" - 0.5 * __cwrap_Delta_%d * (%s "
+                                             "== %d)", serial,
+                                             STENCIL_NAME (cell->name, "face_axis",
+                                                           inner), r)
+                             : "");
       decl = parse_stencil_item (text);
       each_leaf (decl, flatten_leaf, (void *)at);
       ast_add (cell_items, decl);
@@ -2843,7 +2912,7 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   kids[2] = close;
   struct ast *leaf_args = stencil_arguments (def->leaf_args, ps, params, nparams);
 
-  if (!nwritten && !nneeded && !nparams)
+  if (!nwritten && !nneeded && !nlocated && !nparams)
     return stencil_mark (expand_loop (leaf, kw, leaf_args,
                                       ast_node (AST_COMPOUND_STATEMENT, kids, 3),
                                       NULL, 1, rejected));
@@ -2871,6 +2940,19 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
     }
   }
 
+  /* the faces and vertices read at their cell, if stale */
+  if (nlocated) {
+    const char *list = "";
+
+    for (int r = 0; r < nlocated; r++) {
+      es[nes] = located[r].scalar;
+      list = arena_printf ("%s%s(__cwrap_e%d)", list, r ? ", " : "", nes++);
+    }
+    add_stencil_items (around, arena_printf ("ghosts_update_dirty_located (%d, "
+                                             "(const int []) { %s });",
+                                             nlocated, list), es, nes, at);
+    nes = 0;
+  }
   for (int r = 0; r < nneeded; r++)
     all |= needed[r].all;
   if (all)

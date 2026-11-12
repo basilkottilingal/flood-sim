@@ -327,6 +327,7 @@ struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected);
 
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
+int stencil_dimension (void);       /* -dimension=, or 0 */
 
 /* foreach (, once `)` is read: the loop whose accesses the body adds to.
  * One inside another is an error. */
@@ -373,8 +374,22 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
  * the loop writes, a warning. */
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
-                              int has_ghosts, int has_reach,
+                              int has_ghosts, int has_located, int has_reach,
                               int has_coarse_reach, struct ast *kw,
                               struct ast *body, int *rejected);
+
+/* A stencil loop by axis: N () statement, where N is not declared but N_x,
+ * N_y (, N_z) are, @foreach each (libb-amr's foreach_face_x ()): N_x ()
+ * statement, then N_y () with the statement rotated as foreach_dimension ()
+ * rotates it, and so on, each loop with the rules of any. A loop whose cell
+ * loop gives face_axis has x, y, z at the face: half a cell down that axis.
+ * Before a loop, the scalars it reads at their cell are updated if stale
+ * and not at the centre (ghosts_update_dirty_located (), if declared): a
+ * face's own values change as fluxes are made to agree. */
+struct ast *stencil_by_axis (struct stencil_loop *loop,
+                             const struct stencil_def *const defs[3],
+                             struct ast *args, int has_ghosts, int has_located,
+                             int has_reach, int has_coarse_reach,
+                             struct ast *kw, struct ast *body, int *rejected);
 
 #endif

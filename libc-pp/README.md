@@ -851,6 +851,18 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   outside stencil loops too (`u_x`, `v.x`), and in 1D it is the statement
   as written. libb-amr's `prolong_linear` and `prolong_minmod` are written
   with it.
+- **Loops by axis:** where `N_x`, `N_y` (, `N_z`) are `@foreach` loops and
+  `N` is not, `N () statement` runs `N_x ()` with the statement, then
+  `N_y ()` with it rotated as `foreach_dimension ()` rotates, and so on.
+  Each is a loop of its own, with every rule. libb-amr's `foreach_face ()`
+  is one. A cell loop that gives `face_axis` has `x`, `y`, `z` at the
+  face: half a cell down that axis.
+- **Faces and vertices read at their cell are kept up to date too.** A
+  face vector's own values change when the fluxes are made to agree at
+  level jumps. So before a loop, the scalars it reads at their cell are
+  passed to `ghosts_update_dirty_located ()`, where that is declared. It
+  updates those that are stale and not at the centre (`scalar_location
+  ()`), and is cheap for the others.
 - **`foreach_neighbor (r)` moves the point,** as in Basilisk: its statement
   runs for each cell within `r` of the point along every axis, the point's
   own included, and `s[]`, `s[i,j]`, `x`, `y`, `z` and `Delta` are then

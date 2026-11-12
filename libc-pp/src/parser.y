@@ -280,16 +280,33 @@ static struct ast *stencil_use (struct scope_table *scopes,
                                 struct ast *args, struct ast *body)
 {
   struct stencil_loop *loop = status->stencil;
+  const char *text = ast_token (name)->text;
+  const struct stencil_def *def = find_stencil (status, text);
+  int has_ghosts = scope_find (scopes, "ghosts_mark_dirty")
+                   && scope_find (scopes, "ghosts_mark_all_dirty")
+                   && scope_find (scopes, "ghosts_update_dirty");
+  int has_located = scope_find (scopes, "ghosts_update_dirty_located") != NULL;
+  int has_reach = scope_find (scopes, "BAMR_GHOSTS") != NULL;
+  int has_coarse_reach = scope_find (scopes, "BAMR_COARSE_REACH") != NULL;
 
   status->stencil = loop->outer;
-  return stencil_loop_end (loop, find_stencil (status, ast_token (name)->text),
-                           args,
-                           scope_find (scopes, "ghosts_mark_dirty")
-                           && scope_find (scopes, "ghosts_mark_all_dirty")
-                           && scope_find (scopes, "ghosts_update_dirty"),
-                           scope_find (scopes, "BAMR_GHOSTS") != NULL,
-                           scope_find (scopes, "BAMR_COARSE_REACH") != NULL,
-                           name, body, &status->rejected);
+  if (!def) {
+    /* N (): N_x (), N_y (), ... by axis, if declared */
+    const struct stencil_def *defs[3] = { NULL, NULL, NULL };
+    char axis[256];
+    int all = 1;
+
+    for (int a = 0; a < stencil_dimension (); a++) {
+      snprintf (axis, sizeof (axis), "%s_%c", text, "xyz"[a]);
+      all &= (defs[a] = find_stencil (status, axis)) != NULL;
+    }
+    if (all && defs[0])
+      return stencil_by_axis (loop, defs, args, has_ghosts, has_located,
+                              has_reach, has_coarse_reach, name, body,
+                              &status->rejected);
+  }
+  return stencil_loop_end (loop, def, args, has_ghosts, has_located, has_reach,
+                           has_coarse_reach, name, body, &status->rejected);
 }
 
 /* A file may have foreach loops or something named foreach, not both. Reports
