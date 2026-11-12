@@ -171,6 +171,30 @@ layer, so a face vector takes the same blocks as any scalar.
 - In `foreach_face ()`, `x`, `y`, `z` are the face's centre.
   `foreach_face_x ()` (`_y`, `_z`) loops over one axis only.
 
+## Vertices
+
+A `vertex_scalar v` (cwrap) holds at each cell its lower corner. A block's
+vertices are at 0 .. m along each axis, m in the ghost layer.
+
+    foreach_vertex ()
+      v[] = zb_at (x, y);                       /* x, y: the vertex */
+    foreach ()
+      c[] = (v[] + v[1] + v[0,1] + v[1,1]) / 4; /* the cell's corners */
+
+- **Each vertex has one owner,** the block where its indices are all below
+  m, and the block on an upper wall for its vertices there.
+  `foreach_vertex ()` visits those.
+- **Every other copy gets the owner's value** when the ghosts are made,
+  lazily, as for any scalar. Within a level that is a copy. Where a coarse
+  leaf is above fine blocks, their vertices on it are the coarse ones:
+  copied where they coincide, interpolated between (hanging vertices,
+  `prolong_vertex`). Where fine blocks are above, the coarse leaf takes
+  their parent's, the fine ones (`restriction_vertex`, an injection). So a
+  vertex field is continuous at level jumps, and a linear one exact
+  everywhere, refined and coarsened too (`tests/test_vertices.c`).
+- The ghosts beyond a wall are made as a cell scalar's (a mirror of the
+  cells), not a vertex's: read them with care.
+
 ## Tree caches
 
 The loops over the tree (`foreach_leaf ()`, `foreach_leaf_parallel ()`,

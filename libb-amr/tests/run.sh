@@ -3,7 +3,8 @@
 # AddressSanitizer and UBSan. Run from libb-amr:  sh tests/run.sh
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap).
 # JOBS: the tests built and run at once (default: the processors).
-# QUICK=1: the pool, then tree, blocks, ghosts, adapt, stencil, faces in 1, 2
+# QUICK=1: the pool, then tree, blocks, ghosts, adapt, stencil, faces,
+# vertices in 1, 2
 # and 3 dimensions, double and float, only: no OpenMP, alignment, other
 # level indices or MADV_FREE. After each change; the whole before a commit,
 # with tests/bit/compare.sh (every cell bit for bit against HEAD).
@@ -110,6 +111,7 @@ for prec in "" "-DBAMR_SINGLE"; do
     run adapt  $d "$prec" tests/test_adapt.c "$lib/tree.c" $src
     run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
     run faces $d "$prec" tests/test_faces.c "$lib/tree.c" $src
+    run vertices $d "$prec" tests/test_vertices.c "$lib/tree.c" $src
   done
 done
 if [ -n "$QUICK" ]; then
@@ -126,6 +128,7 @@ for d in 2 3; do
   run adapt  $d "-fopenmp" tests/test_adapt.c "$lib/tree.c" $src
   run stencil $d "-fopenmp" tests/test_stencil.c "$lib/tree.c" $src
   run faces $d "-fopenmp" tests/test_faces.c "$lib/tree.c" $src
+  run vertices $d "-fopenmp" tests/test_vertices.c "$lib/tree.c" $src
 done
 # stored blocks in the aligned layout: rows on 4 Reals
 for d in 1 2 3; do
@@ -134,6 +137,7 @@ for d in 1 2 3; do
   run adapt  $d "-DBAMR_ALIGN=4" tests/test_adapt.c "$lib/tree.c" $src
   run stencil $d "-DBAMR_ALIGN=4" tests/test_stencil.c "$lib/tree.c" $src
   run faces $d "-DBAMR_ALIGN=4" tests/test_faces.c "$lib/tree.c" $src
+  run vertices $d "-DBAMR_ALIGN=4" tests/test_vertices.c "$lib/tree.c" $src
 done
 # the level indices side by side: memindex, voxel-memindex, nano-vdb
 isrc="$lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c"

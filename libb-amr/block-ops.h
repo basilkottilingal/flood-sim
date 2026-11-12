@@ -131,6 +131,66 @@ enum { face_location_x = CWRAP_FACE_X, face_location_y = CWRAP_FACE_Y,
   }
 }
 
+/*
+.. Vertices: a vertex_scalar holds, at a cell, its lower corner.
+..
+.. restriction_vertex: a parent's vertices 0 .. m along each axis (m too,
+.. in its ghost layer), each the fine vertex at the same place: every coarse
+.. vertex is one of the fine ones.
+..
+.. prolong_vertex: a fine vertex at a coarse one takes it; between two, or
+.. four, or eight, their mean: multilinear, exact for a linear field.
+*/
+@restriction restriction_vertex (Index p, scalar s)
+{
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m, hi [3] = { 1, 1, 1 };
+  assert (tree_has_children (index_node (p)));
+  Real * b = block_data (index_node (p)->s, s);
+  for (int d = 0; d < dimension; d++)
+    hi [d] = m + 1;
+  int X [3];
+  for (X [2] = 0; X [2] < hi [2]; X [2]++)
+  for (X [1] = 0; X [1] < hi [1]; X [1]++)
+  for (X [0] = 0; X [0] < hi [0]; X [0]++)
+  {
+    int local [3] = { 0, 0, 0 }, child = 0;
+    for (int d = 0; d < dimension; d++)
+    {
+      int up = 2 * X [d] >= m;
+      child |= up << d;
+      local [d] = 2 * X [d] - up * m;
+    }
+    b [block_at (sh, X)] = block_data (index_node (index_child (p, child))->s, s)
+                           [block_at (sh, local)];
+  }
+}
+
+@prolongation prolong_vertex (const Prolongation * pr)
+{
+  scalar s = pr->s;
+  foreach_prolongation (pr) {
+    RealSum wx1 = child.x > 0 ? 0.5 : 0, wx0 = 1 - wx1;
+#if dimension == 1
+    s[] = (Real) (wx0 * coarse (s) + wx1 * coarse (s, 1));
+#elif dimension == 2
+    RealSum wy1 = child.y > 0 ? 0.5 : 0, wy0 = 1 - wy1;
+    s[] = (Real) (wx0 * wy0 * coarse (s) + wx1 * wy0 * coarse (s, 1)
+                  + wx0 * wy1 * coarse (s, 0, 1) + wx1 * wy1 * coarse (s, 1, 1));
+#else
+    RealSum wy1 = child.y > 0 ? 0.5 : 0, wy0 = 1 - wy1;
+    RealSum wz1 = child.z > 0 ? 0.5 : 0, wz0 = 1 - wz1;
+    s[] = (Real) (wz0 * (wx0 * wy0 * coarse (s) + wx1 * wy0 * coarse (s, 1)
+                         + wx0 * wy1 * coarse (s, 0, 1)
+                         + wx1 * wy1 * coarse (s, 1, 1))
+                  + wz1 * (wx0 * wy0 * coarse (s, 0, 0, 1)
+                           + wx1 * wy0 * coarse (s, 1, 0, 1)
+                           + wx0 * wy1 * coarse (s, 0, 1, 1)
+                           + wx1 * wy1 * coarse (s, 1, 1, 1)));
+#endif
+  }
+}
+
 @boundary bc_neumann (const Boundary * bc)
 {
   boundary_cells (bc)

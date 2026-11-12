@@ -850,6 +850,84 @@
     = foreach_leaf_faces (2) foreach_face_cells (tree_block_shape (), 2, face_last);
   #endif
 
+  /*
+  .. Vertices (libc-pp's vertex_scalar: v at a cell is its lower corner).
+  .. A block's vertices are at 0 .. m along each axis, m in the ghost layer.
+  .. Each has one owner: the block where its indices are all below m; and at
+  .. the domain's upper walls, the block there for its vertices at m along
+  .. them. foreach_vertex () visits those. The ghosts of a vertex scalar
+  .. then give every other copy the owner's value. Within a level that is a
+  .. copy. Where a coarse leaf is above fine blocks, their vertices on it are
+  .. the coarse ones: copied where they coincide, interpolated between
+  .. (prolong_vertex). Where fine blocks are above, they are the parent's,
+  .. the fine ones (restriction_vertex). So a vertex field is continuous,
+  .. level jumps included. x, y, z are the vertex's position.
+  */
+  static inline int block_upper_walls (Index p)
+  {
+    int n = 1 << p.level, w = (p.i == n - 1);
+  #if dimension > 1
+    w |= (p.j == n - 1) << 1;
+  #endif
+  #if dimension > 2
+    w |= (p.k == n - 1) << 2;
+  #endif
+    return w;
+  }
+
+  @loop foreach_leaf_vertices () : IJKL, node, sblocks, vertex_walls
+  {
+    const TreeCaches * tc = tree_caches ();
+    const TreeItem * items = tc->leaves;
+    unsigned generation = tree_generation;
+    for (int q = 0, n = tc->nleaves; q < n; q++)
+    {
+      if (tree_generation != generation)
+        tree_changed_under ("foreach_vertex");
+      INDEX_UNPACK (items [q].p);
+      BAMRNode * node = items [q].node;
+      void *** sblocks = node->s;
+      int vertex_walls = block_upper_walls (items [q].p);
+      (void) node, (void) sblocks, (void) vertex_walls;
+      {...}
+    }
+  }
+
+  @loop foreach_vertex_cells (BlockShape shape, int walls)
+    : CIJK, c, shape, at_vertex
+  {
+    int at_vertex = 1;
+    (void) at_vertex;
+    int hi [3] = { 1, 1, 1 };
+    for (int a = 0; a < dimension; a++)
+      hi [a] = shape.m + ((walls >> a) & 1);
+    int x [3] = { 0, 0, 0 };
+  #if dimension > 2
+    for (x [2] = 0; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
+    for (x [1] = 0; x [1] < hi [1]; x [1]++)
+  #endif
+    for (x [0] = 0; x [0] < hi [0]; x [0]++)
+    {
+      int ci = shape.ox + x [0];
+  #if dimension > 1
+      int cj = shape.g + x [1];
+      (void) cj;
+  #endif
+  #if dimension > 2
+      int ck = shape.g + x [2];
+      (void) ck;
+  #endif
+      int c = (int) block_at (shape, x);
+      (void) ci, (void) c;
+      {...}
+    }
+  }
+
+  @foreach foreach_vertex ()
+    = foreach_leaf_vertices () foreach_vertex_cells (tree_block_shape (), vertex_walls);
+
   @foreach foreach_level (int l)
     = foreach_level_block (l) foreach_cell (tree_block_shape (), 0);
   @foreach foreach_level_or_leaf (int l)

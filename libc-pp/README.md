@@ -857,6 +857,9 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   Each is a loop of its own, with every rule. libb-amr's `foreach_face ()`
   is one. A cell loop that gives `face_axis` has `x`, `y`, `z` at the
   face: half a cell down that axis.
+- **A comma in `s[i,j]` splits a macro's argument:** the preprocessor
+  does not group brackets. Read the cell into a local first, or put it in
+  parentheses: `fabs ((v[1,1]) - w)`.
 - **Faces and vertices read at their cell are kept up to date too.** A
   face vector's own values change when the fluxes are made to agree at
   level jumps. So before a loop, the scalars it reads at their cell are

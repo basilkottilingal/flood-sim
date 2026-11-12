@@ -382,7 +382,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
  * N_y (, N_z) are, @foreach each (libb-amr's foreach_face_x ()): N_x ()
  * statement, then N_y () with the statement rotated as foreach_dimension ()
  * rotates it, and so on, each loop with the rules of any. A loop whose cell
- * loop gives face_axis has x, y, z at the face: half a cell down that axis.
+ * loop gives face_axis has x, y, z at the face: half a cell down that axis;
+ * one whose cell loop gives at_vertex, at the cell's lower corner. 
  * Before a loop, the scalars it reads at their cell are updated if stale
  * and not at the centre (ghosts_update_dirty_located (), if declared): a
  * face's own values change as fluxes are made to agree. */

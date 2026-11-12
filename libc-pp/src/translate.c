@@ -2831,6 +2831,10 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                                              "== %d)", serial,
                                              STENCIL_NAME (cell->name, "face_axis",
                                                            inner), r)
+                             /* a loop over vertices: the cell's lower
+                              * corner, half a cell down every axis */
+                             : loop_gives (cell, "at_vertex")
+                             ? arena_printf (" - 0.5 * __cwrap_Delta_%d", serial)
                              : "");
       decl = parse_stencil_item (text);
       each_leaf (decl, flatten_leaf, (void *)at);
