@@ -222,7 +222,7 @@ into every program, whatever the dimension.
 
     void f (void)
     {
-      scalar x;                 // x = scalar_new_named ("x"), freed as the scope ends
+      scalar x;                 // a new id, named "x", freed as the scope ends
       static scalar s;          // numbered at startup, like a global
       scalar k = scalar_new (); // yours: freed only when you call scalar_free
       vector u = vector_new (); // the same: vector_free (u) when done
@@ -230,7 +230,7 @@ into every program, whatever the dimension.
 
 - **`scalar x;` becomes**
 
-      scalar x __attribute__ ((cleanup (__cwrap_scalar_free))) = scalar_new_named ("x");
+      scalar x __attribute__ ((cleanup (__cwrap_scalar_free))) = __cwrap_scalar_new_named ("x");
 
   so `scalar_free (x)` runs however the scope ends: the end of the block,
   `return`, `break`, `continue` or `goto`. Scalars are freed in reverse order.
@@ -238,7 +238,7 @@ into every program, whatever the dimension.
   them, last first:
 
       tensor w __attribute__ ((cleanup (__cwrap_tensor_free)))
-        = tensor_new_named ((const char *const []) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });
+        = __cwrap_tensor_new_named ((const char *const []) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });
 
 - **`static scalar s;`** becomes `static scalar s;` followed by one slot for each
   of its scalars, as declarations of their own on the same line. They are
@@ -256,8 +256,9 @@ shows the declaration.
 
 ### Names
 
-Every scalar cwrap numbers or makes is named after its declaration, so that
-messages, output and visualisation can say `h` and not `scalar 7`:
+The scalars cwrap numbers or makes, and only those, are named after their
+declaration, so that messages, output and visualisation can say `h` and not
+`scalar 7`. A program never names a scalar itself:
 
     scalar h;                  /* "h" */
     vector u;                  /* "u.x", "u.y" */
@@ -269,11 +270,12 @@ messages, output and visualisation can say `h` and not `scalar 7`:
         scalar h;              /* "f.h.2": it hides f.h */
       }
       static scalar kept;      /* "f.kept": static, always its function's */
+      scalar k = scalar_new ();  /* "": not cwrap's */
     }
 
 - **No allocation, no copy:** a name is a pointer to a string literal that
-  cwrap writes, in the slot of a global or in `scalar_new_named ("tmp")`;
-  `scalar.c` keeps the pointer.
+  cwrap writes, in the slot of a global or in `__cwrap_scalar_new_named
+  ("tmp")`; `scalar.c` keeps the pointer.
 - **A local that hides another scalar of its name** (a global, or a local of
   an outer block) is named after its function, `f.h`, and a deeper one is
   numbered, `f.h.2`, `f.h.3`, so that the scalars alive in one scope never
@@ -286,15 +288,13 @@ messages, output and visualisation can say `h` and not `scalar 7`:
 
   | | |
   |---|---|
-  | `scalar_new_named (name)` | `scalar_new ()`, named |
-  | `scalar_name (s)` | its name, or `NULL` (no name, or not in use) |
-  | `scalar_set_name (s, name)` | names or renames `s`; the string must outlive it, it is not copied |
-  | `scalar_find (name)` | the scalar in use with that name, the last made if several; -1 if none |
+  | `scalar_name (s)` | its name: `""` if it has none, or is not in use; never `NULL` |
+  | `scalar_find (name)` | the scalar in use with that name, the last made if several; -1 if none, or for `""` |
 
-  `vector_new_named (names)` and `tensor_new_named (names)` take an array of
-  names, in the order of their scalars.
-- **`scalar_new ()` gives none,** a freed scalar loses its, and its id's next
-  scalar starts with none.
+  (`__cwrap_scalar_new_named`, `__cwrap_vector_new_named` and
+  `__cwrap_tensor_new_named` are cwrap's, for the locals it makes.)
+- **Any other scalar is named `""`:** one from `scalar_new ()`, `vector_new
+  ()` or `tensor_new ()`, and any id once freed.
 - **libb-amr's messages use them:** `ghost_ops: scalar zbl (1): its operators
   would depend on itself, through scalar hl (0)`.
 

@@ -31,8 +31,9 @@ static inline void pushbit (int b)
 }
 
 /*
-.. Names: a pointer each, never a copy (scalar.h); and the order in which the
-.. ids were taken, so that scalar_find () gives the last made of a name.
+.. Names: a pointer each, never a copy, "" for none (scalar.h); and the order
+.. in which the ids were taken, so that scalar_find () gives the last made of
+.. a name.
 */
 static const char * names [NSCALAR_MAX];
 static unsigned long long born [NSCALAR_MAX], births;
@@ -46,35 +47,29 @@ scalar scalar_new ()
              NSCALAR_MAX);
     abort ();
   }
-  names [s] = NULL;
+  names [s] = "";
   born [s] = ++births;
   if (scalar_new_hook)
     scalar_new_hook ((scalar) s);
   return (scalar) s;
 }
 
-scalar scalar_new_named (const char * name)
+scalar __cwrap_scalar_new_named (const char * name)
 {
   scalar s = scalar_new ();
-  names [s] = name;
+  names [s] = name ? name : "";
   return s;
 }
 
 const char * scalar_name (scalar s)
 {
-  return scalar_in_use (s) ? names [s] : NULL;
-}
-
-void scalar_set_name (scalar s, const char * name)
-{
-  if (scalar_in_use (s))
-    names [s] = name;
+  return scalar_in_use (s) && names [s] ? names [s] : "";
 }
 
 scalar scalar_find (const char * name)
 {
   int found = -1;
-  if (!name)
+  if (!name || !*name)
     return -1;
   for (int s = 0; s < NSCALAR_MAX; s++)
     if (scalar_in_use (s) && names [s] && strcmp (names [s], name) == 0
@@ -104,7 +99,7 @@ void scalar_free (scalar s)
   {
     fprintf (stderr, "scalar_free: scalar %s (%d) is global, numbered once "
              "for the whole run: it is never freed\n",
-             names [s] ? names [s] : "unnamed", (int) s);
+             names [s] && *names [s] ? names [s] : "#unnamed", (int) s);
     abort ();
   }
   /*
@@ -115,7 +110,7 @@ void scalar_free (scalar s)
   {
     if (scalar_free_hook)
       scalar_free_hook (s);
-    names [s] = NULL;
+    names [s] = "";
     pushbit ((int) s);
   }
 }
@@ -145,6 +140,6 @@ __attribute__ ((constructor (101))) static void number_global_scalars ()
   for (int s = 0; s < NSCALAR_MAX; s++)       /* all ids free */
     pushbit (s);
   for (const struct __cwrap_scalar_slot * p = __start_scalars; p < __stop_scalars; p++)
-    *p->s = scalar_new_named (p->name);
+    *p->s = __cwrap_scalar_new_named (p->name);
   n_global_scalars = (int) (__stop_scalars - __start_scalars);
 }

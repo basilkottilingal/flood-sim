@@ -96,8 +96,9 @@ static int ghost_ops_fail (const char * format, ...)
 static const char * const ghost_kinds [] = { "prolongation", "restriction",
                                              "boundary" };
 
-/* a scalar in a message: its name (scalar.h), or "unnamed", with its id */
-#define SNAME(s) (scalar_name (s) ? scalar_name (s) : "unnamed")
+/* a scalar in a message: its name (scalar.h), or "#unnamed", which no
+.. scalar can be named (# is in no C name), with its id */
+#define SNAME(s) (*scalar_name (s) ? scalar_name (s) : "#unnamed")
 
 int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
 {

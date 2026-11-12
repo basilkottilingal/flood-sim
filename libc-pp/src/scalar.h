@@ -33,22 +33,21 @@
   extern int n_global_scalars;
 
   /*
-  .. Names. Each scalar cwrap numbers or makes is named after its
-  .. declaration: "h", "u.x" for a vector's, "f.tmp" for a local that hides
-  .. another scalar of its name (see translate.h). A name is a pointer, never
-  .. a copy: cwrap's are string literals, and one given by hand must outlive
-  .. the scalar, or its next name. No allocation, no strdup.
+  .. Names. Only the scalars cwrap numbers or makes are named, after their
+  .. declaration: "h", "u.x" for a vector's, "f.h" for a local that hides
+  .. another scalar of its name (see translate.h). Any other, as one from
+  .. scalar_new (), is named "". A name is a pointer to a string literal
+  .. cwrap writes, never a copy: no allocation, no strdup.
   ..
-  ..   scalar_new_named (name)     scalar_new (), named
-  ..   scalar_name (s)             its name, or NULL (none, or not in use)
-  ..   scalar_set_name (s, name)   names s, or renames it
-  ..   scalar_find (name)          the scalar in use with that name, the last
-  ..                               made if several (an inner one); -1 if none
+  ..   scalar_name (s)    its name: "" if none, or not in use
+  ..   scalar_find (name) the scalar in use with that name, the last made if
+  ..                      several (an inner one); -1 if none, or for ""
   */
-  scalar       scalar_new_named (const char * name);
-  const char * scalar_name      (scalar s);
-  void         scalar_set_name  (scalar s, const char * name);
-  scalar       scalar_find      (const char * name);
+  const char * scalar_name (scalar s);
+  scalar       scalar_find (const char * name);
+
+  /* For cwrap: scalar_new (), named name, a string literal */
+  scalar __cwrap_scalar_new_named (const char * name);
 
   /* For cwrap: a scalar at file scope (or static in a function), its slot */
   struct __cwrap_scalar_slot
@@ -159,16 +158,16 @@
     return (vector) { x, y };
   }
 
-  /* named: n [0], n [1] (a tensor's in its order); n may be NULL */
-  static inline vector vector_new_named (const char * const * n)
+  /* for cwrap, named: n [0], n [1] (a tensor's in its order) */
+  static inline vector __cwrap_vector_new_named (const char * const * n)
   {
-    scalar x = scalar_new_named (n ? n [0] : 0), y = scalar_new_named (n ? n [1] : 0);
+    scalar x = __cwrap_scalar_new_named (n ? n [0] : 0), y = __cwrap_scalar_new_named (n ? n [1] : 0);
     return (vector) { x, y };
   }
 
-  static inline tensor tensor_new_named (const char * const * n)
+  static inline tensor __cwrap_tensor_new_named (const char * const * n)
   {
-    vector x = vector_new_named (n), y = vector_new_named (n ? n + 2 : 0);
+    vector x = __cwrap_vector_new_named (n), y = __cwrap_vector_new_named (n ? n + 2 : 0);
     return (tensor) { x, y };
   }
 
@@ -196,17 +195,17 @@
     return (vector) { x, y, z };
   }
 
-  static inline vector vector_new_named (const char * const * n)
+  static inline vector __cwrap_vector_new_named (const char * const * n)
   {
-    scalar x = scalar_new_named (n ? n [0] : 0), y = scalar_new_named (n ? n [1] : 0),
-           z = scalar_new_named (n ? n [2] : 0);
+    scalar x = __cwrap_scalar_new_named (n ? n [0] : 0), y = __cwrap_scalar_new_named (n ? n [1] : 0),
+           z = __cwrap_scalar_new_named (n ? n [2] : 0);
     return (vector) { x, y, z };
   }
 
-  static inline tensor tensor_new_named (const char * const * n)
+  static inline tensor __cwrap_tensor_new_named (const char * const * n)
   {
-    vector x = vector_new_named (n), y = vector_new_named (n ? n + 3 : 0),
-           z = vector_new_named (n ? n + 6 : 0);
+    vector x = __cwrap_vector_new_named (n), y = __cwrap_vector_new_named (n ? n + 3 : 0),
+           z = __cwrap_vector_new_named (n ? n + 6 : 0);
     return (tensor) { x, y, z };
   }
 

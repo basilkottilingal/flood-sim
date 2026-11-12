@@ -25,7 +25,7 @@ void translate_set_dimension (int dimension);
 /* Rewrites the scalars that decl, a declaration in function, declares:
  *
  *   scalar x;          becomes  scalar x __attribute__ ((cleanup (...)))
- *                                 = scalar_new_named ("x");
+ *                                 = __cwrap_scalar_new_named ("x");
  *   static scalar s;   becomes  static scalar s; static const struct
  *                                 __cwrap_scalar_slot slot ... = { &s, "f.s" };
  *
@@ -34,7 +34,8 @@ void translate_set_dimension (int dimension);
  * (a global, or a local of an outer block: then "f.x.2", "f.x.3", ...), so
  * that two scalars alive in one scope never share a name; a static one is
  * always "f.s". A vector's are "u.x", "u.y", .... function may be a @loop's
- * name, in its definition.
+ * name, in its definition. Only these are named: any other scalar, as one
+ * from scalar_new (), has the name "".
  *
  * so that x gets an id from scalar_new (), and scalar_free (x) runs however
  * its scope ends, while s is numbered at startup like a global scalar. A

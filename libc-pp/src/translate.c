@@ -401,10 +401,10 @@ struct ast *local_scalars (struct ast *decl, const char *function)
                               slots, local_slot++, name, parts[k], named,
                               parts[k]);
     } else {
-      /* scalar x __attribute__ ((cleanup (...))) = scalar_new_named ("x");
-       * vector_new_named ((const char *const []) { "u.x", "u.y" }) for a
-       * vector, and so for a tensor */
-      const char *maker = arena_printf ("scalar_new_named (\"%s\")", named);
+      /* scalar x __attribute__ ((cleanup (...))) = __cwrap_scalar_new_named
+       * ("x"); __cwrap_vector_new_named ((const char *const []) { "u.x",
+       * "u.y" }) for a vector, and so for a tensor */
+      const char *maker = arena_printf ("__cwrap_scalar_new_named (\"%s\")", named);
 
       if (nparts > 1) {
         const char *list = "";
@@ -412,7 +412,7 @@ struct ast *local_scalars (struct ast *decl, const char *function)
         for (int k = 0; k < nparts; k++)
           list = arena_printf ("%s%s\"%s%s\"", list, k ? ", " : "", named,
                                parts[k]);
-        maker = arena_printf ("%s_new_named ((const char *const []) { %s })",
+        maker = arena_printf ("__cwrap_%s_new_named ((const char *const []) { %s })",
                              type, list);
       }
       struct ast *item = parse_block_item (arena_printf (

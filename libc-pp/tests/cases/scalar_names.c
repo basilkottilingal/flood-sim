@@ -7,7 +7,7 @@ static const scalar * const global_h = &h;   /* h, where a local hides it */
 static void show (scalar s)
 {
   const char * n = scalar_name (s);
-  printf ("%s ", n ? n : "-");
+  printf ("%s ", *n ? n : "-");
 }
 
 /* a tmp of its own while inner's is alive: the same name, the last found */
@@ -45,13 +45,10 @@ int main (void)
   printf ("| ");
   inner ();
   printf ("| ");
-  scalar m = scalar_new ();         /* by hand: no name, then one */
+  scalar m = scalar_new ();         /* not cwrap's: named "" */
   show (m);
-  scalar_set_name (m, "made");
-  show (m);
-  printf ("%d ", scalar_find ("made") == m);
-  scalar_free (m);                  /* freed: the name forgotten */
-  show (m);
-  printf ("%d\n", scalar_find ("made"));
+  printf ("%d ", scalar_find (""));
+  scalar_free (m);
+  printf ("%s\n", *scalar_name (m) ? "?" : "-");
   return 0;
 }
