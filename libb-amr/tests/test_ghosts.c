@@ -247,7 +247,7 @@ int main (void)
 
   /* 1. a linear field, extrapolated at the walls: every ghost exact, at
    * level jumps, walls and corners; parents too with ghosts_update_levels */
-  scalar_set_ops (u, (ScalarOps) { .boundary = bc_linear });
+  ghost_ops (u, boundary.all (bc_linear));
   set (u, linear);
   ghosts_update (u);
   CHECK (ghost_error (u, linear, 0) < tol);
@@ -256,7 +256,7 @@ int main (void)
 
   /* 2. the defaults: zero gradient at the walls, mirrored over every wall a
    * ghost is beyond; bc_odd the same, with a sign per wall */
-  scalar_set_ops (w, (ScalarOps) { .boundary = bc_odd });
+  ghost_ops (w, boundary.all (bc_odd));
   set (v, wavy);
   set (w, wavy);
   ghosts_update (v, w);
@@ -286,6 +286,43 @@ int main (void)
       }
     }
     CHECK (walls > 0 && dn == 0 && dodd == 0);
+  }
+
+  /* 2b. per face: odd at every wall but left and right, zero gradient
+   * there; a ghost is its mirror, the sign flipped once per wall crossed
+   * but those two, corners too */
+  {
+    scalar pf;
+    ghost_ops (pf, boundary.all (bc_odd), boundary.left (bc_neumann),
+                   boundary.right (bc_neumann));
+    CHECK (scalar_get_boundary (pf, GHOST_LEFT) == bc_neumann
+           && scalar_get_boundary (pf, GHOST_RIGHT) == bc_neumann);
+    for (int f = 2; f < GHOST_FACES; f++)
+      CHECK (scalar_get_boundary (pf, f) == bc_odd);
+    set (pf, wavy);
+    ghosts_update (pf);
+    double d = 0;
+    long walls = 0, both = 0;
+    foreach_leaf () {
+      int P [3];
+      coords ((Index) {IJKL}, P);
+      int nb = 1 << level;
+      const Real * b = block_data (sblocks, pf);
+      block_cells (shape, shape.g) {
+        XOF (x);
+        int y [3] = { x [0], x [1], x [2] }, flips = 0, odd = 0;
+        for (int a = 0; a < dimension; a++)
+          if ((P [a] == 0 && x [a] < 0) || (P [a] == nb - 1 && x [a] >= shape.m)) {
+            y [a] = x [a] < 0 ? -1 - x [a] : 2 * shape.m - 1 - x [a];
+            flips++, odd += a > 0;
+          }
+        if (!flips)
+          continue;
+        walls++, both += flips > odd && odd > 0;
+        d = fmax (d, fabs (b [c] - (odd & 1 ? -1 : 1) * b [block_at (shape, y)]));
+      }
+    }
+    CHECK (walls > 0 && d == 0 && (dimension == 1 || both > 0));
   }
 
   /* 3. injection: a ghost next to a coarser leaf is that leaf's cell, as
@@ -339,11 +376,12 @@ int main (void)
 
   /* 4. minmod: exact for a linear field too; and no new minimum, where the
    * linear one undershoots a kink */
-  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_minmod, .boundary = bc_linear });
+  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_minmod });
+  ghost_ops (z, boundary.all (bc_linear));
   set (z, linear);
   ghosts_update (z);
   CHECK (ghost_error (z, linear, 0) < tol);
-  scalar_set_ops (z, (ScalarOps) { .prolongation = prolong_minmod });
+  ghost_ops (z, boundary.all (bc_neumann));
   set (z, kink);
   ghosts_update (z);
   {
@@ -368,8 +406,8 @@ int main (void)
   /* 6. a derived scalar, e = u + 2 u2, computed on the halo from the ghosts
    * of u and u2, is what filling its own ghosts gives: prolongation and
    * restriction are linear */
-  scalar_set_ops (u2, (ScalarOps) { .boundary = bc_linear });
-  scalar_set_ops (e, (ScalarOps) { .boundary = bc_linear });
+  ghost_ops (u2, boundary.all (bc_linear));
+  ghost_ops (e, boundary.all (bc_linear));
   set (u, wavy);
   set (u2, kink);
   ghosts_update (u, u2);
@@ -447,11 +485,14 @@ int main (void)
       scalar t;
       id = t;
       scalar_set_ops (t, (ScalarOps) { .prolongation = prolong_injection });
-      CHECK (scalar_get_ops (t).prolongation == prolong_injection);
+      ghost_ops (t, boundary.right (bc_odd));
+      CHECK (scalar_get_ops (t).prolongation == prolong_injection
+             && scalar_get_boundary (t, GHOST_RIGHT) == bc_odd);
     }
     scalar t2 = scalar_new ();
-    CHECK (t2 == id && scalar_get_ops (t2).prolongation == prolong_linear
-           && scalar_get_ops (t2).boundary == bc_neumann);
+    CHECK (t2 == id && scalar_get_ops (t2).prolongation == prolong_linear);
+    for (int f = 0; f < GHOST_FACES; f++)
+      CHECK (scalar_get_boundary (t2, f) == bc_neumann);
     scalar_free (t2);
   }
 
@@ -500,10 +541,10 @@ int main (void)
     CHECK (!ghosts_is_dirty (zbl));
     ghost_ops_abort = 0;
     fprintf (stderr, "  (three refusals expected:)\n");
-    CHECK (ghost_ops_set (zbl, GHOST_PROLONGATION, prolong_lake,
+    CHECK (ghost_ops_set (zbl, GHOST_PROLONGATION, GHOST_ALL_FACES, prolong_lake,
                           (const scalar []) { hl }, 1) == 1);
     CHECK (scalar_get_ops (zbl).prolongation == prolong_linear);
-    CHECK (ghost_ops_set (u, GHOST_PROLONGATION, prolong_lake, NULL, 0) == 1);
+    CHECK (ghost_ops_set (u, GHOST_PROLONGATION, GHOST_ALL_FACES, prolong_lake, NULL, 0) == 1);
     scalar_set_ops (u, (ScalarOps) { .prolongation = prolong_lake });
     CHECK (scalar_get_ops (u).prolongation == prolong_linear);
     ghost_ops_abort = 1;

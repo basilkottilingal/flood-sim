@@ -33,6 +33,11 @@ static int ghost_op_uses (int kind, int op)
 }
 
 /* the scalars that s's operators depend on, into d; how many */
+/* the boundary condition of each face, and what it depends on: apart
+.. from ScalarOps, which holds the other two */
+static int boundary_ops [NSCALAR_MAX][GHOST_FACES_MAX];     /* 0: default */
+static scalar boundary_uses [NSCALAR_MAX][GHOST_FACES_MAX][GHOST_USES_MAX];
+
 static int ghost_uses_of (int s, int * d)
 {
   const ScalarOps * o = &scalar_ops [s];
@@ -44,16 +49,17 @@ static int ghost_uses_of (int s, int * d)
   if ((c = ghost_op_uses (GHOST_RESTRICTION, o->restriction)) > 0)
     for (int k = 0; k < c; k++)
       d [n++] = o->restriction_uses [k];
-  if ((c = ghost_op_uses (GHOST_BOUNDARY, o->boundary)) > 0)
-    for (int k = 0; k < c; k++)
-      d [n++] = o->boundary_uses [k];
+  for (int f = 0; f < GHOST_FACES; f++)
+    if ((c = ghost_op_uses (GHOST_BOUNDARY, boundary_ops [s][f])) > 0)
+      for (int k = 0; k < c; k++)
+        d [n++] = boundary_uses [s][f][k];
   return n;
 }
 
 /* ghost_dependents again, from every scalar's operators, and through them */
 static void ghost_dependents_rebuild (void)
 {
-  int d [3 * GHOST_USES_MAX];
+  int d [GHOST_DEPS_MAX];
 
   memset (ghost_dependents, 0, sizeof ghost_dependents);
   for (int s = 0; s < NSCALAR_MAX; s++)
@@ -95,14 +101,32 @@ static int ghost_ops_fail (const char * format, ...)
 
 static const char * const ghost_kinds [] = { "prolongation", "restriction",
                                              "boundary" };
+static const char * const ghost_faces [] = { "left", "right", "bottom", "top",
+                                             "back", "front" };
+
+/* what a binding is, for messages: prolongation, boundary.left, ... */
+static const char * ghost_what (int kind, int face)
+{
+  static const char * const bounds [] = { "boundary.left", "boundary.right",
+    "boundary.bottom", "boundary.top", "boundary.back", "boundary.front" };
+  if (kind != GHOST_BOUNDARY)
+    return ghost_kinds [kind];
+  return face >= 0 && face < GHOST_FACES_MAX ? bounds [face] : "boundary.all";
+}
 
 /* a scalar in a message: its name (scalar.h), or "#unnamed", which no
 .. scalar can be named (# is in no C name), with its id */
 #define SNAME(s) (*scalar_name (s) ? scalar_name (s) : "#unnamed")
 
-int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
+int ghost_ops_set (scalar s, int kind, int face, int op, const scalar * uses,
+                   int n)
 {
   assert (s >= 0 && s < NSCALAR_MAX && kind >= 0 && kind <= GHOST_BOUNDARY);
+  if (kind == GHOST_BOUNDARY && face != GHOST_ALL_FACES
+      && (face < 0 || face >= GHOST_FACES))
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): no face %d in %d "
+                           "dimension%s\n", SNAME (s), (int) s, face, dimension,
+                           dimension == 1 ? "" : "s");
   int need = ghost_op_uses (kind, op);
   if (need < 0)
     return ghost_ops_fail ("ghost_ops: scalar %s (%d): no %s with the id %d\n",
@@ -110,7 +134,8 @@ int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
   if (n != need)
     return ghost_ops_fail ("ghost_ops: scalar %s (%d): its %s %d depends on %d "
                            "scalar%s, not %d\n", SNAME (s), (int) s,
-                           ghost_kinds [kind], op, need, need == 1 ? "" : "s", n);
+                           ghost_what (kind, face), op, need, need == 1 ? "" : "s",
+                           n);
   if (n > GHOST_USES_MAX)
     return ghost_ops_fail ("ghost_ops: scalar %s (%d): %d scalars depended on, "
                            "%d at most (GHOST_USES_MAX)\n", SNAME (s), (int) s,
@@ -120,21 +145,36 @@ int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
       return ghost_ops_fail ("ghost_ops: scalar %s (%d): scalar %s (%d), which "
                              "its %s depends on, is not global\n", SNAME (s),
                              (int) s, SNAME (uses [k]), (int) uses [k],
-                             ghost_kinds [kind]);
+                             ghost_what (kind, face));
+  /* kept, to undo it all on a cycle */
   ScalarOps old = scalar_ops [s];
-  int * id = kind == GHOST_PROLONGATION ? &scalar_ops [s].prolongation
-           : kind == GHOST_RESTRICTION ? &scalar_ops [s].restriction
-           : &scalar_ops [s].boundary;
-  scalar * to = kind == GHOST_PROLONGATION ? scalar_ops [s].prolongation_uses
-              : kind == GHOST_RESTRICTION ? scalar_ops [s].restriction_uses
-              : scalar_ops [s].boundary_uses;
-  *id = op;
-  for (int k = 0; k < GHOST_USES_MAX; k++)
-    to [k] = k < n ? uses [k] : 0;
+  int old_ops [GHOST_FACES_MAX];
+  scalar old_uses [GHOST_FACES_MAX][GHOST_USES_MAX];
+  memcpy (old_ops, boundary_ops [s], sizeof old_ops);
+  memcpy (old_uses, boundary_uses [s], sizeof old_uses);
+  if (kind == GHOST_BOUNDARY) {
+    for (int f = 0; f < GHOST_FACES; f++)
+      if (face == GHOST_ALL_FACES || face == f) {
+        boundary_ops [s][f] = op;
+        for (int k = 0; k < GHOST_USES_MAX; k++)
+          boundary_uses [s][f][k] = k < n ? uses [k] : 0;
+      }
+  }
+  else {
+    int * id = kind == GHOST_PROLONGATION ? &scalar_ops [s].prolongation
+                                          : &scalar_ops [s].restriction;
+    scalar * to = kind == GHOST_PROLONGATION ? scalar_ops [s].prolongation_uses
+                                             : scalar_ops [s].restriction_uses;
+    *id = op;
+    for (int k = 0; k < GHOST_USES_MAX; k++)
+      to [k] = k < n ? uses [k] : 0;
+  }
   ghost_dependents_rebuild ();
   int c = ghost_dependents_cycle ();
   if (c >= 0) {
     scalar_ops [s] = old;
+    memcpy (boundary_ops [s], old_ops, sizeof old_ops);
+    memcpy (boundary_uses [s], old_uses, sizeof old_uses);
     ghost_dependents_rebuild ();
     return ghost_ops_fail ("ghost_ops: scalar %s (%d): its operators would "
                            "depend on itself, through scalar %s (%d)\n",
@@ -148,15 +188,14 @@ void scalar_set_ops (scalar s, ScalarOps ops)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
   if (ghost_op_uses (GHOST_PROLONGATION, ops.prolongation) > 0
-      || ghost_op_uses (GHOST_RESTRICTION, ops.restriction) > 0
-      || ghost_op_uses (GHOST_BOUNDARY, ops.boundary) > 0) {
+      || ghost_op_uses (GHOST_RESTRICTION, ops.restriction) > 0) {
     ghost_ops_fail ("scalar_set_ops: scalar %s (%d): an operator that depends "
                     "on scalars is bound with ghost_ops (), which names them\n",
                     SNAME (s), (int) s);
     return;
   }
   for (int k = 0; k < GHOST_USES_MAX; k++)
-    ops.prolongation_uses [k] = ops.restriction_uses [k] = ops.boundary_uses [k] = 0;
+    ops.prolongation_uses [k] = ops.restriction_uses [k] = 0;
   scalar_ops [s] = ops;
   ghost_dependents_rebuild ();
   ghosts_mark_dirty (s);      /* made by the old ones: made again */
@@ -166,7 +205,7 @@ void scalar_set_ops (scalar s, ScalarOps ops)
 static void ghost_order_visit (int s, char * state, const char * want,
                                int * out, int * n)
 {
-  int d [3 * GHOST_USES_MAX];
+  int d [GHOST_DEPS_MAX];
 
   if (state [s])
     return;
@@ -208,9 +247,13 @@ ScalarOps scalar_get_ops (scalar s)
     o.prolongation = prolong_linear;
   if (!o.restriction)
     o.restriction = restriction_mean;
-  if (!o.boundary)
-    o.boundary = bc_neumann;
   return o;
+}
+
+int scalar_get_boundary (scalar s, int face)
+{
+  assert (s >= 0 && s < NSCALAR_MAX && face >= 0 && face < GHOST_FACES_MAX);
+  return boundary_ops [s][face] ? boundary_ops [s][face] : bc_neumann;
 }
 
 unsigned long long ghosts_dirty [GHOSTS_DIRTY_WORDS];
@@ -220,6 +263,8 @@ void scalar_ops_reset (scalar s)
 {
   assert (s >= 0 && s < NSCALAR_MAX);
   scalar_ops [s] = (ScalarOps) {0};
+  memset (boundary_ops [s], 0, sizeof boundary_ops [s]);
+  memset (boundary_uses [s], 0, sizeof boundary_uses [s]);
   ghost_dependents_rebuild ();
   ghosts_dirty [s / 64] &= ~(1ull << (s % 64));
 }
@@ -370,7 +415,8 @@ void block_ghosts (Index p, int s)
       if (side ? P [a] == nb - 1 : P [a] == 0)
       {
         Boundary bc = { own, sh, a, side, p, s };
-        @boundary (o.boundary, o.boundary_uses) (&bc);
+        int f = 2 * a + side;             /* the face: GHOST_LEFT, ... */
+        @boundary (scalar_get_boundary (s, f), boundary_uses [s][f]) (&bc);
       }
 }
 

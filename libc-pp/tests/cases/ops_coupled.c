@@ -2,14 +2,16 @@
 
 typedef struct { int s; double * out; } Pr;
 enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
+enum { GHOST_LEFT, GHOST_RIGHT, GHOST_BOTTOM, GHOST_TOP, GHOST_ALL_FACES = -1 };
 
 /* what libb-amr's ghost_ops_set () is given, kept */
-static int last_kind, last_op, last_n;
+static int last_kind, last_face, last_op, last_n;
 static scalar last_uses [4];
-static int ghost_ops_set (scalar s, int kind, int op, const scalar * uses, int n)
+static int ghost_ops_set (scalar s, int kind, int face, int op,
+                          const scalar * uses, int n)
 {
   (void) s;
-  last_kind = kind, last_op = op, last_n = n;
+  last_kind = kind, last_face = face, last_op = op, last_n = n;
   for (int k = 0; k < n; k++)
     last_uses [k] = uses [k];
   return 0;
@@ -34,9 +36,11 @@ int main (void)
   printf ("%d %d | ", @prolongation uses (lake), @prolongation uses (plain));
   scalar h = scalar_new ();
   ghost_ops (h, prolongation (lake, zb, u.y));
-  printf ("%d %d %d %d ", last_kind, last_op, last_n,
+  printf ("%d %d %d %d %d ", last_kind, last_face, last_op, last_n,
           last_uses [0] == zb && last_uses [1] == u.y);
-  ghost_ops (h, boundary (b_one));
-  printf ("%d %d %d\n", last_kind, last_op, last_n);
+  ghost_ops (h, boundary.top (b_one));
+  printf ("%d %d %d %d ", last_kind, last_face, last_op, last_n);
+  ghost_ops (h, boundary.all (b_one));
+  printf ("%d %d\n", last_kind, last_face);
   return 0;
 }

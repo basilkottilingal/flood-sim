@@ -28,8 +28,10 @@
   .. Within one level the blocks are independent: they run on all threads
   .. with OpenMP.
   ..
-  .. Per scalar, three operations: ScalarOps, set with scalar_set_ops (),
-  .. anywhere and at any time. The same prolongation fills the children of a
+  .. Per scalar, three operations: a prolongation and a restriction
+  .. (ScalarOps, set with scalar_set_ops ()), and a boundary condition per
+  .. face of the domain (ghost_ops (), boundary.left (op), ...), anywhere
+  .. and at any time. The same prolongation fills the children of a
   .. refined block and the ghosts at a level jump, so the two agree.
   ..
   .. An operation is an integer, not a function pointer: cwrap's
@@ -47,7 +49,7 @@
   .. and any other file attaches one by its name, an int:
   ..
   ..   @boundary bc_inflow;
-  ..   scalar_set_ops (h, (ScalarOps) { .boundary = bc_inflow });
+  ..   ghost_ops (h, boundary.left (bc_inflow));
   ..
   .. Derived scalars. Fill the ghosts of the scalars a derived one is
   .. computed from, then compute it on the ghosts too, halo GHOSTS:
@@ -116,8 +118,18 @@
   .. The operations of a scalar, by their ids (see above). 0 takes the
   .. default: linear prolongation, the mean, a zero gradient at the walls. A
   .. scalar gets the defaults back when it is freed while the tree exists.
-  .. scalar_set_ops () marks s's ghosts stale: those made by the operations
-  .. it had are made again by the new ones, as foreach () next needs them.
+  .. Setting any marks s's ghosts stale: those made by the operations it had
+  .. are made again by the new ones, as foreach () next needs them.
+  ..
+  .. A boundary condition is bound per face of the domain, with ghost_ops ()
+  .. (cwrap): boundary.left (op), .right, .bottom, .top, .back, .front (as
+  .. the dimension has them), or boundary.all (op) for every face:
+  ..
+  ..   ghost_ops (u.x, boundary.all (bc_neumann), boundary.left (bc_odd),
+  ..                   boundary.right (bc_odd));
+  ..
+  .. ScalarOps and scalar_set_ops () hold the prolongation and restriction;
+  .. scalar_get_boundary (s, face) reads a face's condition.
   .. Their signatures:
   ..   @prolongation name (const Prolongation * pr) { ... }
   ..   @restriction  name (Index parent, scalar s)   { ... }
@@ -140,24 +152,37 @@
   ..     on, wherever several are made (ghosts_update (), refining,
   ..     coarsening), and a stale one it depends on is updated with it;
   ..   - ghosts_mark_dirty (zb) marks those that depend on zb too.
-  .. scalar_set_ops () binds operators that depend on nothing.
+  .. scalar_set_ops () binds a prolongation and a restriction that depend
+  .. on nothing.
   */
   #define GHOST_USES_MAX 4
   enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
 
+  /* the faces of the domain: 2 axis + side, side 0 the low one */
+  enum { GHOST_LEFT, GHOST_RIGHT, GHOST_BOTTOM, GHOST_TOP, GHOST_BACK,
+         GHOST_FRONT, GHOST_FACES_MAX, GHOST_ALL_FACES = -1 };
+  #define GHOST_FACES (2 * dimension)
+
+  /* what any scalar's operations depend on, at most: see ghost_ops () */
+  #define GHOST_DEPS_MAX ((2 + GHOST_FACES_MAX) * GHOST_USES_MAX)
+
   typedef struct
   {
-    int prolongation, restriction, boundary;
+    int prolongation, restriction;
     scalar prolongation_uses [GHOST_USES_MAX];  /* what each depends on */
     scalar restriction_uses  [GHOST_USES_MAX];
-    scalar boundary_uses     [GHOST_USES_MAX];
   } ScalarOps;
 
   void      scalar_set_ops (scalar s, ScalarOps ops);
   ScalarOps scalar_get_ops (scalar s);  /* the defaults where 0 */
+  int       scalar_get_boundary (scalar s, int face);  /* the default where
+                                                          none is bound */
   void      scalar_ops_reset (scalar s);  /* back to the defaults */
-  int       ghost_ops_set (scalar s, int kind, int op, const scalar * uses,
-                           int n);      /* what ghost_ops () calls */
+  int       ghost_ops_set (scalar s, int kind, int face, int op,
+                           const scalar * uses, int n);
+                                        /* what ghost_ops () calls; face
+                                           only for GHOST_BOUNDARY, else
+                                           GHOST_ALL_FACES */
   extern int ghost_ops_abort;           /* 1, the default: stop on errors */
 
   /*

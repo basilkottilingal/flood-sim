@@ -3098,14 +3098,22 @@ struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
   return e;
 }
 
-/* ghost_ops (s, prolongation (op, zb, ...), restriction (...), boundary (...)) */
+/* ghost_ops (s, prolongation (op, zb, ...), restriction (...),
+ *            boundary.left (...), ..., boundary.all (...)) */
 struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
 {
   static const char *const kinds[3] = { "prolongation", "restriction", "boundary" };
   static const char *const consts[3] = { "GHOST_PROLONGATION", "GHOST_RESTRICTION",
                                          "GHOST_BOUNDARY" };
+  /* the faces, 2 axis + side as GHOST_LEFT, ... in block-ghosts.h */
+  static const char *const faces[6] = { "left", "right", "bottom", "top", "back",
+                                        "front" };
+  static const char *const face_consts[6] = { "GHOST_LEFT", "GHOST_RIGHT",
+                                              "GHOST_BOTTOM", "GHOST_TOP",
+                                              "GHOST_BACK", "GHOST_FRONT" };
   const struct token *t;
   struct ast *target, *es[4 * MAX_LOOP_PARAMS], *items = ast_new (AST_BLOCK_ITEMS), *e;
+  struct ast *face_item = NULL;           /* the first boundary.<face> (...) */
   const char *text = "(";
   int nes = 0, errors = *rejected;
 
@@ -3120,19 +3128,68 @@ struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
                    expression_text (target), expression_text (target));
   for (struct ast *item = target->next; item; item = item->next) {
     struct ast *vs[MAX_LOOP_PARAMS];
-    const char *deps = "";
+    const char *deps = "", *face = "GHOST_ALL_FACES", *what;
     int kind = -1, nv = 0;
+    struct ast *callee;
 
     if (item->kind == AST_TOKEN)              /* , */
       continue;
-    if (item->kind == AST_CALL && item->child->kind == AST_TOKEN)
-      for (int k = 0; k < 3; k++)
-        if (strcmp (ast_token (item->child)->text, kinds[k]) == 0)
+    callee = item->kind == AST_CALL ? item->child : NULL;
+    if (callee && callee->kind == AST_TOKEN)
+      for (int k = 0; k < 2; k++)
+        if (strcmp (ast_token (callee)->text, kinds[k]) == 0)
           kind = k;
+    if (callee && callee->kind == AST_TOKEN
+        && strcmp (ast_token (callee)->text, "boundary") == 0) {
+      stencil_error (rejected, item, "ghost_ops (%s, ...): '%s': a boundary "
+                     "condition is bound per face, boundary.left (op, ...), "
+                     ".right, .bottom, .top, .back, .front, or boundary.all "
+                     "(op, ...) for every face", expression_text (target),
+                     expression_text (item));
+      continue;
+    }
+    /* boundary.<face> (...) */
+    if (callee && callee->kind == AST_MEMBER && callee->child->kind == AST_TOKEN
+        && strcmp (ast_token (callee->child)->text, "boundary") == 0
+        && strcmp (ast_token (callee->child->next)->text, ".") == 0) {
+      const char *name = ast_token (callee->child->next->next)->text;
+
+      kind = 2;
+      if (strcmp (name, "all") == 0) {
+        if (face_item)
+          diag (first_token (item)->file,
+                first_token (item)->line, DIAG_WARNING,
+                "ghost_ops (%s, ...): '%s' comes after '%s', and binds every "
+                "face again: put boundary.all (...) first, and the faces "
+                "that differ after it", expression_text (target),
+                expression_text (callee), expression_text (face_item->child));
+      }
+      else {
+        int f = -1;
+
+        for (int k = 0; k < 6; k++)
+          if (strcmp (name, faces[k]) == 0)
+            f = k;
+        if (f < 0 || f >= 2 * dimension) {
+          stencil_error (rejected, item, f < 0
+                         ? "ghost_ops (%s, ...): '%s': no face '%s'; the faces "
+                           "are left, right, bottom, top, back, front, or all"
+                         : "ghost_ops (%s, ...): '%s': no face '%s' in %d "
+                           "dimension%s", expression_text (target),
+                         expression_text (callee), name, dimension,
+                         dimension == 1 ? "" : "s");
+          continue;
+        }
+        face = face_consts[f];
+        if (!face_item)
+          face_item = item;
+      }
+    }
+    what = kind == 2 ? expression_text (callee) : kind >= 0 ? kinds[kind] : "";
     if (kind < 0 || item->child->next->next->kind != AST_ARGUMENT_LIST) {
       stencil_error (rejected, item, "ghost_ops (%s, ...): '%s' is not "
                      "prolongation (op, ...), restriction (op, ...) or "
-                     "boundary (op, ...)", expression_text (target),
+                     "boundary.<face> (op, ...)", expression_text (target),
                      expression_text (item));
       continue;
     }
@@ -3149,15 +3206,15 @@ struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
         stencil_error (rejected, vs[k], "%s (%s, ...): '%s', a scalar it "
                        "depends on, must be global (at file scope, static or "
                        "extern), as a global scalar is never freed",
-                       kinds[kind], expression_text (vs[0]),
+                       what, expression_text (vs[0]),
                        expression_text (vs[k]));
       es[nes] = vs[k];
       deps = arena_printf ("%s%s(__cwrap_e%d)", deps, k > 1 ? ", " : "", nes++);
     }
     es[nes] = target;
     es[nes + 1] = vs[0];
-    text = arena_printf ("%sghost_ops_set ((__cwrap_e%d), %s, (__cwrap_e%d), %s, %d), ",
-                         text, nes, consts[kind], nes + 1,
+    text = arena_printf ("%sghost_ops_set ((__cwrap_e%d), %s, %s, (__cwrap_e%d), %s, "
+                         "%d), ", text, nes, consts[kind], face, nes + 1,
                          nv > 1 ? arena_printf ("(const scalar []) { %s }", deps)
                                 : "(const scalar *) 0", nv - 1);
     nes += 2;

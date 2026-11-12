@@ -398,17 +398,21 @@ check "@prolongation and @restriction: ids by kind, attached by name, a switch w
 check "ghost operators: defined twice, or dispatched with none defined, an error" $?
 
 "$cwrap" -dimension=2 -Wall -Wextra ops_coupled.c -o ops_coupled 2> ops_coupled.log &&
-  [ "$(./ops_coupled)" = "34 1 2 0 | 0 2 2 1 2 1 0" ] && [ ! -s ops_coupled.log ]
-check "coupled operators: (scalar a, scalar b) passed from uses, @prolongation uses (id), ghost_ops () with globals" $?
+  [ "$(./ops_coupled)" = "34 1 2 0 | 0 -1 2 2 1 2 3 1 0 2 -1" ] && [ ! -s ops_coupled.log ]
+check "coupled operators: (scalar a, scalar b) passed from uses, @prolongation uses (id), ghost_ops () with globals, boundary.top, boundary.all" $?
 
 "$cwrap" -dimension=2 -c ops_coupled_bad.c -o ops_coupled_bad.o 2> ops_coupled_bad.log
 [ $? -ne 0 ] && [ ! -e ops_coupled_bad.o ] &&
-  [ "$(grep -o '^ops_coupled_bad.c:[0-9]*: error' ops_coupled_bad.log | cut -d: -f2 | tr '\n' ' ')" = "5 8 9 10 " ] &&
+  [ "$(grep -o '^ops_coupled_bad.c:[0-9]*: error' ops_coupled_bad.log | cut -d: -f2 | tr '\n' ' ')" = "5 9 10 11 12 13 14 " ] &&
   grep -q "^ops_coupled_bad.c:5: error: @prolongation wrong: what it depends on is scalars" ops_coupled_bad.log &&
-  grep -q "^ops_coupled_bad.c:8: error: @prolongation (id) (...): some @prolongation depends on scalars" ops_coupled_bad.log &&
-  grep -q "^ops_coupled_bad.c:9: error: prolongation (needs, ...): 'local', a scalar it depends on, must be global" ops_coupled_bad.log &&
-  grep -q "^ops_coupled_bad.c:10: error: ghost_ops (zb, ...): 'smoothing(needs)' is not prolongation" ops_coupled_bad.log
-check "coupled operators: a dependency not a scalar, a dispatch without uses, a local dependency, an item of no kind" $?
+  grep -q "^ops_coupled_bad.c:9: error: @prolongation (id) (...): some @prolongation depends on scalars" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:10: error: prolongation (needs, ...): 'local', a scalar it depends on, must be global" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:11: error: ghost_ops (zb, ...): 'smoothing(needs)' is not prolongation" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:12: error: ghost_ops (zb, ...): 'boundary(b_one)': a boundary condition is bound per face" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:13: error: ghost_ops (zb, ...): 'boundary.back': no face 'back' in 2 dimensions" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:14: error: ghost_ops (zb, ...): 'boundary.middle': no face 'middle'; the faces are" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:15: warning: ghost_ops (zb, ...): 'boundary.all' comes after 'boundary.left'" ops_coupled_bad.log
+check "coupled operators: a dependency not a scalar, a dispatch without uses, a local dependency, an item of no kind, boundary with no face, a face beyond the dimension, an unknown face, .all after a face" $?
 
 "$cwrap" -dimension=2 -c scalar_global_free.c -o scalar_global_free.o 2> scalar_global_free.log
 [ $? -ne 0 ] && [ ! -e scalar_global_free.o ] &&

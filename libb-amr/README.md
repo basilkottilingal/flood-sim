@@ -32,9 +32,15 @@ foreach_leaf_parallel () {
 Within a level the blocks are independent and run on all threads.
 `ghosts_update_levels ()` fills parents too, for coarse-level stencils.
 
-**Per-scalar operations** (`ScalarOps`, `scalar_set_ops ()`, anywhere,
-at any time): a prolongation, a restriction and a boundary condition, each
-an integer id. 0 takes the default: `prolong_linear`, `restriction_mean`,
+**Per-scalar operations**, anywhere, at any time: a prolongation and a
+restriction (`ScalarOps`, `scalar_set_ops ()`), and a boundary condition per
+face of the domain, each an integer id. A boundary condition is bound with
+cwrap's `ghost_ops ()`, face by face, `boundary.left (op)`, `.right`,
+`.bottom`, `.top`, `.back`, `.front`, or `boundary.all (op)` for every face:
+`ghost_ops (u.x, boundary.all (bc_neumann), boundary.left (bc_odd))`. A
+plain `boundary (op)`, or a face the dimension lacks, is an error;
+`boundary.all` after a face, in one call, a warning, as it binds that face
+again. `scalar_get_boundary (s, face)` reads one (`GHOST_LEFT`, ...). 0 takes the default: `prolong_linear`, `restriction_mean`,
 `bc_neumann`. Also given: `prolong_minmod` (no new extrema, for a water
 depth), `prolong_injection` and `bc_odd`. One prolongation fills both the
 children of a refined block and the ghosts at a level jump, so the two

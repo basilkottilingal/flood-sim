@@ -896,12 +896,20 @@ list: they are bound per scalar, and passed to it at each call.
 
     scalar zb, h;                 /* global: see below */
     ...
-    ghost_ops (h, prolongation (prolong_lake, zb), boundary (bc_odd));
+    ghost_ops (h, prolongation (prolong_lake, zb), boundary.all (bc_odd),
+                  boundary.left (bc_inflow));
 
 - **`ghost_ops (s, kind (op, scalars...), ...)`** binds operators to `s`,
   anywhere, at any time, each with the scalars it depends on: kinds
-  `prolongation`, `restriction`, `boundary`. It becomes a call of libb-amr's
-  `ghost_ops_set ()` per item.
+  `prolongation`, `restriction`, and a boundary condition per face of the
+  domain, `boundary.left`, `.right`, `.bottom`, `.top`, `.back`, `.front`,
+  or `boundary.all` for every face. It becomes a call of libb-amr's
+  `ghost_ops_set ()` per item, in order, so a face after `boundary.all`
+  replaces it there.
+- **A boundary names its face:** a plain `boundary (op)` is an error, as is
+  a face the dimension lacks (`.back` in 2D) or no face at all
+  (`.middle`); `boundary.all` after a face, in one call, is a warning: it
+  binds that face again.
 - **The scalars depended on must be global** (at file scope, `static` or
   `extern`, or a member of a global vector or tensor), checked by cwrap:
   a global scalar is never freed (see [Scalars](#a-global-scalar-is-never-freed)),
