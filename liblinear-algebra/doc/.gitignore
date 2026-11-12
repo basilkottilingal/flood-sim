@@ -1,0 +1,6 @@
+# made by red-black/Makefile: not tracked
+*.pdf
+red-black/fig*.png
+red-black/*.json
+red-black/cost2
+red-black/cost3
