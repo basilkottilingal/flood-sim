@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <cwrap/cache.h>
 #include "adapt.h"
 #include "block-ghosts.h"
 

@@ -26,7 +26,11 @@ for d in 1 2 3; do
   for prec in "" -DBAMR_SINGLE; do
     for v in old new; do
       eval L=\$$v
-      src="$L/tree.c $L/grid-scalar.c $L/morton-curve.c $L/memindex.c $L/voxel-memindex.c $L/nano-vdb.c $L/pool.c $L/block-ghosts.c $L/adapt.c $L/../libutils/bits.c"
+      # the library's sources, those of this version (a ref may have others)
+      src=
+      for f in tree grid-scalar morton-curve memindex voxel-memindex nano-vdb pool block-ghosts adapt ../libutils/bits; do
+        [ -e "$L/$f.c" ] && src="$src $L/$f.c"
+      done
       progs=checksum; [ -n "$TIMING" ] && progs="checksum timing"
       for p in $progs; do
         "$cwrap" -dimension=$d -D_GNU_SOURCE -std=gnu11 -O2 $prec -I"$L" -I"$L/.." \

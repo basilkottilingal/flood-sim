@@ -19,8 +19,9 @@
   of its own any more), `foreach_node ()` (new, `morton-curve.h`: every node),
   `tree_restrict ()`, the ghost update (its lists by level, which it
   allocated and walked twice for at every call), `grid_scalar_alloc_blocks
-  ()`, `grid_scalar_free_blocks ()`, the counts of `grid-scalar.c`, adapt.c
-  and `tree_block_indices ()`. `morton ()` is left for the lists themselves
+  ()`, `grid_scalar_free_blocks ()`, the counts of `grid-scalar.c` and adapt.c
+  (`tree_block_indices ()`, which read it too, is removed, with
+  `morton-curve.c`). `morton ()` is left for the lists themselves
   and for a subtree.
 - **A change of the tree during such a loop stops the run**
   (`tree_changed_under ()`): each loop checks `tree_generation` at each
@@ -52,7 +53,7 @@ of `TREE_NCHILDREN * BAMR_MAX_DEPTH` entries):
 | `levels_new ()` (`block-ghosts-impl.h`) | two walks, counting then filling the nodes by level, at each `ghosts_update ()` |
 | `tree_restrict ()` | a walk |
 | `adapt.c`, `grid-scalar.c` | walks, to flag, to allocate and free blocks |
-| `tree_block_indices ()` (`morton-curve.c`) | a walk, into a `cache (Index)`: the one that already caches |
+| `tree_block_indices ()` (`morton-curve.c`, both removed since) | a walk, into a `cache (Index)`: the one that already caches |
 
 So every `foreach ()` (built on `foreach_leaf`) and every ghost update pays
 one or more walks, whose cost grows with the tree, while the tree changes
@@ -69,7 +70,7 @@ only at a refinement or a coarsening.
     `foreach_coarse_level (l)` read.
 - **Made by `morton ()`, through the cache's own update:** cwrap's caches
   have `update` and `is_dirty` (`include/cwrap/cache.h`). The update is the
-  walk (as `tree_block_indices ()` is), and a cache is made again only when
+  walk (as `tree_block_indices ()`, since removed, was), and a cache is made again only when
   read while dirty.
 - **Marked dirty when the tree changes:** `tree_refine ()`, `tree_coarsen ()`,
   `tree ()` and `tree_destroy ()` mark every tree cache dirty. Nothing else

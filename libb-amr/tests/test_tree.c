@@ -116,14 +116,6 @@ int main (void)
     }
     CHECK (ok && depth == (round + 1) * (1 + nc));
 
-    /* the indices in a cache */
-    {
-      cache (Index) ix;
-      cache_push (ix, (Index) {TREE_ROOT});
-      tree_block_indices (&ix);
-      CHECK (ix.n == 1 + nc && ix.a [nc].level == 0);
-    }
-
     /* refine the corner chain to level 4 */
     Index p = index_child (TREE_ROOT_INDEX, 0);
     for (int l = 1; l < 4; l++) {

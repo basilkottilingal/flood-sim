@@ -12,7 +12,7 @@ lib=$(pwd)
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 # libutils (bits.h) is a sibling of libb-amr: included as "libutils/bits.h"
-src="$lib/grid-scalar.c $lib/morton-curve.c $lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
+src="$lib/grid-scalar.c $lib/memindex.c $lib/voxel-memindex.c $lib/nano-vdb.c $lib/pool.c $lib/block-ghosts.c $lib/adapt.c $lib/../libutils/bits.c"
 flags="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I$lib -I$lib/.."
 fails=0
 # test_ghosts.c has operators of its own: it is the file that dispatches,
