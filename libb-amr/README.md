@@ -184,7 +184,12 @@ hashes every cell of every block; `TIMING=1` also times
 - `test_adapt.c`: families allocated at once, prolongation (exact for a
   linear field, and keeping the mean), coarsening, 2:1 balance through
   random refining and coarsening, and `adapt_wavelet ()` on a front: it
-  settles, keeps the integral, and coarsens a constant field to minlevel.
+  settles, keeps the integral, and coarsens a constant field to minlevel;
+  with minlevel 0, never into the root, and a lone root is refined again.
+  The wavelet of a node is the difference between its cells and its
+  parent's prolongation of them, by the scalar's own operator
+  (`block_prolong_into ()`): `test_ghosts.c` checks it is zero for a lake
+  at rest over a wavy bed.
 
 - `test_stencil.c`: cwrap's `foreach ()` and `s[i,j,k]`: every interior cell
   once and no ghost written, stencils in every dimension equal to `cell_at`

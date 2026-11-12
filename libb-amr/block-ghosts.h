@@ -427,6 +427,9 @@
   ..                        around it must have valid ghosts, and the parents
   ..                        around it their restriction
   ..   block_prolong (p, s) the interiors of p's children, from p
+  ..   block_prolong_into (p, s, target)   p's interior from its parent,
+  ..                        into target (a block), p's own left as it is:
+  ..                        what p would be if its parent were refined
   ..   block_restrict (p, s) p from its children, by the scalar's restriction
   */
   #define ghosts_update(...)                                            \
@@ -483,6 +486,7 @@
   void tree_restrict  (int s);
   void block_ghosts   (Index p, int s);
   void block_prolong  (Index p, int s);
+  void block_prolong_into (Index p, int s, Real * target);
   void block_restrict (Index p, int s);
 
 #endif

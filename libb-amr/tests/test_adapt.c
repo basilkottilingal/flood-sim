@@ -298,6 +298,19 @@ int main (void)
     CHECK (tree_get_nleaves () == nc && tree_get_depth () == 1 && balanced () && grid_scalar_check ());
   }
 
+  /* 8. the root has no wavelet: even with minlevel 0, no family is
+   * coarsened into it; a root made a leaf by hand is refined again */
+  {
+    double max = 0.01;
+    set (one);
+    adapt_wavelet (1, (int []) { u }, &max, 0, 4);
+    CHECK (tree_get_nleaves () == nc && tree_get_depth () == 1);
+    CHECK (tree_coarsen (TREE_ROOT_INDEX) && tree_get_nleaves () == 1);
+    set (one);
+    AdaptStats st = adapt_wavelet (1, (int []) { u }, &max, 0, 4);
+    CHECK (st.refined == 1 && tree_get_nleaves () == nc && grid_scalar_check ());
+  }
+
   tree_destroy ();
   printf ("dimension %d: %d checks, %d failed\n", dimension, checks, fails);
   return fails != 0;

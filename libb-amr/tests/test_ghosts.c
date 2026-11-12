@@ -540,6 +540,27 @@ int main (void)
     CHECK (ghosts_is_dirty (hl));
     ghosts_update (hl);                   /* zbl stale: updated with it */
     CHECK (!ghosts_is_dirty (zbl));
+    /* the wavelet by each scalar's own prolongation: a lake at rest over a
+     * wavy bed is none for hl, though the bed is not linear, and the
+     * blocks are as they were after */
+    set (zbl, wavy);
+    foreach_leaf () {
+      Real * h = block_data (sblocks, hl);
+      const Real * b = block_data (sblocks, zbl);
+      block_cells (shape, 0)
+        h [c] = (Real) (surface - b [c]);
+    }
+    ghosts_update_levels (hl, zbl);
+    {
+      double wh = 0, wz = 0;
+      foreach_leaf ()
+        if (level > 0)
+          wh = fmax (wh, block_wavelet ((Index) {IJKL}, hl)),
+          wz = fmax (wz, block_wavelet ((Index) {IJKL}, zbl));
+      fprintf (stderr, "  (wavelets: lake %g, its bed %g)\n", wh, wz);
+      CHECK (wh < tol * surface && wz > 1e-3);    /* the bed's: not small */
+      CHECK (surface_error (hl, zbl, surface) < tol * surface);
+    }
     ghost_ops_abort = 0;
     fprintf (stderr, "  (three refusals expected:)\n");
     CHECK (ghost_ops_set (zbl, GHOST_PROLONGATION, GHOST_ALL_FACES, prolong_lake,

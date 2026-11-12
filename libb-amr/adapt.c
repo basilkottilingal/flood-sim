@@ -6,68 +6,33 @@
 #include "adapt.h"
 #include "block-ghosts.h"
 
+/* the wavelet of p for s, scratch a block to prolong into */
+static double wavelet_into (Index p, int s, Real * scratch)
+{
+  BlockShape shape = tree_block_shape ();
+  block_prolong_into (p, s, scratch);
+  const Real * u = block_data (index_node (p)->s, s);
+  double err = 0;
+  block_cells (shape, 0)
+    err = fmax (err, fabs ((double) u [c] - scratch [c]));
+  return err;
+}
+
+static Real * scratch_block (void)
+{
+  Real * b = malloc ((size_t) tree_block_shape ().cells * sizeof (Real));
+  if (!b)
+    abort ();
+  return b;
+}
+
 double block_wavelet (Index p, int s)
 {
-  BlockShape sh = tree_block_shape ();
-  int m = sh.m, h = m / 2, nc = h + 2;
-  assert (sh.g >= 2 && m >= 4 && index_is_allocated (p));
-  const Real * u = block_data (index_node (p)->s, s);
-
-  /*
-  .. The coarse cells, -1 to h along each axis: the means of 2 x 2 (x 2)
-  .. fine cells, the ghost layer of coarse cells from the two stored ghost
-  .. layers of fine ones.
-  */
-  long cs [3] = { 1, dimension > 1 ? nc : 0, dimension > 2 ? (long) nc * nc : 0 };
-  long ncells = nc;
-  for (int a = 1; a < dimension; a++)
-    ncells *= nc;
-  RealSum * coarse = malloc ((size_t) ncells * sizeof (RealSum));
-  if (!coarse)
-    abort ();
-  long sub [TREE_NCHILDREN];
-  for (int k = 0; k < TREE_NCHILDREN; k++)
-  {
-    sub [k] = 0;
-    for (int a = 0; a < dimension; a++)
-      sub [k] += ((k >> a) & 1) * block_stride (sh, a);
-  }
-  int lo [3] = { -1, dimension > 1 ? -1 : 0, dimension > 2 ? -1 : 0 };
-  int hi [3] = { h + 1, dimension > 1 ? h + 1 : 1, dimension > 2 ? h + 1 : 1 };
-  int C [3];
-  for (C [2] = lo [2]; C [2] < hi [2]; C [2]++)
-  for (C [1] = lo [1]; C [1] < hi [1]; C [1]++)
-  for (C [0] = lo [0]; C [0] < hi [0]; C [0]++)
-  {
-    int x [3] = { 2 * C [0], 2 * C [1], 2 * C [2] };
-    const Real * b = u + block_at (sh, x);
-    RealSum sum = 0;
-    for (int k = 0; k < TREE_NCHILDREN; k++)
-      sum += b [sub [k]];
-    long q = 0;
-    for (int a = 0; a < dimension; a++)
-      q += (C [a] + 1) * cs [a];
-    coarse [q] = sum / TREE_NCHILDREN;
-  }
-
-  /* each fine cell against its prediction from the coarse cells */
-  double err = 0;
-  int fhi [3] = { m, dimension > 1 ? m : 1, dimension > 2 ? m : 1 };
-  int x [3];
-  for (x [2] = 0; x [2] < fhi [2]; x [2]++)
-  for (x [1] = 0; x [1] < fhi [1]; x [1]++)
-  for (x [0] = 0; x [0] < fhi [0]; x [0]++)
-  {
-    long q = 0;
-    for (int a = 0; a < dimension; a++)
-      q += ((x [a] >> 1) + 1) * cs [a];
-    RealSum pred = coarse [q];
-    for (int a = 0; a < dimension; a++)
-      pred += (x [a] & 1 ? 1 : -1) * (coarse [q + cs [a]] - coarse [q - cs [a]]) / 8.;
-    err = fmax (err, fabs (u [block_at (sh, x)] - pred));
-  }
-  free (coarse);
-  return err;
+  assert (p.level > 0 && index_is_allocated (p));
+  Real * scratch = scratch_block ();
+  double e = wavelet_into (p, s, scratch);
+  free (scratch);
+  return e;
 }
 
 static int by_level_up (const void * a, const void * b)
@@ -96,15 +61,20 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   .. valid from then on.
   */
   ghosts_update_scalars (1);
+  Real * scratch = scratch_block ();
 
-  /* 1. flags */
+  /*
+  .. 1. flags. The root has no coarser level to be predicted from, so no
+  .. wavelet: as a leaf (after tree_coarsen () of it) it is refined, as
+  .. tree () makes it, and in 3 no family is coarsened into it.
+  */
   cache (Index) refine;
   foreach_leaf () {
     node->flags &= ~(BAMR_NODE_REFINE | BAMR_NODE_COARSEN);
     /* not i: that is the leaf's index, which the block sees */
-    int big = 0, small = 1;
-    for (int q = 0; q < n; q++) {
-      double e = block_wavelet ((Index) {IJKL}, s [q]);
+    int big = level == 0, small = level > 0;
+    for (int q = 0; level > 0 && q < n; q++) {
+      double e = wavelet_into ((Index) {IJKL}, s [q], scratch);
       big |= e > max [q];
       small &= e < max [q] / 1.5;
     }
@@ -135,13 +105,13 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   */
   cache (Index) merge;
   foreach_node () {
-    if (!tree_has_children (node) || level < minlevel)
+    if (!tree_has_children (node) || level < minlevel || level == 0)
       continue;
     int all = 1;
     children_of ((Index) {IJKL})
       all &= (node->flags & BAMR_NODE_LEAF) && (node->flags & BAMR_NODE_COARSEN);
     for (int q = 0; all && q < n && level + 1 <= maxlevel; q++)
-      all &= block_wavelet ((Index) {IJKL}, s [q]) <= max [q];
+      all &= wavelet_into ((Index) {IJKL}, s [q], scratch) <= max [q];
     if (all)
       cache_push (merge, (Index) {IJKL});
   }
@@ -153,5 +123,6 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   /* 4. clear the flags */
   foreach_node ()
     node->flags &= ~(BAMR_NODE_REFINE | BAMR_NODE_COARSEN);
+  free (scratch);
   return st;
 }

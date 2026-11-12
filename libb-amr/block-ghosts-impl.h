@@ -307,6 +307,49 @@ void block_prolong (Index p, int s)
   }
 }
 
+/*
+.. p's interior as its parent's prolongation makes it, into target, p's
+.. block left as it is. For the call, target is p's block of s: an operator
+.. writes there, through pr->fine or s[], while coarse (s) reads the parent
+.. and other scalars p's own blocks. A prolongation only writes its fine
+.. cells, never reads them (it fills uninitialised blocks in divide_leaf),
+.. so the cells of p's block it would have read are none.
+*/
+void block_prolong_into (Index p, int s, Real * target)
+{
+  BlockShape sh = tree_block_shape ();
+  int m = sh.m;
+  assert (p.level > 0 && index_is_allocated (p) && target);
+  Index C = p;
+  C.level--;
+  C.i >>= 1;
+  #if dimension > 1
+  C.j >>= 1;
+  #endif
+  #if dimension > 2
+  C.k >>= 1;
+  #endif
+  ScalarOps o = scalar_get_ops (s);
+  void ** slot = &index_node (p)->s [s / SCALAR_ARRAY_WIDTH][s % SCALAR_ARRAY_WIDTH];
+  void * own = *slot;
+  *slot = target;
+  Prolongation pr = {
+    .coarse = block_data (index_node (C)->s, s), .fine = target, .shape = sh,
+    .coarse_index = C, .fine_index = p, .s = s,
+  };
+  pr.off [0] = (p.i & 1) * m, pr.lo [0] = 0, pr.hi [0] = m;
+  pr.off [1] = pr.off [2] = pr.lo [1] = pr.lo [2] = 0;
+  pr.hi [1] = pr.hi [2] = 1;
+  #if dimension > 1
+  pr.off [1] = (p.j & 1) * m, pr.hi [1] = m;
+  #endif
+  #if dimension > 2
+  pr.off [2] = (p.k & 1) * m, pr.hi [2] = m;
+  #endif
+  @prolongation (o.prolongation, o.prolongation_uses) (&pr);
+  *slot = own;
+}
+
 void block_restrict (Index p, int s)
 {
   ScalarOps o = scalar_get_ops (s);

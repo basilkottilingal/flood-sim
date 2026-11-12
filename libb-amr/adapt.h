@@ -5,13 +5,16 @@
   .. Adapting the tree to the fields it holds, keeping it 2:1 balanced.
   ..
   .. The error of a block is its wavelet: how far each of its cells is from
-  .. what the coarser level would predict for it. The block, with two of its
-  .. stored ghost layers, is averaged into coarse cells, 2^dimension fine
-  .. cells each; each fine cell is then predicted from its coarse cell and
-  .. that cell's neighbours, by linear prolongation (prolong_linear ()). The
-  .. error is the largest |cell - prediction|: zero where the field is
-  .. linear, large where the coarse level would lose it. It reads the ghosts
-  .. as they are: ghosts_update () first.
+  .. what the coarser level would predict for it, by the scalar's own
+  .. prolongation from the parent's cells (block_prolong_into ()): the
+  .. parent's quadrant over the block is its restriction, the layer around
+  .. it the parent's other cells and first ghost layer. The error is the
+  .. largest |cell - prediction|: zero where the prolongation is exact (a
+  .. linear field for prolong_linear (), a flat surface for a lake-at-rest
+  .. one), large where the coarse level would lose it. It reads the parent
+  .. and its ghosts as they are: ghosts_update_levels () first. The root has
+  .. none: adapt_wavelet () refines it as a leaf, and never coarsens a
+  .. family into it, so the tree keeps level 1.
   ..
   .. adapt_wavelet (n, s, max, minlevel, maxlevel) then, for scalars s [0..n):
   ..
@@ -54,7 +57,8 @@
   AdaptStats adapt_wavelet (int n, const int * s, const double * max,
                             int minlevel, int maxlevel);
 
-  /* the wavelet error of the leaf p for scalar s: see above */
+  /* the wavelet error of the node p, not the root, for scalar s: see
+  .. above */
   double block_wavelet (Index p, int s);
 
 #endif
