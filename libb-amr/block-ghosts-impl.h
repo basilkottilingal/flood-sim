@@ -35,8 +35,8 @@ static int ghost_op_uses (int kind, int op)
 /* the scalars that s's operators depend on, into d; how many */
 /* the boundary condition of each face, and what it depends on: apart
 .. from ScalarOps, which holds the other two */
-static int boundary_ops [NSCALAR_MAX][GHOST_FACES_MAX];     /* 0: default */
-static scalar boundary_uses [NSCALAR_MAX][GHOST_FACES_MAX][GHOST_USES_MAX];
+static int boundary_ops [NSCALAR_MAX][GHOST_FACES];     /* 0: default */
+static scalar boundary_uses [NSCALAR_MAX][GHOST_FACES][GHOST_USES_MAX];
 
 static int ghost_uses_of (int s, int * d)
 {
@@ -101,17 +101,22 @@ static int ghost_ops_fail (const char * format, ...)
 
 static const char * const ghost_kinds [] = { "prolongation", "restriction",
                                              "boundary" };
-static const char * const ghost_faces [] = { "left", "right", "bottom", "top",
-                                             "back", "front" };
 
 /* what a binding is, for messages: prolongation, boundary.left, ... */
 static const char * ghost_what (int kind, int face)
 {
-  static const char * const bounds [] = { "boundary.left", "boundary.right",
-    "boundary.bottom", "boundary.top", "boundary.back", "boundary.front" };
+  static const char * const bounds [GHOST_FACES] = {
+    "boundary.left", "boundary.right",
+  #if dimension > 1
+    "boundary.bottom", "boundary.top",
+  #endif
+  #if dimension > 2
+    "boundary.back", "boundary.front",
+  #endif
+  };
   if (kind != GHOST_BOUNDARY)
     return ghost_kinds [kind];
-  return face >= 0 && face < GHOST_FACES_MAX ? bounds [face] : "boundary.all";
+  return face >= 0 && face < GHOST_FACES ? bounds [face] : "boundary.all";
 }
 
 /* a scalar in a message: its name (scalar.h), or "#unnamed", which no
@@ -148,8 +153,8 @@ int ghost_ops_set (scalar s, int kind, int face, int op, const scalar * uses,
                              ghost_what (kind, face));
   /* kept, to undo it all on a cycle */
   ScalarOps old = scalar_ops [s];
-  int old_ops [GHOST_FACES_MAX];
-  scalar old_uses [GHOST_FACES_MAX][GHOST_USES_MAX];
+  int old_ops [GHOST_FACES];
+  scalar old_uses [GHOST_FACES][GHOST_USES_MAX];
   memcpy (old_ops, boundary_ops [s], sizeof old_ops);
   memcpy (old_uses, boundary_uses [s], sizeof old_uses);
   if (kind == GHOST_BOUNDARY) {
@@ -252,7 +257,7 @@ ScalarOps scalar_get_ops (scalar s)
 
 int scalar_get_boundary (scalar s, int face)
 {
-  assert (s >= 0 && s < NSCALAR_MAX && face >= 0 && face < GHOST_FACES_MAX);
+  assert (s >= 0 && s < NSCALAR_MAX && face >= 0 && face < GHOST_FACES);
   return boundary_ops [s][face] ? boundary_ops [s][face] : bc_neumann;
 }
 
@@ -287,13 +292,15 @@ void block_prolong (Index p, int s)
   {
     pr.fine_index = index_child (p, c);
     pr.fine = block_data (index_node (pr.fine_index)->s, s);
-    for (int a = 0; a < 3; a++)
-    {
-      int in = a < dimension;
-      pr.off [a] = in ? ((c >> a) & 1) * m : 0;
-      pr.lo [a] = 0;
-      pr.hi [a] = in ? m : 1;
-    }
+    pr.off [0] = (c & 1) * m, pr.lo [0] = 0, pr.hi [0] = m;
+    pr.off [1] = pr.off [2] = pr.lo [1] = pr.lo [2] = 0;
+    pr.hi [1] = pr.hi [2] = 1;
+  #if dimension > 1
+    pr.off [1] = ((c >> 1) & 1) * m, pr.hi [1] = m;
+  #endif
+  #if dimension > 2
+    pr.off [2] = ((c >> 2) & 1) * m, pr.hi [2] = m;
+  #endif
     @prolongation (o.prolongation, o.prolongation_uses) (&pr);
   }
 }
@@ -325,15 +332,14 @@ void block_ghosts (Index p, int s)
   Real * own = block_data (index_node (p)->s, s);
   ScalarOps o = scalar_get_ops (s);
 
-  int P [3] = { p.i, 0, 0 }, ndir = 1;
+  int P [3] = { p.i, 0, 0 };
   #if dimension > 1
   P [1] = p.j;
   #endif
   #if dimension > 2
   P [2] = p.k;
   #endif
-  for (int a = 0; a < dimension; a++)
-    ndir *= 3;
+  enum { ndir = dimension == 1 ? 3 : dimension == 2 ? 9 : 27 };   /* 3^dim */
 
   for (int dir = 0; dir < ndir; dir++)
   {
@@ -366,12 +372,20 @@ void block_ghosts (Index p, int s)
       /* the same level: rows copied, cell x from cell x - d m of b */
       const Real * src = block_data (index_node (b)->s, s);
       size_t len = (size_t) (hi [0] - lo [0]) * sizeof (Real);
-      int x [3] = { lo [0], 0, 0 }, y [3];
+      int x [3] = { lo [0], 0, 0 }, y [3] = { lo [0] - d [0] * m, 0, 0 };
+  #if dimension > 2
       for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
       for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+  #endif
       {
-        for (int a = 0; a < 3; a++)
-          y [a] = x [a] - d [a] * m;
+  #if dimension > 1
+        y [1] = x [1] - d [1] * m;
+  #endif
+  #if dimension > 2
+        y [2] = x [2] - d [2] * m;
+  #endif
         memcpy (own + block_at (sh, x), src + block_at (sh, y), len);
       }
       continue;
@@ -402,7 +416,7 @@ void block_ghosts (Index p, int s)
     };
     for (int a = 0; a < 3; a++)
     {
-      pr.off [a] = a < dimension ? (P [a] - 2 * Cq [a]) * m : 0;
+      pr.off [a] = (P [a] - 2 * Cq [a]) * m;   /* 0 beyond the dimension */
       pr.lo [a] = lo [a];
       pr.hi [a] = hi [a];
     }

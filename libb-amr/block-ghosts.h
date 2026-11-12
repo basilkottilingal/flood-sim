@@ -158,13 +158,19 @@
   #define GHOST_USES_MAX 4
   enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
 
-  /* the faces of the domain: 2 axis + side, side 0 the low one */
-  enum { GHOST_LEFT, GHOST_RIGHT, GHOST_BOTTOM, GHOST_TOP, GHOST_BACK,
-         GHOST_FRONT, GHOST_FACES_MAX, GHOST_ALL_FACES = -1 };
-  #define GHOST_FACES (2 * dimension)
+  /* the faces of the domain, those of the dimension only: 2 axis + side,
+  .. side 0 the low one; GHOST_FACES of them */
+  enum { GHOST_LEFT, GHOST_RIGHT,
+  #if dimension > 1
+         GHOST_BOTTOM, GHOST_TOP,
+  #endif
+  #if dimension > 2
+         GHOST_BACK, GHOST_FRONT,
+  #endif
+         GHOST_FACES, GHOST_ALL_FACES = -1 };
 
   /* what any scalar's operations depend on, at most: see ghost_ops () */
-  #define GHOST_DEPS_MAX ((2 + GHOST_FACES_MAX) * GHOST_USES_MAX)
+  #define GHOST_DEPS_MAX ((2 + GHOST_FACES) * GHOST_USES_MAX)
 
   typedef struct
   {
@@ -233,24 +239,34 @@
   ..   prolong_cells (pr)
   ..     pr->fine [f] = pr->coarse [cc];          // injection
   */
+  /* the coarse cell C and the half sgn of the fine cell x, along axis a */
+  #define BAMR_FINE_TO_COARSE(off, x, C, sgn, m, a) do {                    \
+      int X_ = (off) [a] + (x) [a];                                       \
+      assert (X_ >= 0 && X_ < 2 * (m));                                   \
+      (C) [a] = X_ >> 1;                                                  \
+      (sgn) [a] = X_ & 1 ? 1 : -1;                                        \
+    } while (0)
+
   @loop prolong_cells (const Prolongation * pr) : f, cc, sgn
   {
-    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 };
-    for (int a = 0; a < dimension; a++)
-      lo [a] = pr->lo [a], hi [a] = pr->hi [a];
-    int x [3];
+    const int * lo = pr->lo, * hi = pr->hi;
+    int x [3] = { 0, 0, 0 };
+  #if dimension > 2
     for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
     for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+  #endif
     for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
     {
       int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
-      for (int a = 0; a < dimension; a++)
-      {
-        int X = pr->off [a] + x [a];
-        assert (X >= 0 && X < 2 * pr->shape.m);
-        C [a] = X >> 1;
-        sgn [a] = X & 1 ? 1 : -1;
-      }
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 0);
+  #if dimension > 1
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 1);
+  #endif
+  #if dimension > 2
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 2);
+  #endif
       long f = block_at (pr->shape, x), cc = block_at (pr->shape, C);
       (void) f, (void) cc, (void) sgn;
       {...}
@@ -272,16 +288,18 @@
     BlockShape sh = bc->shape;
     int m = sh.m, g = sh.g, ax = bc->axis;
     long st = block_stride (sh, ax), inward = bc->side ? -st : st;
-    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 };
-    for (int a = 0; a < dimension; a++)
-      lo [a] = -g, hi [a] = m + g;
+    int lo [3] = { -g, -g, -g }, hi [3] = { m + g, m + g, m + g };
     for (int layer = 0; layer < g; layer++)
     {
       lo [ax] = bc->side ? m + layer : -1 - layer;
       hi [ax] = lo [ax] + 1;
-      int x [3];
+      int x [3] = { 0, 0, 0 };
+  #if dimension > 2
       for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
       for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+  #endif
       for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
       {
         long ghost = block_at (sh, x), inner = ghost + (2 * layer + 1) * inward;
@@ -323,22 +341,24 @@
   @loop prolong_points (const Prolongation * pr) : c, shape, cc, sgn
   {
     BlockShape shape = pr->shape;
-    int lo [3] = { 0, 0, 0 }, hi [3] = { 1, 1, 1 };
-    for (int a = 0; a < dimension; a++)
-      lo [a] = pr->lo [a], hi [a] = pr->hi [a];
-    int x [3];
+    const int * lo = pr->lo, * hi = pr->hi;
+    int x [3] = { 0, 0, 0 };
+  #if dimension > 2
     for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
+  #endif
+  #if dimension > 1
     for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
+  #endif
     for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
     {
       int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
-      for (int a = 0; a < dimension; a++)
-      {
-        int X = pr->off [a] + x [a];
-        assert (X >= 0 && X < 2 * shape.m);
-        C [a] = X >> 1;
-        sgn [a] = X & 1 ? 1 : -1;
-      }
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 0);
+  #if dimension > 1
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 1);
+  #endif
+  #if dimension > 2
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 2);
+  #endif
       long c = block_at (shape, x), cc = block_at (shape, C);
       (void) c, (void) cc, (void) sgn;
       {...}
@@ -362,9 +382,16 @@
   @loop quadrant_cells (BlockShape shape, int child) : c, shape, fc
   {
     int h = shape.m / 2;
-    int hy = dimension > 1 ? h : 1, hz = dimension > 2 ? h : 1;
-    for (int Z = 0; Z < hz; Z++)
-    for (int Y = 0; Y < hy; Y++)
+  #if dimension > 2
+    for (int Z = 0; Z < h; Z++)
+  #else
+    const int Z = 0;
+  #endif
+  #if dimension > 1
+    for (int Y = 0; Y < h; Y++)
+  #else
+    const int Y = 0;
+  #endif
     {
       int px [3] = { (child & 1) * h, ((child >> 1) & 1) * h + Y,
                      ((child >> 2) & 1) * h + Z };
