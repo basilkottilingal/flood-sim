@@ -239,16 +239,30 @@
   ..   prolong_cells (pr)
   ..     pr->fine [f] = pr->coarse [cc];          // injection
   */
-  /* the coarse cell C and the half sgn of the fine cell x, along axis a */
+  /* the coarse cell C and the half sgn of the fine cell x, along axis a:
+  .. in range, as prolongation_in_range () checked for the whole region */
   #define BAMR_FINE_TO_COARSE(off, x, C, sgn, m, a) do {                    \
       int X_ = (off) [a] + (x) [a];                                       \
-      assert (X_ >= 0 && X_ < 2 * (m));                                   \
       (C) [a] = X_ >> 1;                                                  \
       (sgn) [a] = X_ & 1 ? 1 : -1;                                        \
     } while (0)
 
+  /* every fine cell pr asks for has its coarse cell in the coarse block:
+  .. off + x within 0 .. 2 m - 1 along each axis, for all of lo <= x < hi,
+  .. so at its two ends; checked once per call, not per cell */
+  static inline int prolongation_in_range (const Prolongation * pr)
+  {
+    for (int a = 0; a < dimension; a++)
+      if (pr->lo [a] < pr->hi [a]
+          && (pr->off [a] + pr->lo [a] < 0
+              || pr->off [a] + pr->hi [a] > 2 * pr->shape.m))
+        return 0;
+    return 1;
+  }
+
   @loop prolong_cells (const Prolongation * pr) : f, cc, sgn
   {
+    assert (prolongation_in_range (pr));
     const int * lo = pr->lo, * hi = pr->hi;
     int x [3] = { 0, 0, 0 };
   #if dimension > 2
@@ -341,6 +355,7 @@
   @loop prolong_points (const Prolongation * pr) : c, shape, cc, sgn
   {
     BlockShape shape = pr->shape;
+    assert (prolongation_in_range (pr));
     const int * lo = pr->lo, * hi = pr->hi;
     int x [3] = { 0, 0, 0 };
   #if dimension > 2

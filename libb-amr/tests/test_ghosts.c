@@ -505,6 +505,27 @@ int main (void)
     grid_scalar_trim (0);
     CHECK (grid_scalar_check ());
   }
+  /* 9b. the range a prolongation is checked for, once per call: a region
+   * whose ends map into the coarse block, and one cell past either end not;
+   * an empty region always */
+  {
+    BlockShape sh = tree_block_shape ();
+    int m = sh.m;
+    Prolongation pr = { .shape = sh };
+    for (int a = 0; a < 3; a++)
+      pr.off [a] = 0, pr.lo [a] = 0, pr.hi [a] = a < dimension ? m : 1;
+    pr.off [0] = m;                        /* the upper half: 2 m - 1 last */
+    CHECK (prolongation_in_range (&pr));
+    pr.lo [0] = -m, pr.hi [0] = m;         /* down to X = 0 */
+    CHECK (prolongation_in_range (&pr));
+    pr.lo [0] = -m - 1;                    /* X = -1 */
+    CHECK (!prolongation_in_range (&pr));
+    pr.lo [0] = 0, pr.hi [0] = m + 1;      /* X = 2 m */
+    CHECK (!prolongation_in_range (&pr));
+    pr.lo [0] = 5, pr.hi [0] = 5, pr.off [0] = 100;   /* empty */
+    CHECK (prolongation_in_range (&pr));
+  }
+
   /* 10. a coupled prolongation: the depth hl from the surface hl + zbl,
    * the bed zbl made first though hl's id is lower, at level jumps, walls
    * and in refined leaves; zbl stale makes hl stale; a cycle, a wrong

@@ -12,9 +12,14 @@ static double wavelet_into (Index p, int s, Real * scratch)
   BlockShape shape = tree_block_shape ();
   block_prolong_into (p, s, scratch);
   const Real * u = block_data (index_node (p)->s, s);
+  /* a select, not fmax (): twice as fast, the same result, a NaN ignored
+  .. by both */
   double err = 0;
-  block_cells (shape, 0)
-    err = fmax (err, fabs ((double) u [c] - scratch [c]));
+  block_cells (shape, 0) {
+    double d = (double) u [c] - scratch [c];
+    d = d < 0 ? -d : d;
+    err = d > err ? d : err;
+  }
   return err;
 }
 
