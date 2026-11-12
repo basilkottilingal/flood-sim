@@ -35,10 +35,16 @@
 static MGParams defaults (MGParams p)
 {
   int m = tree_block_shape ().m;
+  assert (p.smoother >= MG_SMOOTHER_DEFAULT && p.smoother <= MG_GAUSS_SEIDEL);
+  if (p.smoother == MG_SMOOTHER_DEFAULT)
+    p.smoother = MG_RED_BLACK;
   if (p.nrelax <= 0)
-    p.nrelax = 4;
+    p.nrelax = p.smoother == MG_JACOBI ? 4 : 2;
+  /* one sweep a level: the cycle diverges in 2D and 3D (measured), each
+     smoother */
+  assert (p.nrelax >= 2);
   if (p.nrelax_coarse <= 0)
-    p.nrelax_coarse = m * m;
+    p.nrelax_coarse = p.smoother == MG_JACOBI ? m * m : m * m / 2;
   if (p.omega <= 0)
     p.omega = 2. * dimension / (2. * dimension + 1.);
   if (p.tolerance <= 0)
@@ -95,6 +101,42 @@ static void relax (scalar da, scalar res, scalar alpha, scalar lambda,
     da[] = (Real) ((1 - omega) * da[] + omega * dn[]);
 }
 
+/*
+.. A sweep of Gauss-Seidel on one colour of the grid at depth l (BAMR_RED,
+.. BAMR_BLACK), or on every cell in order (BAMR_BOTH): in place, reading
+.. the other colour, unchanged in the pass (cwrap checks the offsets).
+*/
+static void relax_colour (scalar da, scalar res, scalar alpha, scalar lambda,
+                          int l, int colour)
+{
+  foreach_level_or_leaf_colour (l, colour) {
+    double n = 0, d = 0, h2 = Delta * Delta;
+    MG_NEIGHBOURS (da, alpha, n, d);
+    da[] = (Real) ((n / h2 - res[]) / (d / h2 - lambda[]));
+  }
+}
+
+/* one sweep of the smoother on level l, the ghosts made after each pass */
+static void sweep (scalar da, scalar res, scalar alpha, scalar lambda,
+                   scalar dn, int l, MGParams p)
+{
+  switch (p.smoother) {
+  case MG_JACOBI:
+    relax (da, res, alpha, lambda, dn, l, p.omega);
+    ghosts_update_level (da, l);
+    break;
+  case MG_RED_BLACK:
+    relax_colour (da, res, alpha, lambda, l, BAMR_RED);
+    ghosts_update_level (da, l);
+    relax_colour (da, res, alpha, lambda, l, BAMR_BLACK);
+    ghosts_update_level (da, l);
+    break;
+  default:
+    relax_colour (da, res, alpha, lambda, l, BAMR_BOTH);
+    ghosts_update_level (da, l);
+  }
+}
+
 /* one cycle: the residual res on the leaves, a corrected */
 static void cycle (scalar a, scalar res, scalar da, scalar dn, scalar alpha,
                    scalar lambda, MGParams p)
@@ -114,20 +156,17 @@ static void cycle (scalar a, scalar res, scalar da, scalar dn, scalar alpha,
     }
     ghosts_update_level (da, l);
     int n = l == p.minlevel ? p.nrelax_coarse : p.nrelax;
-    for (int k = 0; k < n; k++) {
-      relax (da, res, alpha, lambda, dn, l, p.omega);
-      ghosts_update_level (da, l);
-    }
+    for (int k = 0; k < n; k++)
+      sweep (da, res, alpha, lambda, dn, l, p);
   }
   foreach ()
     a[] += da[];
 }
 
-MGStats mg_helmholtz (scalar a, scalar b, scalar alpha, scalar lambda,
-                      MGParams p)
+/* the cycles, dn Jacobi's new values (none for Gauss-Seidel) */
+static MGStats solve (scalar a, scalar b, scalar alpha, scalar lambda,
+                      scalar res, scalar da, scalar dn, MGParams p)
 {
-  p = defaults (p);
-  scalar res, da, dn;
   /* the correction's walls: a's, which must be homogeneous */
   for (int f = 0; f < GHOST_FACES; f++)
     ghost_ops_set (da, GHOST_BOUNDARY, f, scalar_get_boundary (a, f), NULL, 0);
@@ -142,6 +181,18 @@ MGStats mg_helmholtz (scalar a, scalar b, scalar alpha, scalar lambda,
     st.i++;
   }
   return st;
+}
+
+MGStats mg_helmholtz (scalar a, scalar b, scalar alpha, scalar lambda,
+                      MGParams p)
+{
+  p = defaults (p);
+  scalar res, da;
+  if (p.smoother == MG_JACOBI) {
+    scalar dn;
+    return solve (a, b, alpha, lambda, res, da, dn, p);
+  }
+  return solve (a, b, alpha, lambda, res, da, -1, p);
 }
 
 MGStats mg_poisson (scalar a, scalar b, MGParams p)

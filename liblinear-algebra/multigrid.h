@@ -42,10 +42,27 @@
 
   #include "tree.h"
 
+  /*
+  .. The smoother, a sweep on a level:
+  ..   MG_RED_BLACK     red-black Gauss-Seidel: the red cells in place from
+  ..                    the black ones, the ghosts, the black from the red,
+  ..                    the ghosts (foreach_level_or_leaf_colour, block-loops.h)
+  ..   MG_JACOBI        weighted Jacobi: new values in a field of their own,
+  ..                    mixed in by omega, the ghosts
+  ..   MG_GAUSS_SEIDEL  Gauss-Seidel in place in each block, cell after cell
+  ..                    (BAMR_BOTH), the ghosts: across blocks, Jacobi
+  ..   0                the default: MG_RED_BLACK
+  */
+  enum { MG_SMOOTHER_DEFAULT, MG_RED_BLACK, MG_JACOBI, MG_GAUSS_SEIDEL };
+
   typedef struct
   {
-    int    nrelax;          /* sweeps on each level of a cycle: 0 gives 4  */
-    int    nrelax_coarse;   /* on the coarsest level: 0 gives m^2          */
+    int    smoother;        /* see above: 0 gives MG_RED_BLACK             */
+    int    nrelax;          /* sweeps on each level of a cycle: 0 gives 2,
+                               4 for Jacobi; 2 at least: with 1 the cycle
+                               diverges in 2D and 3D                       */
+    int    nrelax_coarse;   /* on the coarsest level: 0 gives m^2 / 2, m^2
+                               for Jacobi                                  */
     double omega;           /* Jacobi's weight: 0 gives 2d / (2d + 1)      */
     double tolerance;       /* the largest |residual| to stop at: 0 gives
                                1e-3                                        */

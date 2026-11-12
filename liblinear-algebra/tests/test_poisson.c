@@ -145,14 +145,22 @@ int main (void)
   }
   mg_helmholtz_operator (e, alpha, lambda, b);
   double floor = floor_of (2, 1);
-  MGParams p = { .tolerance = tolerance_of (2, 1) };
-  MGStats st = mg_helmholtz (a, b, alpha, lambda, p);
-  double err = max_diff (a, e);
-  printf ("  adaptive, levels %d to %d, %d leaves: %d cycles, residual %.3g "
-          "to %.3g, |a - e| %.3g\n", tree_get_depth_min (), tree_get_depth (),
-          tree_get_nleaves (), st.i, st.resb, st.resa, err);
-  CHECK (st.resa <= p.tolerance && st.i < 40);
-  CHECK (err < 100 * tol);
+  /* each smoother, the default (red-black) first */
+  const int smoothers [3] = { MG_SMOOTHER_DEFAULT, MG_JACOBI, MG_GAUSS_SEIDEL };
+  const char * names [3] = { "red-black", "Jacobi", "Gauss-Seidel" };
+  for (int q = 0; q < 3; q++) {
+    foreach ()
+      a[] = 0;
+    MGParams p = { .smoother = smoothers [q], .tolerance = tolerance_of (2, 1) };
+    MGStats st = mg_helmholtz (a, b, alpha, lambda, p);
+    double err = max_diff (a, e);
+    printf ("  adaptive, levels %d to %d, %d leaves, %s: %d cycles, residual "
+            "%.3g to %.3g, |a - e| %.3g\n", tree_get_depth_min (),
+            tree_get_depth (), tree_get_nleaves (), names [q], st.i, st.resb,
+            st.resa, err);
+    CHECK (st.resa <= p.tolerance && st.i < 40);
+    CHECK (err < 100 * tol);
+  }
 
   /* 2. the rate: the residual divided by about the same each cycle, while
    * well above its floor (in single precision, one or two cycles reach it:
