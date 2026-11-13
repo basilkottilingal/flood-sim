@@ -758,6 +758,138 @@ Deferred; none started. What is done is above ("Faces and fluxes",
    with a diagonal-only jump would tell whether it needs the owner's copy
    too.
 
+## Restriction
+
+What a ghost update restricts, and restrictions that read beyond a child.
+Item 1 is done in part; the rest are not started.
+
+**Done.** `ghosts_update ()` restricts the parents of the coarsest leaf's
+level and finer only (`tree_get_depth_min ()` .. `depth - 1`, finest first),
+and the restriction loops run over the tree's list of parents
+(`tree_caches ()->parents_by_level`) instead of testing every node. Every
+parent is still restricted by `ghosts_update_levels ()` and `tree_restrict
+()`. Measured in libvof's benchmark (uniform trees, no parent read): the
+restrictions were a third of a 3D step; a step went from 203-226 to 144 ns
+per cell, 62 to 32 in 2D.
+
+### 1. Restrict only the parents that are read
+
+**Who reads a parent**, in a ghost update without the parents' own ghosts:
+only a leaf of its own level beside it, among its 3^d - 1 neighbours,
+diagonals included (corner ghosts copy too):
+- its ghost copies take the parent's interior rows;
+- refluxing takes the parent's face 0 (a face vector), vertices the
+  parent's vertices;
+- a prolongation into a finer leaf's ghosts reads a coarse leaf's interior
+  and first ghost layer, which came from such a parent: the same rule;
+- coupled operators read the same coarse cells.
+
+Multigrid (`tree_restrict ()`, `ghosts_update_levels ()`), `adapt_wavelet ()`
+(a parent's wavelet) and code that reads coarse levels (`foreach_level ()`,
+output) need every parent, and ask for it.
+
+**The recursion.** A parent's restriction reads all of its children, so a
+child that is itself a parent must be restricted first: with whole-block
+restrictions, the set read is the marked parents and their subtrees. A deep
+refined region whose outermost parent touches one coarse leaf would be
+restricted whole for that leaf's two ghost layers.
+
+**What 2:1 balance gives.** The coarse leaf reads only a slab of the parent,
+`g` coarse cells deep. The fine cells under it are in the children that
+touch the coarse leaf, and by 2:1 balance those are leaves: a restriction of
+that slab alone never recurses.
+
+| | What | Gain | Cost |
+|---|---|---|---|
+| A | down to the coarsest leaf's level | all on a uniform tree; the levels below the coarsest leaf otherwise | done |
+| B | the parents a leaf of their level is beside, and their subtrees: a list in the tree caches, made again when the tree changes | all but the parents along level jumps and below them | moderate |
+| C | only the slab each coarse leaf reads | the least there is; no recursion | every restriction given a region (as `Prolongation` has `lo`, `hi`): mean, face, vertex and coupled ones (`restriction_plane`) |
+
+**The contract.** After `ghosts_update ()`, only the parents read would be
+valid (as now below the coarsest leaf's level): to be documented, and
+`tests/bit/compare.sh` to hash the leaves and the parents read.
+
+**The order of work:** B, then C only if a profile of a real mesh (a flood
+on a coarse floodplain) shows B's subtrees large.
+
+### 2. Restrictions that read beyond a child
+
+**Now.** Every restriction reads its children's own cells only (and the
+faces and vertices m a child owns): in `foreach_restriction ()` an access
+moves to a child (`foreach_child ()`), never to an offset on the fine level.
+So no fine ghost is needed: every restriction runs first, then the ghosts,
+coarsest level first. Mean, faces, vertices and libvof's
+`restriction_plane` are all compact.
+
+**What would read beyond:** full weighting for vertex-centred multigrid
+(libb-amr's vertex scalars), higher-order or wavelet restrictions, a smoothed
+coarse field. Such a stencil reads fine cells across the children's
+boundaries: the fine level's ghosts, which the order above has not made yet.
+
+**Not by updating every ghost before every level.** Making level l + 1's
+ghosts before level l is restricted, for every scalar of the update, would
+make all of them pay for the few that need it.
+
+**The reach, known per operator.**
+- cwrap: fine-level offsets allowed in `foreach_child ()` (`s[1]`, or a
+  `fine (s, i, j)`), checked against a bound at compile time as `coarse ()`
+  is against `BAMR_COARSE_REACH`; each operator's largest offset, its reach
+  r, recorded and given as `@restriction reach (id)`, as `uses (id)` is.
+- libb-amr: `ghosts_update_list ()` splits the scalars it updates into
+  compact (r = 0: every operator now) and wide (r > 0). The compact keep the
+  schedule as it is.
+
+**What a wide scalar needs** before the parents of level l are restricted:
+the fine cells within r of their children, across the children's
+boundaries with the nodes of level l + 1 beside them:
+1. a node of level l + 1, a leaf or a parent restricted already (finest
+   first): its interior, a copy;
+2. a wall: the boundary condition;
+3. no node of level l + 1, a coarser leaf: the region would come from its
+   prolongation, which reads that leaf's first ghost layer, which may come
+   from a parent of level l restricted in this very step. A cycle.
+
+**Three ways to give it:**
+
+| | How | Cost | Case 3 |
+|---|---|---|---|
+| a | interleaved partial ghosts: before level l, a pass over level l + 1 for the wide scalars only, r layers deep, copies and walls, no prolongation | one pass per level, of the wide scalars | left to b |
+| b | compact near jumps: the operator falls back to its compact form (the mean) for a child whose stencil would reach a coarser leaf | none | the fallback; 2:1 balance keeps such children few, those beside a jump |
+| c | the neighbours read directly: the restriction given the 3^d neighbourhood of fine blocks (the children and their nodes of level l + 1), whose interiors it reads; no ghost pass | proportional to use; every wide operator does the lookups | absent nodes reported, the fallback of b |
+
+**The choice: a with b.** The ghost machinery stays the one place that knows
+the neighbours; the pass copies only, r layers, so it is cheap and never
+prolongs, which removes the cycle; case 3 is the compact fallback. c only if
+wide restrictions become common and the extra passes show in a profile.
+
+**And:**
+- **The schedule.** Wide scalars are restricted level by level, each after
+  its partial pass: a sequence of passes, a barrier between them; the
+  compact scalars of the same update all at once, beside the first. Within a
+  level the blocks stay independent (OpenMP; a GPU kernel per level).
+- **With item 1.** A wide restriction too is needed only for the parents
+  read; the partial pass of level l + 1, only for the families whose parent
+  is restricted.
+- **Coarsening.** `tree_coarsen ()` restricts one family (`block_restrict
+  ()`): a wide operator there needs the family's surroundings, the same
+  copy-only gather for one family.
+- **Demand.** None yet: cell-centred finite volumes and their multigrid
+  restrict by the mean. Full weighting is the first likely user, for a
+  vertex-centred multigrid.
+
+### 3. A test of face m beyond its owner
+
+A parent's face m (and a vertex at m) is restricted from its children's
+face m, in their ghost layer. Where a child does not own it (a node of its
+level is above it), that face is a copy left from the previous update when
+the restriction runs: stale. It reaches only faces no leaf reads, by 2:1
+balance and the ownership of faces (a parent's face m is read by a coarse
+leaf above it only when nothing of the children's level is above them, and
+then they made it). `test_faces.c` shows the fluxes balance at every jump;
+no test poisons every face m beyond its owner before an update and checks
+that no leaf's face changes. One should, as the argument is the only thing
+that holds it.
+
 ## Compile-time block size
 
 Under consideration; not started. The block size `m` is now an argument of

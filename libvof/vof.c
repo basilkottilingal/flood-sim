@@ -6,6 +6,11 @@
 #include "vof-ghosts.h"
 
 /*
+.. WARNING : vof_advection () doesn't check if CFL < 0.5 (which is a 
+.. requirement for Weymouth-Yue (2010))
+*/
+
+/*
 .. The plane in the unit cell. With every component of n made positive (the
 .. axes of the negative ones flipped) and n scaled to a sum of 1, the fluid
 .. is m . x <= a, and its volume V (a) is that of the cube cut by a plane,
