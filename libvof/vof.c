@@ -12,196 +12,165 @@
 .. as Scardovelli and Zaleski (2000); V (1 - a) = 1 - V (a), so only a <=
 .. 1/2 is computed, with m sorted, m1 <= m2 (<= m3).
 ..
+.. Written for SIMD lanes and GPU threads: no branch that depends on the
+.. data, no loop of a varying count, no array indexed as it runs. The
+.. components are sorted by a network of min and max; each case of V is
+.. computed and the right one selected; the cubic of 3D is solved by a fixed
+.. number of Newton steps. A divisor that may be zero is kept from it
+.. (fmax (m, tiny)) in the cases where it is not selected.
+..
 .. The 3D cases are written as vof_utils.cpp's volume_of_cube (), but
 .. without dividing by a small m1 where it can be helped: with b = a - m1,
 .. a^3 - b^3 = m1 (a^2 + a b + b^2), so only (a - m2)^3 / m1 and
 .. (a - m3)^3 / m1 remain, where a - m2 < m1, a - m3 < m1.
 */
 
-static void sort_up (double * m, int n)
+#define VOF_TINY 1e-300
+
+/* a, b, c in increasing order: a network of min and max */
+static inline void sort3 (double * a, double * b, double * c)
 {
-  for (int i = 1; i < n; i++)
-    for (int j = i; j > 0 && m [j] < m [j - 1]; j--) {
-      double t = m [j];
-      m [j] = m [j - 1];
-      m [j - 1] = t;
-    }
+  double lo = fmin (*a, *b), hi = fmax (*a, *b);
+  double t = fmax (lo, *c);
+  *a = fmin (lo, *c);
+  *b = fmin (hi, t);
+  *c = fmax (hi, t);
+}
+
+static inline void sort2 (double * a, double * b)
+{
+  double lo = fmin (*a, *b);
+  *b = fmax (*a, *b);
+  *a = lo;
+}
+
+/* The normal made positive, sorted and scaled to a sum of 1: m1 <= m2 <=
+.. m3 (those beyond the dimension 0); *shift the sum of its negative
+.. components, which the flips move alpha by; the sum. Both sums are taken in
+.. sorted order, so that a normal with its components permuted (the same
+.. plane, the axes turned) gives the same alpha and volumes, bit for bit. */
+typedef struct { double m1, m2, m3, shift, sum, i1, i23; } Unit;
+
+static inline Unit unit_of (coord n)
+{
+  Unit u;
+#if dimension == 1
+  u.m1 = u.m2 = 0, u.m3 = fabs (n.x);
+  u.shift = fmin (n.x, 0);
+  u.sum = u.m3;
+#elif dimension == 2
+  double a = fabs (n.x), b = fabs (n.y), p = fmin (n.x, 0), q = fmin (n.y, 0);
+  sort2 (&a, &b);
+  sort2 (&p, &q);
+  u.m1 = 0, u.m2 = a, u.m3 = b;
+  u.shift = p + q;
+  u.sum = a + b;
+#else
+  double a = fabs (n.x), b = fabs (n.y), c = fabs (n.z);
+  double p = fmin (n.x, 0), q = fmin (n.y, 0), r = fmin (n.z, 0);
+  sort3 (&a, &b, &c);
+  sort3 (&p, &q, &r);
+  u.m1 = a, u.m2 = b, u.m3 = c;
+  u.shift = (p + q) + r;
+  u.sum = (a + b) + c;
+#endif
+  double inv = 1 / fmax (u.sum, VOF_TINY);
+  u.m1 *= inv, u.m2 *= inv, u.m3 *= inv;
+  /* the reciprocals the cases divide by, once: 1 / m1, 1 / (2 m2 m3) */
+  u.i1 = 1 / fmax (u.m1, VOF_TINY);
+  u.i23 = 1 / fmax (2 * u.m2 * u.m3, VOF_TINY);
+  return u;
 }
 
 #if dimension == 3
-/* V (a) and dV/da for a <= 1/2, m sorted, sum 1 */
-static double unit_volume3 (const double * m, double a, double * dv)
+/* the volume for m2 <= a < m1 + m2 (two corners or three cut), and dV/da */
+static inline double mid_volume (Unit u, double a, double * dv)
 {
-  double m1 = m [0], m2 = m [1], m3 = m [2], m12 = m1 + m2;
-  if (a <= 0) {
-    if (dv)
-      *dv = 0;
-    return 0;
-  }
-  if (a < m1) {                              /* a corner                    */
-    double p = (a / m1) * (a / m2);
-    if (dv)
-      *dv = p / (2 * m3);
-    return p * a / (6 * m3);
-  }
-  double b = a - m1, q = a * a + a * b + b * b;
-  if (a < m2) {                              /* an edge                     */
-    if (dv)
-      *dv = (2 * a - m1) / (2 * m2 * m3);
-    return q / (6 * m2 * m3);
-  }
-  if (a < m12) {
-    double e = a - m2, ee = e * e * (e / m1), dd = e * (e / m1);
-    if (a >= m3) {                           /* past the third corner too   */
-      double g = a - m3;
-      ee += g * g * (g / m1);
-      dd += g * (g / m1);
-    }
-    if (dv)
-      *dv = ((2 * a - m1) - dd) / (2 * m2 * m3);
-    return (q - ee) / (6 * m2 * m3);
-  }
-  if (dv)                                    /* a slab across m3            */
-    *dv = 1 / m3;
-  return (a - m12 / 2) / m3;
+  double b = a - u.m1, q = a * a + a * b + b * b;
+  double e = fmax (a - u.m2, 0), g = fmax (a - u.m3, 0);
+  *dv = ((2 * a - u.m1) - (e * e + g * g) * u.i1) * u.i23;
+  return (q - (e * e * e + g * g * g) * u.i1) * u.i23 * (1. / 3);
 }
 #endif
 
-/* V (a) for a <= 1/2, m sorted, sum 1 */
-static double unit_volume (const double * m, double a)
+/* V (a) for 0 <= a <= 1/2: each case, the right one selected */
+static inline double unit_volume (Unit u, double a)
 {
-  if (a <= 0)
-    return 0;
 #if dimension == 1
-  (void) m;
+  (void) u;
   return a;
 #elif dimension == 2
-  if (a < m [0])
-    return (a / m [0]) * a / (2 * m [1]);
-  return (a - m [0] / 2) / m [1];
+  double m2 = fmax (u.m2, VOF_TINY);
+  double corner = (a / m2) * a / (2 * u.m3), slab = (a - u.m2 / 2) / u.m3;
+  return a < u.m2 ? corner : slab;
 #else
-  return unit_volume3 (m, a, 0);
+  double dv, i3 = 1 / u.m3;
+  double corner = (a * u.i1) * a * a * u.i23 * (1. / 3);
+  double b = a - u.m1;
+  double edge = (a * a + a * b + b * b) * u.i23 * (1. / 3);
+  double mid = mid_volume (u, a, &dv);
+  double slab = (a - (u.m1 + u.m2) / 2) * i3;
+  return a < u.m1 ? corner : a < u.m2 ? edge : a < u.m1 + u.m2 ? mid : slab;
 #endif
 }
 
-/* a <= 1/2 such that V (a) = v, v <= 1/2, m sorted, sum 1 */
-static double unit_alpha (const double * m, double v)
+/* a, 0 <= a <= 1/2, such that V (a) = v, 0 <= v <= 1/2 */
+static inline double unit_alpha (Unit u, double v)
 {
-  if (v <= 0)
-    return 0;
 #if dimension == 1
-  (void) m;
+  (void) u;
   return v;
 #elif dimension == 2
-  double m1 = m [0], m2 = m [1];
-  if (v < m1 / (2 * m2))
-    return sqrt (2 * m1 * m2 * v);
-  return m2 * v + m1 / 2;
+  double m2 = fmax (u.m2, VOF_TINY);
+  double corner = sqrt (2 * u.m2 * u.m3 * v), slab = u.m3 * v + u.m2 / 2;
+  return v < u.m2 / (2 * u.m3) && m2 > VOF_TINY ? corner : slab;
 #else
-  double m1 = m [0], m2 = m [1], m3 = m [2], m12 = m1 + m2;
-  double v1 = m1 > 0 ? m1 * (m1 / (6 * m2 * m3)) : 0;
-  if (v < v1)
-    return cbrt (6 * m1 * m2 * m3 * v);
-  if (v < v1 + (m2 - m1) / (2 * m3)) {
-    double d = 2 * m2 * m3 * v - m1 * m1 / 12;
-    return m1 / 2 + sqrt (d > 0 ? d : 0);
+  double m1 = u.m1, m3 = u.m3, m12 = m1 + u.m2, i3 = 1 / m3;
+  double v1 = m1 * m1 * u.i23 * (1. / 3), v2 = v1 + (u.m2 - m1) * 0.5 * i3;
+  double corner = cbrt (6 * m1 * u.m2 * m3 * v);
+  double edge = m1 / 2 + sqrt (fmax (2 * u.m2 * m3 * v - m1 * m1 / 12, 0));
+  double slab = m3 * v + m12 / 2;
+  /* the cubic, between m2 and min (m12, 1/2): Newton from the upper end,
+   * where V is above v; V is convex there, so the steps come down to the
+   * root, and six reach round-off (a test of two million planes) */
+  double lo = u.m2, hi = fmin (m12, 0.5), a = hi, dv;
+  for (int k = 0; k < 6; k++) {
+    double f = mid_volume (u, a, &dv) - v;
+    a = fmin (fmax (a - f / fmax (dv, VOF_TINY), lo), hi);
   }
-  if (m12 <= m3 && v >= m12 / (2 * m3))
-    return m3 * v + m12 / 2;
-  /* a cubic, between m2 and min (m12, 1/2): Newton, bisection where it
-     would leave the bracket (V is increasing) */
-  double lo = m2, hi = m12 < 0.5 ? m12 : 0.5, a = 0.5 * (lo + hi);
-  for (int it = 0; it < 100; it++) {
-    double dv, f = unit_volume3 (m, a, &dv) - v;
-    if (f > 0)
-      hi = a;
-    else
-      lo = a;
-    double next = dv > 0 ? a - f / dv : 0.5 * (lo + hi);
-    if (!(next > lo && next < hi))
-      next = 0.5 * (lo + hi);
-    if (fabs (next - a) <= 4 * DBL_EPSILON * a || hi - lo <= 4 * DBL_EPSILON)
-      return next;
-    a = next;
-  }
-  return a;
+  int in_slab = m12 <= m3 && v >= m12 * 0.5 * i3;
+  return v < v1 ? corner : v < v2 ? edge : in_slab ? slab : a;
 #endif
-}
-
-/*
-.. m = |n| / sum, sorted; shift = the sum of the negative components; the
-.. sum. Both sums are taken in sorted order, so that a normal with its
-.. components permuted (the same plane, the axes turned) gives the same
-.. alpha and volumes, bit for bit.
-*/
-static double normalise (const double * n, double * m, double * shift)
-{
-  double neg [3];
-  int k = 0;
-  for (int i = 0; i < dimension; i++) {
-    m [i] = fabs (n [i]);
-    if (n [i] < 0)
-      neg [k++] = n [i];
-  }
-  sort_up (m, dimension);
-  sort_up (neg, k);
-  double s = 0;
-  for (int i = 0; i < dimension; i++)
-    s += m [i];
-  *shift = 0;
-  for (int i = 0; i < k; i++)
-    *shift += neg [i];
-  if (s > 0)
-    for (int i = 0; i < dimension; i++)
-      m [i] /= s;
-  return s;
 }
 
 /* the fraction of the unit cell where n . x <= alpha */
-static double cell_volume (const double * n, double alpha)
+static inline double cell_volume (coord n, double alpha)
 {
-  double m [3], shift, s = normalise (n, m, &shift);
-  if (s == 0)
-    return alpha >= 0;
-  double a = (alpha - shift) / s;
-  if (a <= 0)
-    return 0;
-  if (a >= 1)
-    return 1;
-  return a <= 0.5 ? unit_volume (m, a) : 1 - unit_volume (m, 1 - a);
-}
-
-static void components (coord c, double * a)
-{
-  a [0] = c.x;
-#if dimension > 1
-  a [1] = c.y;
-#endif
-#if dimension > 2
-  a [2] = c.z;
-#endif
+  Unit u = unit_of (n);
+  double a = (alpha - u.shift) / fmax (u.sum, VOF_TINY);
+  double h = fmin (fmax (a, 0), 1), low = fmin (h, 1 - h);
+  double v = unit_volume (u, low);
+  double r = h <= 0.5 ? v : 1 - v;
+  r = a <= 0 ? 0 : a >= 1 ? 1 : r;
+  return u.sum > 0 ? r : alpha >= 0;
 }
 
 double vof_plane_alpha (coord n, double f)
 {
-  double nn [3], m [3], shift;
-  components (n, nn);
-  double s = normalise (nn, m, &shift);
-  if (s == 0)
-    return 0;
-  f = f < 0 ? 0 : f > 1 ? 1 : f;
-  double a = f <= 0.5 ? unit_alpha (m, f) : 1 - unit_alpha (m, 1 - f);
-  return a * s + shift;
+  Unit u = unit_of (n);
+  f = fmin (fmax (f, 0), 1);
+  double low = fmin (f, 1 - f), a = unit_alpha (u, low);
+  a = f <= 0.5 ? a : 1 - a;
+  return u.sum > 0 ? a * u.sum + u.shift : 0;
 }
 
 double vof_plane_volume (coord n, double alpha, coord lo, coord hi)
 {
   /* x = lo + (hi - lo) X: the box is the unit cell of X */
-  double nn [3], l [3], h [3], nb [3];
-  components (n, nn), components (lo, l), components (hi, h);
-  for (int i = 0; i < dimension; i++) {
-    nb [i] = nn [i] * (h [i] - l [i]);
-    alpha -= nn [i] * l [i];
+  coord nb = { 0, 0, 0 };
+  foreach_dimension () {
+    nb.x = n.x * (hi.x - lo.x);
+    alpha -= n.x * lo.x;
   }
   return cell_volume (nb, alpha);
 }
@@ -209,32 +178,40 @@ double vof_plane_volume (coord n, double alpha, coord lo, coord hi)
 /*
 .. The interface on every leaf: n, Youngs' normal (calc_slope () in
 .. vof_utils.cpp), minus the gradient of c, and alpha, the plane
-.. n . x <= alpha holding c in the unit cell. All the branching of the
-.. reconstruction is here, once per cell; the sweep's faces only cut the
-.. plane of their upwind cell.
+.. n . x <= alpha holding c in the unit cell. Two loops: the normal, a
+.. stencil with no branch, on every cell (vectorised along rows); then
+.. alpha, on the interface cells only, behind one test that is the same for
+.. whole regions (the bulk on either side), so that SIMD lanes and GPU warps
+.. mostly agree on it, the geometry itself without a branch. Elsewhere alpha
+.. is 0: the faces of a bulk cell do not read it.
 */
 static void reconstruct (scalar c, vector n, scalar alpha)
 {
-  foreach () {
-    coord m = { 0, 0, 0 };
+  foreach ()
     foreach_dimension ()
 #if dimension == 1
-      m.x = (double) c[-1] - c[1];
+      n.x[] = (Real) ((double) c[-1] - c[1]);
 #elif dimension == 2
-      m.x = ((double) c[-1,1] + 2 * c[-1] + c[-1,-1])
-          - ((double) c[1,1] + 2 * c[1] + c[1,-1]);
+      n.x[] = (Real) (((double) c[-1,1] + 2 * c[-1] + c[-1,-1])
+                      - ((double) c[1,1] + 2 * c[1] + c[1,-1]));
 #else
-      m.x = (4 * (double) c[-1]
-             + 2 * ((double) c[-1,1] + c[-1,-1] + c[-1,0,1] + c[-1,0,-1])
-             + ((double) c[-1,1,1] + c[-1,1,-1] + c[-1,-1,1] + c[-1,-1,-1]))
-          - (4 * (double) c[1]
-             + 2 * ((double) c[1,1] + c[1,-1] + c[1,0,1] + c[1,0,-1])
-             + ((double) c[1,1,1] + c[1,1,-1] + c[1,-1,1] + c[1,-1,-1]));
+      n.x[] = (Real) ((4 * (double) c[-1]
+                       + 2 * ((double) c[-1,1] + c[-1,-1] + c[-1,0,1] + c[-1,0,-1])
+                       + ((double) c[-1,1,1] + c[-1,1,-1] + c[-1,-1,1] + c[-1,-1,-1]))
+                      - (4 * (double) c[1]
+                         + 2 * ((double) c[1,1] + c[1,-1] + c[1,0,1] + c[1,0,-1])
+                         + ((double) c[1,1,1] + c[1,1,-1] + c[1,-1,1] + c[1,-1,-1])));
 #endif
-    foreach_dimension ()
-      n.x[] = (Real) m.x;
-    alpha[] = (Real) (fabs (m.x) + fabs (m.y) + fabs (m.z) == 0 ? 0
-                      : vof_plane_alpha (m, c[]));
+  const double eps = VOF_EPS;
+  foreach () {
+    double f = c[], a = 0;
+    if (f > eps && f < 1 - eps) {
+      coord m = { 0, 0, 0 };
+      foreach_dimension ()
+        m.x = n.x[];
+      a = fabs (m.x) + fabs (m.y) + fabs (m.z) == 0 ? 0 : vof_plane_alpha (m, f);
+    }
+    alpha[] = (Real) a;
   }
 }
 

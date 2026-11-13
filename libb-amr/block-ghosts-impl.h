@@ -787,6 +787,7 @@ static void block_ghosts_cells (Index p, int s)
   P [2] = p.k;
   #endif
   enum { ndir = dimension == 1 ? 3 : dimension == 2 ? 9 : 27 };   /* 3^dim */
+  int prolonged = 0;                  /* a region from a coarser leaf */
 
   for (int dir = 0; dir < ndir; dir++)
   {
@@ -871,13 +872,15 @@ static void block_ghosts_cells (Index p, int s)
       pr.hi [a] = hi [a];
     }
     @prolongation (o.prolongation, o.prolongation_uses) (&pr);
+    prolonged = 1;
   }
 
   block_walls (p, s);
   /* a scalar s's prolongation depends on, whose own does nothing: s's may
    * have written its ghosts at level jumps, after its walls were made from
    * them; made again (prolong_none, block-ghosts.h) */
-  for (int k = 0, n = ghost_op_uses (GHOST_PROLONGATION, o.prolongation); k < n; k++)
+  for (int k = 0, n = prolonged ? ghost_op_uses (GHOST_PROLONGATION, o.prolongation)
+                                 : 0; k < n; k++)
     if (scalar_get_ops (o.prolongation_uses [k]).prolongation == prolong_none)
       block_walls (p, o.prolongation_uses [k]);
 }

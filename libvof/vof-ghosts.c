@@ -95,8 +95,11 @@
       m.x /= TREE_NCHILDREN;
       n.x[] = (Real) m.x;
     }
-    alpha[] = (Real) (fabs (m.x) + fabs (m.y) + fabs (m.z) == 0 ? 0
-                      : vof_plane_alpha (m, f));
+    /* the plane of an interface cell only, as reconstruct () (vof.c) */
+    double a = 0;
+    if (f > VOF_EPS && f < 1 - VOF_EPS && fabs (m.x) + fabs (m.y) + fabs (m.z) > 0)
+      a = vof_plane_alpha (m, f);
+    alpha[] = (Real) a;
   }
 }
 

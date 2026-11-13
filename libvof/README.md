@@ -184,6 +184,60 @@ geometry takes `coord`s, and sums the components in sorted order, so that
 the sweep along y of a problem turned is the sweep along x, bit for bit (the
 order test).
 
+## SIMD and GPU
+
+What the code does for vector lanes and GPU threads, and what it measures.
+
+- **The geometry has no branch on the data** (`vof_plane_alpha ()`,
+  `vof_plane_volume ()`): the components are sorted by a network of `fmin`
+  and `fmax`, every case of the volume is computed and the right one
+  selected, the cubic of 3D solved by six Newton steps from the upper end of
+  its bracket (the volume is convex there, so the steps come down to the
+  root: six reach round-off over two million random planes), and nothing is
+  an array indexed as it runs (on a GPU, such arrays leave the registers).
+  The divisions are by reciprocals made once per plane.
+- **The branches left are coherent:** "is the upwind cell, or the cell, an
+  interface one" is the same for whole regions (the bulk on either side),
+  so SIMD lanes and GPU warps mostly agree on it; the work under it is the
+  geometry, for the few interface cells. Computing it for every cell, to have
+  no branch at all, would cost the geometry on all of them.
+- **`reconstruct ()` is two loops:** Youngs' normal, a stencil with no
+  branch, on every cell (vectorised along rows), then alpha on the interface
+  cells.
+
+Measured (`sh tests/bench.sh [flags]`: a sphere in the vortex, uniform
+trees, 128^2 and 64^3 cells, 0.9% and 0.7% of them interface cells; one
+core, gcc -O3, a loaded laptop, so rough):
+
+| | 2D ns/cell/step | 3D ns/cell/step |
+|---|--:|--:|
+| before (branching geometry, one reconstruction loop) | 72 | 223-227 |
+| now | 62 | 203-226 |
+| now, `-fopenmp-simd -DBLOCK_OPENMP_SIMD -march=native` | 43 | 190 |
+
+Per call, as scalar code, the geometry without branches is about 10% slower
+than with them (alpha 194 ns against 174, a slab's volume 56 against 50):
+it computes every case. It is called on interface cells only, so that
+does not show; it is what lets a vector or warp run it in step.
+
+Where the time goes now (gprof, 3D): the loops of `vof_advection ()` 47%
+(Youngs' stencil, the face loops, the updates); the restrictions of the
+ghost updates 32% (`restriction_face` for the fluxes and `uf`,
+`restriction_plane` for c, n, alpha), on a uniform tree that reads no
+parent; the ghost copies and walls 11%; the geometry 1%.
+
+What is left, outside libvof:
+- **Restrict only the parents that are read** (libb-amr): those a leaf of
+  their level is beside, and the parents below them. A uniform tree reads
+  none; near level jumps a few. A third of the time here.
+- **Face loops by rows** (libb-amr's `foreach_face_cells`): each face's
+  cell is found by `block_at ()` from an index array, which gcc does not
+  vectorise ("complicated access pattern"); rows as `block_cells_simd` has
+  them would. libvof's face loop would stay scalar (its interface faces
+  call the geometry), but the flux loops of multigrid would gain.
+- **A device back end** for `foreach ()` and the ghost updates: until then
+  none of this runs on a GPU.
+
 ## Next
 
 - Adaptation that follows the interface (`adapt_wavelet ()` on c, with
