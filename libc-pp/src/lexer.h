@@ -29,6 +29,10 @@ struct token {
   int line;
   const struct var *binding;  /* a name: the declaration visible when it was
                                * read, or the one it declares; else NULL */
+  int rotation;           /* in the r-th copy of a function after
+                           * foreach_dimension (): its names were turned r
+                           * axes on, and a stencil access opened by it has
+                           * its offsets turned too; else 0 */
 };
 
 yyscan_t lex_open (FILE *in, struct scope_table *scopes);

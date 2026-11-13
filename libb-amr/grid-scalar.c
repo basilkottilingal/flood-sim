@@ -36,6 +36,7 @@ static void grid_scalar_new (scalar s)
 */
 static void grid_scalar_free (scalar s)
 {
+  ghost_ops_freeing (s);
   grid_scalar_free_blocks (s);
   scalar_ops_reset (s);
 }

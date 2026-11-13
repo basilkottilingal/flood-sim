@@ -60,12 +60,12 @@ void translate_set_dimension (int d)
 #define MAX_PARTS 9
 
 /* The type of cwrap's that specs name: scalar, vertex_scalar, face_vector,
- * vector or tensor (the last two in 2 and 3 dimensions), or NULL. */
+ * vector or tensor, or NULL. */
 static const char *scalar_type (const struct ast *specs)
 {
   static const char *const types[] = { "scalar", "vertex_scalar", "face_vector",
                                        "vector", "tensor" };
-  int n = !dimension ? 0 : dimension >= 2 ? 5 : 3;
+  int n = !dimension ? 0 : 5;
 
   for (int i = 0; i < n; i++)
     if (has_token (specs, T_TYPE_NAME, types[i]))
@@ -1520,6 +1520,16 @@ struct ast *stencil_mover_end (struct stencil_loop *loop, struct ast *kw,
   return node;
 }
 
+static void rotate_offsets (struct ast *access, int r, const struct token *at);
+
+/* An access read in the r-th copy of a function after foreach_dimension ()
+ * (its tokens' rotation, lexer.h): its offsets turned as its names were */
+static void rotate_as_read (struct ast *access, const struct token *t)
+{
+  if (t->rotation && dimension > 1)
+    rotate_offsets (access, t->rotation, t);
+}
+
 struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
                             struct ast *open, struct ast *args,
                             struct ast *close, int *rejected)
@@ -1562,6 +1572,7 @@ struct ast *stencil_coarse (struct stencil_loop *loop, struct ast *fn,
                                                first_token (scalar)->trivia);
   node = ast_new (AST_STENCIL_COARSE);
   ast_add (ast_add (ast_add (ast_add (node, scalar), open), offsets), close);
+  rotate_as_read (node, t);
   if (loop->naccess == loop->cap) {
     struct ast **m = allocate ((size_t)(loop->cap = 2 * loop->cap + 8) * sizeof (*m));
 
@@ -1604,6 +1615,7 @@ struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
   }
   node = ast_new (AST_STENCIL_ACCESS);
   ast_add (ast_add (ast_add (ast_add (node, base), open), offsets), close);
+  rotate_as_read (node, ast_token (open));
   if (!loop) {
     stencil_error (rejected, base, "'%s[...]', a cell of scalar '%s', outside "
                    "foreach ()", expression_text (base), expression_text (base));
@@ -3168,12 +3180,93 @@ struct ghost_op {
   const char *kind;         /* prolongation, restriction, boundary */
   const char *name;
   int id;
-  int nuses;                /* the scalars it depends on: its parameters
-                               after the first */
+  int nuses;                /* the scalars it depends on, its parameters
+                               after the first, flattened: a vector is
+                               dimension of them */
+  const char *sig;          /* their types, a code each (scalar_code ()) */
   const struct token *at;
   struct ghost_op *next;
 };
 static struct ghost_op *ghost_ops;     /* this file's, newest first */
+/* declared with what they depend on, @prolongation f (...) (vector n); */
+static struct ghost_op *ghost_decls;
+
+/*
+.. The types an operator may depend on, as one letter each in its
+.. signature: s scalar, x vertex_scalar, v vector, f face_vector, t tensor.
+*/
+static char type_code (const char *type)
+{
+  return !type ? 0 : strcmp (type, "scalar") == 0 ? 's'
+         : strcmp (type, "vertex_scalar") == 0 ? 'x'
+         : strcmp (type, "vector") == 0 ? 'v'
+         : strcmp (type, "face_vector") == 0 ? 'f'
+         : strcmp (type, "tensor") == 0 ? 't' : 0;
+}
+
+static const char *code_type (char c)
+{
+  return c == 's' ? "scalar" : c == 'x' ? "vertex_scalar" : c == 'v' ? "vector"
+         : c == 'f' ? "face_vector" : "tensor";
+}
+
+/* the scalars of one of a type: 1, dimension, or dimension^2 */
+static int code_count (char c)
+{
+  return c == 't' ? dimension * dimension : c == 'v' || c == 'f' ? dimension : 1;
+}
+
+/* the members down to scalar k of a type: "", ".y", ".x.y" */
+static const char *code_member (char c, int k)
+{
+  static const char *const axes[] = { "x", "y", "z" };
+
+  if (c == 't')
+    return arena_printf (".%s.%s", axes[k / dimension], axes[k % dimension]);
+  if (c == 'v' || c == 'f')
+    return arena_printf (".%s", axes[k]);
+  return "";
+}
+
+/* a signature for messages: (vector, scalar) */
+static const char *sig_text (const char *sig)
+{
+  const char *t = "(";
+
+  for (const char *c = sig; *c; c++)
+    t = arena_printf ("%s%s%s", t, c == sig ? "" : ", ", code_type (*c));
+  return arena_printf ("%s)", t);
+}
+
+/* The type of e, of cwrap's, as its code; 0 if it is none, or not an
+ * expression cwrap can follow (scalar_shape ()). With no member taken it is
+ * the type its name is declared with (an element of an array, or what a
+ * pointer points at, too); a member of a vector or face_vector is a scalar,
+ * of a tensor a vector. */
+static char scalar_code (const struct ast *e)
+{
+  const struct ast *root = e, *specs;
+  int depth, ind, members = 0;
+
+  if (!scalar_shape (e, &depth, &ind) || ind != 0)
+    return 0;
+  for (;;) {
+    if (root->kind == AST_PAREN_EXPRESSION)
+      root = root->child->next;
+    else if (root->kind == AST_MEMBER)
+      root = root->child, members++;
+    else if (root->kind == AST_SUBSCRIPT)
+      root = root->child;
+    else if (root->kind == AST_UNARY_OP)
+      root = root->child->next;
+    else
+      break;
+  }
+  if (members)
+    return depth == 1 ? 'v' : 's';
+  specs = declarator_specs (ast_token (root)->binding->decl);
+  return specs ? type_code (scalar_type (specs)) : 0;
+}
 
 /* @prolongation -> prolongation */
 static const char *operator_kind (const struct ast *at)
@@ -3201,6 +3294,36 @@ static const char *all_trivia (const struct ast *n)
   return MEMSTREAM_TEXT (t);
 }
 
+/* the signature of what an operator depends on, (vector n, scalar alpha):
+ * a code per parameter; *n the scalars they hold */
+static const char *operator_sig (const char *kind, const char *nm,
+                                 const struct ast *deps, int *n, int *rejected)
+{
+  const char *sig = "";
+
+  *n = 0;
+  if (!deps)
+    return sig;
+  for (const struct ast *p = deps->child->next->child; p; p = p->next) {
+    const struct ast *d;
+    char c;
+
+    if (p->kind != AST_PARAMETER)
+      continue;
+    d = p->child->next;
+    c = type_code (scalar_type (p->child));
+    if (!c || !d || d->kind != AST_DECL_NAME) {
+      stencil_error (rejected, p, "@%s %s: what it depends on is scalars, "
+                     "vertex scalars, vectors, face vectors or tensors, each "
+                     "declared as 'vector name'", kind, nm);
+      continue;
+    }
+    sig = arena_printf ("%s%c", sig, c);
+    *n += code_count (c);
+  }
+  return sig;
+}
+
 struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
                              struct ast *params, struct ast *close,
                              struct ast *deps, struct ast *body, int *rejected)
@@ -3220,25 +3343,16 @@ struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
   o->kind = kind;
   o->name = nm;
   o->id = operator_count (kind) + 1;
-  /* the scalars it depends on, (scalar zb, ...), after its parameters */
-  o->nuses = 0;
-  if (deps) {
-    struct ast *list = deps->child->next;
-
-    for (struct ast *p = list->child; p; p = p->next) {
-      const struct ast *d;
-
-      if (p->kind != AST_PARAMETER)
-        continue;
-      d = p->child->next;
-      o->nuses++;
-      if (!scalar_type (p->child) || strcmp (scalar_type (p->child), "scalar") != 0
-          || !d || d->kind != AST_DECL_NAME)
-        stencil_error (rejected, p, "@%s %s: what it depends on is scalars, "
-                       "each declared 'scalar name'", kind, nm);
-    }
-  }
+  /* what it depends on, (vector n, scalar alpha), after its parameters */
+  o->sig = operator_sig (kind, nm, deps, &o->nuses, rejected);
   o->at = ast_token (name);
+  for (const struct ghost_op *d = ghost_decls; d; d = d->next)
+    if (strcmp (d->kind, kind) == 0 && strcmp (d->name, nm) == 0
+        && strcmp (d->sig, o->sig) != 0) {
+      stencil_error (rejected, name, "@%s %s depends on %s, but is declared "
+                     "with %s", kind, nm, sig_text (o->sig), sig_text (d->sig));
+      diag (d->at->file, d->at->line, DIAG_NOTE, "'%s' is declared here", nm);
+    }
   o->next = ghost_ops;
   ghost_ops = o;
 
@@ -3301,6 +3415,38 @@ struct ast *operator_declare (struct ast *at, struct ast *name, struct ast *semi
   return decl;
 }
 
+struct ast *operator_declare_typed (struct ast *at, struct ast *name,
+                                    struct ast *deps, struct ast *semi,
+                                    int *rejected)
+{
+  const char *kind = operator_kind (at), *nm = ast_token (name)->text;
+  struct ghost_op *d = allocate (sizeof (*d));
+  const struct token *t = ast_token (at);
+  struct ast *decl;
+
+  d->kind = kind;
+  d->name = nm;
+  d->sig = operator_sig (kind, nm, deps, &d->nuses, rejected);
+  d->at = ast_token (name);
+  for (const struct ghost_op *o = ghost_ops; o; o = o->next)
+    if (strcmp (o->kind, kind) == 0 && strcmp (o->name, nm) == 0
+        && strcmp (o->sig, d->sig) != 0) {
+      stencil_error (rejected, name, "@%s %s is declared with %s, but depends "
+                     "on %s", kind, nm, sig_text (d->sig), sig_text (o->sig));
+      diag (o->at->file, o->at->line, DIAG_NOTE, "'%s' is defined here", nm);
+    }
+  d->next = ghost_decls;
+  ghost_decls = d;
+  /* extern const int name; on the lines of the declaration */
+  decl = parse_snippet (arena_printf ("extern const int %s;", nm));
+  decl->next = NULL;
+  each_leaf (decl, flatten_leaf, (void *)t);
+  first_token (decl)->trivia = arena_printf ("%s%s", t->trivia, all_trivia (name));
+  last_token (decl)->trivia = arena_printf ("%s%s", deps ? all_trivia (deps) : "",
+                                            ast_token (semi)->trivia);
+  return decl;
+}
+
 struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
                                struct ast *close, struct ast *open2,
                                struct ast *args, struct ast *close2,
@@ -3357,12 +3503,30 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
       es[nes] = vs[j];
       call = arena_printf ("%s%s(__cwrap_e%d)", call, j ? ", " : "", nes++);
     }
-    /* uses [0], uses [1], ...: a copy of uses for each, as each placeholder
-     * is filled once */
-    for (int u = 0; u < by_id[k]->nuses; u++) {
-      es[nes] = uses;
-      call = arena_printf ("%s%s(__cwrap_e%d)[%d]", call, nv || u ? ", " : "",
-                           nes++, u);
+    /* each dependency from uses [0], uses [1], ...: a scalar as it is, a
+     * vector or tensor made again of its scalars, (vector) { uses [2],
+     * uses [3] }; a copy of uses for each, as each placeholder is filled
+     * once */
+    for (int q = 0, u = 0; by_id[k]->sig[q]; q++) {
+      char c = by_id[k]->sig[q];
+      const char *arg = "";
+
+      for (int j = 0; j < code_count (c); j++, u++) {
+        const char *one;
+
+        es[nes] = uses;
+        one = arena_printf ("(__cwrap_e%d)[%d]", nes++, u);
+        if (c == 't' && j % dimension == 0)
+          arg = arena_printf ("%s%s{ ", arg, j ? " }, " : "");
+        else if (j)
+          arg = arena_printf ("%s, ", arg);
+        arg = arena_printf ("%s%s", arg, one);
+      }
+      if (c == 't')
+        arg = arena_printf ("(tensor) { %s } }", arg);
+      else if (c == 'v' || c == 'f')
+        arg = arena_printf ("(%s) { %s }", code_type (c), arg);
+      call = arena_printf ("%s%s%s", call, nv || q ? ", " : "", arg);
     }
     text = arena_printf ("%s case %d: __cwrap_%s_%s (%s); break;", text, k,
                          kind, by_id[k]->name, call);
@@ -3388,16 +3552,28 @@ struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
   struct ast *items = ast_new (AST_BLOCK_ITEMS), *e;
 
   (void) open, (void) close;
-  if (strcmp (ast_token (word)->text, "uses") != 0) {
+  const char *w = ast_token (word)->text;
+  int which = strcmp (w, "uses") == 0 ? 0 : strcmp (w, "signature") == 0 ? 1
+              : strcmp (w, "name") == 0 ? 2 : -1;
+
+  if (which < 0) {
     stencil_error (rejected, word, "@%s %s (...) in an expression: only @%s "
-                   "uses (id)", kind, ast_token (word)->text, kind);
+                   "uses (id), @%s signature (id) or @%s name (id)", kind, w,
+                   kind, kind, kind);
     return ast_new (AST_EXPRESSION_STATEMENT);
   }
+  /* uses: how many scalars it depends on (-1: no such id); signature: their
+   * types, a letter each (s scalar, x vertex_scalar, v vector, f
+   * face_vector, t tensor); name: its name (NULL: no such id) */
   for (struct ghost_op *o = ghost_ops; o; o = o->next)
     if (strcmp (o->kind, kind) == 0)
-      text = arena_printf ("%s__cwrap_u == %d ? %d : ", text, o->id, o->nuses);
+      text = which == 0
+        ? arena_printf ("%s__cwrap_u == %d ? %d : ", text, o->id, o->nuses)
+        : arena_printf ("%s__cwrap_u == %d ? \"%s\" : ", text, o->id,
+                        which == 1 ? o->sig : o->name);
   add_stencil_items (items, arena_printf ("({ int __cwrap_u = (__cwrap_e0); "
-                                          "(void) __cwrap_u; %s-1; });", text),
+                                          "(void) __cwrap_u; %s%s; });", text,
+                                          which ? "(const char *) 0" : "-1"),
                      &id, 1, t);
   e = items->child->child;
   e->parent = e->next = NULL;
@@ -3407,7 +3583,8 @@ struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
 
 /* ghost_ops (s, prolongation (op, zb, ...), restriction (...),
  *            boundary.left (...), ..., boundary.all (...)) */
-struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
+struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int has_bind,
+                            int *rejected)
 {
   static const char *const kinds[3] = { "prolongation", "restriction", "boundary" };
   static const char *const consts[3] = { "GHOST_PROLONGATION", "GHOST_RESTRICTION",
@@ -3419,7 +3596,7 @@ struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
                                               "GHOST_BOTTOM", "GHOST_TOP",
                                               "GHOST_BACK", "GHOST_FRONT" };
   const struct token *t;
-  struct ast *target, *es[4 * MAX_LOOP_PARAMS], *items = ast_new (AST_BLOCK_ITEMS), *e;
+  struct ast *target, *es[16 * MAX_LOOP_PARAMS], *items = ast_new (AST_BLOCK_ITEMS), *e;
   struct ast *face_item = NULL;           /* the first boundary.<face> (...) */
   const char *text = "(";
   int nes = 0, errors = *rejected;
@@ -3504,26 +3681,57 @@ struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected)
       if (!(a->kind == AST_TOKEN && strcmp (ast_token (a)->text, ",") == 0)
           && nv < MAX_LOOP_PARAMS)
         vs[nv++] = a;
-    /* the scalars it depends on: global, never freed */
-    for (int k = 1; k < nv; k++) {
-      const struct ast *specs;
-      int member;
+    /* what it depends on: scalars, vertex scalars, vectors, face vectors,
+     * tensors, global or local (libb-amr stops a run that frees one while
+     * a binding reads it), each flattened to its scalars, (n).x, (n).y; and
+     * their types, the signature libb-amr checks against the operator's */
+    const char *sig = "";
+    int nflat = 0, untyped = 0;
 
-      if (!is_scalar_expression (vs[k]) || !global_scalar_decl (vs[k], &specs, &member))
-        stencil_error (rejected, vs[k], "%s (%s, ...): '%s', a scalar it "
-                       "depends on, must be global (at file scope, static or "
-                       "extern), as a global scalar is never freed",
-                       what, expression_text (vs[0]),
-                       expression_text (vs[k]));
-      es[nes] = vs[k];
-      deps = arena_printf ("%s%s(__cwrap_e%d)", deps, k > 1 ? ", " : "", nes++);
+    for (int k = 1; k < nv; k++) {
+      char c = scalar_code (vs[k]);
+
+      if (!c) {
+        untyped = 1;
+        stencil_error (rejected, vs[k], "%s (%s, ...): '%s', which it depends "
+                       "on, is not a scalar, vertex scalar, vector, face vector "
+                       "or tensor that cwrap can follow", what,
+                       expression_text (vs[0]), expression_text (vs[k]));
+        continue;
+      }
+      sig = arena_printf ("%s%c", sig, c);
+      for (int j = 0; j < code_count (c); j++) {
+        es[nes] = vs[k];
+        deps = arena_printf ("%s%s(__cwrap_e%d)%s", deps, nflat++ ? ", " : "",
+                             nes++, code_member (c, j));
+      }
+    }
+    /* the operator named, declared or defined in this file with what it
+     * depends on: checked here too */
+    if (vs[0]->kind == AST_TOKEN && !untyped) {
+      const char *nm = ast_token (vs[0])->text;
+
+      for (int l = 0; l < 2; l++)
+        for (const struct ghost_op *o = l ? ghost_decls : ghost_ops; o; o = o->next)
+          if (strcmp (o->kind, kinds[kind]) == 0 && strcmp (o->name, nm) == 0
+              && strcmp (o->sig, sig) != 0) {
+            stencil_error (rejected, item, "%s (%s, ...): '%s' depends on %s, "
+                           "given %s", what, nm, nm, sig_text (o->sig),
+                           sig_text (sig));
+            diag (o->at->file, o->at->line, DIAG_NOTE, "'%s' is %s here", nm,
+                  l ? "declared" : "defined");
+            l = 2;
+            break;
+          }
     }
     es[nes] = target;
     es[nes + 1] = vs[0];
-    text = arena_printf ("%sghost_ops_set ((__cwrap_e%d), %s, %s, (__cwrap_e%d), %s, "
-                         "%d), ", text, nes, consts[kind], face, nes + 1,
-                         nv > 1 ? arena_printf ("(const scalar []) { %s }", deps)
-                                : "(const scalar *) 0", nv - 1);
+    text = arena_printf ("%sghost_ops_%s ((__cwrap_e%d), %s, %s, (__cwrap_e%d), %s, "
+                         "%d%s), ", text, has_bind ? "bind" : "set", nes,
+                         consts[kind], face, nes + 1,
+                         nflat ? arena_printf ("(const scalar []) { %s }", deps)
+                               : "(const scalar *) 0", nflat,
+                         has_bind ? arena_printf (", \"%s\"", sig) : "");
     nes += 2;
   }
   if (*rejected > errors)
@@ -3572,6 +3780,7 @@ int translate_file (const char *in_path, const char *out_path)
   }
   cache_types = NULL;
   ghost_ops = NULL;
+  ghost_decls = NULL;
   root = parse_file (in, &rejected);
   if (rejected) {
     fclose (in);

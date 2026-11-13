@@ -9,7 +9,7 @@
  *                              scalar_free (x) as its scope ends
  *   scalar k = scalar_new ();  in a function, keeps its id until freed
  *
- * In 2 and 3 dimensions, vector and tensor are structs of scalars, and each
+ * vector and tensor are structs of scalars (in 1D of one: v.x, t.x.x), and each
  * of their scalars is numbered or freed in the same way, in the order
  * x, y (, z), and for a tensor x.x, x.y, ... y.x, ...
  */
@@ -21,7 +21,10 @@
 
   typedef int scalar;
 
-  #if CWRAP_DIMENSION == 2
+  #if CWRAP_DIMENSION == 1
+  typedef struct { scalar x; } vector;
+  typedef struct { vector x; } tensor;
+  #elif CWRAP_DIMENSION == 2
   typedef struct { scalar x, y; } vector;
   typedef struct { vector x, y; } tensor;
   #elif CWRAP_DIMENSION == 3
@@ -48,6 +51,13 @@
   typedef struct { scalar x, y, z; } face_vector;
   #endif
   typedef scalar vertex_scalar;
+
+  /*
+  .. A point or a direction (a normal), in double as geometry is: three
+  .. members in every dimension, so that code may name .z where only 3D
+  .. reads it. foreach_dimension () turns .x, .y, .z as any member's.
+  */
+  typedef struct { double x, y, z; } coord;
 
   enum { CWRAP_CENTRE, CWRAP_FACE_X, CWRAP_FACE_Y, CWRAP_FACE_Z, CWRAP_VERTEX };
 
@@ -165,7 +175,7 @@
                  __cwrap_k = (__cwrap_brk = 1);                           \
              ((void) (s), __cwrap_k); __cwrap_k = __cwrap_brk = 0)
 
-  /* In 2 and 3 dimensions, also (below):
+  /* Also (below):
   ..   vector vector_new (void);    void vector_free (vector);
   ..   tensor tensor_new (void);    void tensor_free (tensor);
   */
@@ -181,7 +191,41 @@
   .. for a tensor x.x, x.y, ... y.x, ... They are freed in the reverse order.
   .. The locals here have initializers, so cwrap leaves them alone.
   */
-  #if CWRAP_DIMENSION == 2
+  #if CWRAP_DIMENSION == 1
+  static inline vector vector_new (void)
+  {
+    scalar x = scalar_new ();
+    return (vector) { x };
+  }
+
+  static inline vector __cwrap_vector_new_named (const char * const * n)
+  {
+    scalar x = __cwrap_scalar_new_named (n ? n [0] : 0);
+    return (vector) { x };
+  }
+
+  static inline tensor __cwrap_tensor_new_named (const char * const * n)
+  {
+    vector x = __cwrap_vector_new_named (n);
+    return (tensor) { x };
+  }
+
+  static inline void vector_free (vector v)
+  {
+    scalar_free (v.x);
+  }
+
+  static inline tensor tensor_new (void)
+  {
+    vector x = vector_new ();
+    return (tensor) { x };
+  }
+
+  static inline void tensor_free (tensor t)
+  {
+    vector_free (t.x);
+  }
+  #elif CWRAP_DIMENSION == 2
   static inline vector vector_new (void)
   {
     scalar x = scalar_new (), y = scalar_new ();
@@ -300,7 +344,7 @@
   }
 
   /* For cwrap: the cleanups of local vectors and tensors. */
-  #if CWRAP_DIMENSION >= 2
+  #if CWRAP_DIMENSION >= 1
   static inline void __cwrap_vector_free (vector * v)
   {
     vector_free (*v);

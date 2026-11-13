@@ -299,6 +299,11 @@ struct ast *operator_define (struct ast *at, struct ast *name, struct ast *open,
                              struct ast *params, struct ast *close,
                              struct ast *deps, struct ast *body, int *rejected);
 struct ast *operator_declare (struct ast *at, struct ast *name, struct ast *semi);
+/* @kind name (params) (deps);: declared with the types it depends on, which
+ * ghost_ops () in the file then checks, and its definition if here */
+struct ast *operator_declare_typed (struct ast *at, struct ast *name,
+                                    struct ast *deps, struct ast *semi,
+                                    int *rejected);
 struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
                                struct ast *close, struct ast *open2,
                                struct ast *args, struct ast *close2,
@@ -323,7 +328,10 @@ struct ast *operator_dispatch (struct ast *at, struct ast *open, struct ast *id,
  *     freed: else an error. */
 struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
                            struct ast *id, struct ast *close, int *rejected);
-struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int *rejected);
+/* has_bind: ghost_ops_bind () is declared, and gets the signature; if not
+ * (an older libb-amr), ghost_ops_set () without it */
+struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int has_bind,
+                            int *rejected);
 
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);

@@ -58,7 +58,8 @@ static int ghost_uses_of (int s, int * d)
 
 /* ghost_dependents again, from every scalar's operators, and through them:
 .. over the scalars in use only, as an id not in use has none (reset when
-.. made and when freed), and what one depends on is global, so in use */
+.. made and when freed), and what one depends on is in use: a scalar others
+.. depend on is not freed (ghost_ops_freeing ()) */
 static void ghost_dependents_rebuild (void)
 {
   int d [GHOST_DEPS_MAX];
@@ -125,6 +126,64 @@ static const char * ghost_what (int kind, int face)
 .. scalar can be named (# is in no C name), with its id */
 #define SNAME(s) (*scalar_name (s) ? scalar_name (s) : "#unnamed")
 
+/* the types an operator depends on, a letter each (cwrap's @prolongation
+.. signature (id)), and its name; "" and "the default" for 0 */
+static const char * ghost_op_signature (int kind, int op)
+{
+  if (!op)
+    return "";
+  switch (kind) {
+  case GHOST_PROLONGATION: return @prolongation signature (op);
+  case GHOST_RESTRICTION:  return @restriction signature (op);
+  case GHOST_BOUNDARY:     return @boundary signature (op);
+  }
+  return NULL;
+}
+
+static const char * ghost_op_name (int kind, int op)
+{
+  const char * n = NULL;
+  if (!op)
+    return "the default";
+  switch (kind) {
+  case GHOST_PROLONGATION: n = @prolongation name (op); break;
+  case GHOST_RESTRICTION:  n = @restriction name (op); break;
+  case GHOST_BOUNDARY:     n = @boundary name (op); break;
+  }
+  return n ? n : "?";
+}
+
+/* a signature in words, (vector, scalar), into buf */
+static const char * ghost_sig_text (const char * sig, char * buf, size_t size)
+{
+  size_t k = 0;
+  k += (size_t) snprintf (buf + k, size - k, "(");
+  for (const char * c = sig; *c && k < size; c++)
+    k += (size_t) snprintf (buf + k, size - k, "%s%s", c == sig ? "" : ", ",
+                            *c == 's' ? "scalar" : *c == 'x' ? "vertex_scalar"
+                            : *c == 'v' ? "vector" : *c == 'f' ? "face_vector"
+                            : *c == 't' ? "tensor" : "?");
+  if (k < size)
+    snprintf (buf + k, size - k, ")");
+  return buf;
+}
+
+int ghost_ops_bind (scalar s, int kind, int face, int op, const scalar * uses,
+                    int n, const char * sig)
+{
+  assert (s >= 0 && s < NSCALAR_MAX && kind >= 0 && kind <= GHOST_BOUNDARY);
+  const char * want = ghost_op_signature (kind, op);
+  if (sig && want && strcmp (want, sig) != 0) {
+    char a [256], b [256];
+    return ghost_ops_fail ("ghost_ops: scalar %s (%d): its %s %s depends on "
+                           "%s, given %s\n", SNAME (s), (int) s,
+                           ghost_what (kind, face), ghost_op_name (kind, op),
+                           ghost_sig_text (want, a, sizeof a),
+                           ghost_sig_text (sig, b, sizeof b));
+  }
+  return ghost_ops_set (s, kind, face, op, uses, n);
+}
+
 int ghost_ops_set (scalar s, int kind, int face, int op, const scalar * uses,
                    int n)
 {
@@ -148,11 +207,10 @@ int ghost_ops_set (scalar s, int kind, int face, int op, const scalar * uses,
                            "%d at most (GHOST_USES_MAX)\n", SNAME (s), (int) s,
                            n, GHOST_USES_MAX);
   for (int k = 0; k < n; k++)
-    if (uses [k] < 0 || uses [k] >= n_global_scalars)
-      return ghost_ops_fail ("ghost_ops: scalar %s (%d): scalar %s (%d), which "
-                             "its %s depends on, is not global\n", SNAME (s),
-                             (int) s, SNAME (uses [k]), (int) uses [k],
-                             ghost_what (kind, face));
+    if (uses [k] < 0 || uses [k] >= NSCALAR_MAX || !scalar_in_use (uses [k]))
+      return ghost_ops_fail ("ghost_ops: scalar %s (%d): scalar %d, which its "
+                             "%s depends on, is not in use\n", SNAME (s),
+                             (int) s, (int) uses [k], ghost_what (kind, face));
   /* kept, to undo it all on a cycle */
   ScalarOps old = scalar_ops [s];
   int old_ops [GHOST_FACES];
@@ -206,6 +264,40 @@ void scalar_set_ops (scalar s, ScalarOps ops)
   scalar_ops [s] = ops;
   ghost_dependents_rebuild ();
   ghosts_mark_dirty (s);      /* made by the old ones: made again */
+}
+
+int scalar_restore_ops (scalar s, ScalarOps o)
+{
+  int np = ghost_op_uses (GHOST_PROLONGATION, o.prolongation);
+  int nr = ghost_op_uses (GHOST_RESTRICTION, o.restriction);
+  if (np < 0 || nr < 0)
+    return ghost_ops_fail ("scalar_restore_ops: scalar %s (%d): no such "
+                           "operator\n", SNAME (s), (int) s);
+  return ghost_ops_set (s, GHOST_PROLONGATION, GHOST_ALL_FACES, o.prolongation,
+                        o.prolongation_uses, np)
+      || ghost_ops_set (s, GHOST_RESTRICTION, GHOST_ALL_FACES, o.restriction,
+                        o.restriction_uses, nr);
+}
+
+/* s about to be freed: none may depend on it. One that does stops the run;
+.. or, with ghost_ops_abort 0, gets the default operators back. */
+void ghost_ops_freeing (scalar s)
+{
+  assert (s >= 0 && s < NSCALAR_MAX);
+  int d [GHOST_DEPS_MAX];
+  foreach_scalar (t) {
+    if (t == s)
+      continue;
+    for (int k = 0, n = ghost_uses_of (t, d); k < n; k++)
+      if (d [k] == s) {
+        ghost_ops_fail ("scalar_free: scalar %s (%d): the operators of "
+                        "scalar %s (%d) depend on it; bind theirs again "
+                        "first (scalar_restore_ops ())\n", SNAME (s), (int) s,
+                        SNAME (t), (int) t);
+        scalar_ops_reset (t);
+        break;
+      }
+  }
 }
 
 /* each scalar after those it depends on, the stale ones of those added */
@@ -289,6 +381,8 @@ void block_prolong (Index p, int s)
   int m = sh.m;
   assert (index_is_allocated (p) && tree_has_children (index_node (p)));
   ScalarOps o = scalar_get_ops (s);
+  if (o.prolongation == prolong_none)
+    return;                   /* filled by another's: no child visited */
   Prolongation pr = {
     .coarse = block_data (index_node (p)->s, s),
     .shape = sh, .coarse_index = p, .s = s,
@@ -414,6 +508,12 @@ void block_prolong_into (Index p, int s, Real * target)
   C.k >>= 1;
   #endif
   ScalarOps o = scalar_get_ops (s);
+  if (o.prolongation == prolong_none) {
+    fprintf (stderr, "block_prolong_into: scalar %s (%d): its prolongation "
+             "is prolong_none, so it has no wavelet of its own: adapt on the "
+             "scalar whose operators fill it\n", SNAME (s), (int) s);
+    abort ();
+  }
   void ** slot = &index_node (p)->s [s / SCALAR_ARRAY_WIDTH][s % SCALAR_ARRAY_WIDTH];
   void * own = *slot;
   *slot = target;
@@ -437,7 +537,8 @@ void block_prolong_into (Index p, int s, Real * target)
 void block_restrict (Index p, int s)
 {
   ScalarOps o = scalar_get_ops (s);
-  @restriction (o.restriction, o.restriction_uses) (p, s);
+  if (o.restriction != restriction_none)
+    @restriction (o.restriction, o.restriction_uses) (p, s);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -454,6 +555,7 @@ void block_restrict (Index p, int s)
 .. the leaf one level coarser covering it, prolonged.
 */
 static void block_ghosts_cells (Index p, int s);
+static void block_walls (Index p, int s);
 
 /* the faces along a at X of block b, out to buffer (put 0) or back (put 1):
 .. every transverse interior place */
@@ -736,7 +838,10 @@ static void block_ghosts_cells (Index p, int s)
       continue;
     }
 
-    /* one level coarser, 2:1 balance: the leaf covering b */
+    /* one level coarser, 2:1 balance: the leaf covering b; nothing to do
+     * for prolong_none (another's prolongation fills the region) */
+    if (o.prolongation == prolong_none)
+      continue;
     assert (l > 0);
     Index C = b;
     C.level = l - 1;
@@ -768,7 +873,28 @@ static void block_ghosts_cells (Index p, int s)
     @prolongation (o.prolongation, o.prolongation_uses) (&pr);
   }
 
-  /* the walls, one axis after the other */
+  block_walls (p, s);
+  /* a scalar s's prolongation depends on, whose own does nothing: s's may
+   * have written its ghosts at level jumps, after its walls were made from
+   * them; made again (prolong_none, block-ghosts.h) */
+  for (int k = 0, n = ghost_op_uses (GHOST_PROLONGATION, o.prolongation); k < n; k++)
+    if (scalar_get_ops (o.prolongation_uses [k]).prolongation == prolong_none)
+      block_walls (p, o.prolongation_uses [k]);
+}
+
+/* the walls of block p, one axis after the other */
+static void block_walls (Index p, int s)
+{
+  BlockShape sh = tree_block_shape ();
+  int nb = 1 << p.level;
+  Real * own = block_data (index_node (p)->s, s);
+  int P [3] = { p.i, 0, 0 };
+  #if dimension > 1
+  P [1] = p.j;
+  #endif
+  #if dimension > 2
+  P [2] = p.k;
+  #endif
   for (int a = 0; a < dimension; a++)
     for (int side = 0; side < 2; side++)
       if (side ? P [a] == nb - 1 : P [a] == 0)
@@ -788,6 +914,8 @@ static void block_ghosts_cells (Index p, int s)
 void tree_restrict (int s)
 {
   ScalarOps o = scalar_get_ops (s);
+  if (o.restriction == restriction_none)
+    return;                   /* no parent visited */
   const TreeCaches * tc = tree_caches ();
   for (int q = 0; q < tc->nall; q++)
     if (tree_has_children (tc->all [q].node))
@@ -816,10 +944,11 @@ void ghosts_update_level (int s, int l)
   int L = block_level_clamp (l);
   if (L < 0)
     return;
-  for (int k = L - 1; k >= tree_get_depth_min (); k--)
-    for (int q = tc->level_first [k]; q < tc->level_first [k + 1]; q++)
-      if (tree_has_children (tc->by_level [q].node))
-        block_restrict (tc->by_level [q].p, s);
+  if (scalar_get_ops (s).restriction != restriction_none)
+    for (int k = L - 1; k >= tree_get_depth_min (); k--)
+      for (int q = tc->level_first [k]; q < tc->level_first [k + 1]; q++)
+        if (tree_has_children (tc->by_level [q].node))
+          block_restrict (tc->by_level [q].p, s);
   for (int q = tc->leaf_first [0]; q < tc->leaf_first [L]; q++)
     block_ghosts (tc->leaves_by_level [q].p, s);
   for (int q = tc->level_first [L]; q < tc->level_first [L + 1]; q++)
@@ -844,14 +973,20 @@ void ghosts_update_list (int n, const int * given, int parents)
   for (int q = 0; q < n; q++)
     o [q] = scalar_get_ops (s [q]);
 
-  /* 1. restriction, finest first; within a level, at once */
-  for (int l = tc->depth - 1; l >= 0; l--)
+  /* 1. restriction, finest first; within a level, at once: the scalars
+   * whose restriction does something (restriction_none: no parent visited) */
+  int r [NSCALAR_MAX], nr = 0;
+  for (int q = 0; q < n; q++)
+    if (o [q].restriction != restriction_none)
+      r [nr++] = q;
+  for (int l = tc->depth - 1; l >= 0 && nr; l--)
   {
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
     for (int b = first [l]; b < first [l + 1]; b++)
       if (tree_has_children (at [b].node))
-        for (int q = 0; q < n; q++)
-          @restriction (o [q].restriction, o [q].restriction_uses) (at [b].p, s [q]);
+        for (int k = 0; k < nr; k++)
+          @restriction (o [r [k]].restriction, o [r [k]].restriction_uses)
+            (at [b].p, s [r [k]]);
   }
 
   /* 2. the ghosts, coarsest first; within a level, at once */

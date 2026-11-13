@@ -218,6 +218,10 @@ check "without <cwrap/cache.h>, cache and foreach are ordinary names" $?
   grep -q "^tensor.c:21: warning: '=' changes vector 't.y'" tensor2.log
 check "-dimension=2: a vector has 2 scalars and a tensor 4, numbered or freed each" $?
 
+"$cwrap" -dimension=1 -Wall -Wextra vector1.c -o vector1 2> vector1.log && [ ! -s vector1.log ] &&
+  [ "$(./vector1)" = "0 1 2 3 4 5 v.x t.x.x" ]
+check "-dimension=1: a vector has 1 scalar and a tensor 1, numbered or freed each" $?
+
 "$cwrap" -dimension=2 -translate tensor.c -o tensor.out 2> /dev/null &&
   grep -q '^tensor t; static const struct __cwrap_scalar_slot __cwrap_scalar_slot_3 __attribute__ ((section ("scalars"), used)) = { &t.x.x, "t.x.x", 0 }; .*_slot_4 .* = { &t.x.y, "t.x.y", 0 }; .*_slot_5 .* = { &t.y.x, "t.y.x", 0 }; .*_slot_6 .* = { &t.y.y, "t.y.y", 0 };$' tensor.out &&
   grep -q '^  tensor w __attribute__ ((cleanup (__cwrap_tensor_free))) = __cwrap_tensor_new_named ((const char \*const \[\]) { "w.x.x", "w.x.y", "w.y.x", "w.y.y" });$' tensor.out &&
@@ -401,18 +405,39 @@ check "ghost operators: defined twice, or dispatched with none defined, an error
   [ "$(./ops_coupled)" = "34 1 2 0 | 0 -1 2 2 1 2 3 1 0 2 -1" ] && [ ! -s ops_coupled.log ]
 check "coupled operators: (scalar a, scalar b) passed from uses, @prolongation uses (id), ghost_ops () with globals, boundary.top, boundary.all" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra ops_typed.c -o ops_typed 2> ops_typed.log &&
+  [ "$(./ops_typed)" = "345 7009 3 10 vs sxvft all | 3 vs 1 10 sxvft 1" ] && [ ! -s ops_typed.log ]
+check "typed dependencies: scalar, vertex_scalar, vector, face_vector, tensor passed from uses as declared, flattened by ghost_ops () with their signature, @prolongation signature (id) and name (id)" $?
+
+"$cwrap" -dimension=2 -c ops_typed_bad.c -o ops_typed_bad.o 2> ops_typed_bad.log
+[ $? -ne 0 ] && [ ! -e ops_typed_bad.o ] &&
+  [ "$(grep -o '^ops_typed_bad.c:[0-9]*: error' ops_typed_bad.log | cut -d: -f2 | tr '\n' ' ')" = "6 10 11 12 13 " ] &&
+  grep -q "^ops_typed_bad.c:6: error: @prolongation vec depends on (scalar, scalar), but is declared with (vector, scalar)" ops_typed_bad.log &&
+  grep -q "^ops_typed_bad.c:10: error: prolongation (vec, ...): 'vec' depends on (vector, scalar), given (scalar, scalar)" ops_typed_bad.log &&
+  grep -q "^ops_typed_bad.c:11: error: restriction (far, ...): 'far' depends on (vector), given (scalar)" ops_typed_bad.log &&
+  grep -q "^ops_typed_bad.c:12: error: prolongation (vec, ...): 'p', which it depends on, is not a scalar" ops_typed_bad.log
+check "typed dependencies: a definition against its declaration, a binding against either, a dependency cwrap cannot follow" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra ops_set_only.c -o ops_set_only 2> ops_set_only.log &&
+  [ "$(./ops_set_only)" = "2" ] && [ ! -s ops_set_only.log ]
+check "typed dependencies: ghost_ops_set () without the signature where ghost_ops_bind () is not declared" $?
+
+"$cwrap" -dimension=2 -c ops_typed.c ops_typed.c ops_coupled.c 2> ops_files.log && [ ! -s ops_files.log ]
+check "typed dependencies: declarations of one file not kept for the next, in one command" $?
+
 "$cwrap" -dimension=2 -c ops_coupled_bad.c -o ops_coupled_bad.o 2> ops_coupled_bad.log
 [ $? -ne 0 ] && [ ! -e ops_coupled_bad.o ] &&
   [ "$(grep -o '^ops_coupled_bad.c:[0-9]*: error' ops_coupled_bad.log | cut -d: -f2 | tr '\n' ' ')" = "5 9 10 11 12 13 14 " ] &&
   grep -q "^ops_coupled_bad.c:5: error: @prolongation wrong: what it depends on is scalars" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:9: error: @prolongation (id) (...): some @prolongation depends on scalars" ops_coupled_bad.log &&
-  grep -q "^ops_coupled_bad.c:10: error: prolongation (needs, ...): 'local', a scalar it depends on, must be global" ops_coupled_bad.log &&
+  grep -q "^ops_coupled_bad.c:10: error: prolongation (needs, ...): '3', which it depends on, is not a scalar" ops_coupled_bad.log &&
+  ! grep -q "^ops_coupled_bad.c:16:" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:11: error: ghost_ops (zb, ...): 'smoothing(needs)' is not prolongation" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:12: error: ghost_ops (zb, ...): 'boundary(b_one)': a boundary condition is bound per face" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:13: error: ghost_ops (zb, ...): 'boundary.back': no face 'back' in 2 dimensions" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:14: error: ghost_ops (zb, ...): 'boundary.middle': no face 'middle'; the faces are" ops_coupled_bad.log &&
   grep -q "^ops_coupled_bad.c:15: warning: ghost_ops (zb, ...): 'boundary.all' comes after 'boundary.left'" ops_coupled_bad.log
-check "coupled operators: a dependency not a scalar, a dispatch without uses, a local dependency, an item of no kind, boundary with no face, a face beyond the dimension, an unknown face, .all after a face" $?
+check "coupled operators: a dependency not a scalar, a dispatch without uses, a dependency not a scalar (a local one is fine), an item of no kind, boundary with no face, a face beyond the dimension, an unknown face, .all after a face" $?
 
 "$cwrap" -dimension=2 -c scalar_global_free.c -o scalar_global_free.o 2> scalar_global_free.log
 [ $? -ne 0 ] && [ ! -e scalar_global_free.o ] &&
@@ -503,6 +528,30 @@ check "foreach_dimension (): the statement per axis, .x .y members, x y, names i
 "$cwrap" -dimension=2 -Wall -c stencil_dimension_lines.c -o stencil_dimension_lines.o 2> stencil_dimension_lines.log &&
   grep -q "^stencil_dimension_lines.c:10:7: warning: unused variable" stencil_dimension_lines.log
 check "foreach_dimension (): the copies on the statement's last line, no later line moved" $?
+
+"$cwrap" -dimension=2 -c stencil_dimension_loop_bad.c -o stencil_dimension_loop_bad.o 2> stencil_dimension_loop_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_dimension_loop_bad.o ] &&
+  grep -q "^stencil_dimension_loop_bad.c:13: error: foreach () inside foreach_dimension ()" stencil_dimension_loop_bad.log &&
+  grep -q "^stencil_dimension_loop_bad.c:11: note: the foreach_dimension () is here" stencil_dimension_loop_bad.log
+check "foreach_dimension (): a stencil loop in it, outside any loop, an error" $?
+
+"$cwrap" -dimension=2 -Wall -Wextra stencil_dimension_function.c -lm -o stencil_dimension_function 2> stencil_dimension_function.log &&
+  [ "$(./stencil_dimension_function)" = "12 good 0 bad" ] && [ ! -s stencil_dimension_function.log ]
+check "foreach_dimension () before a function: f_x, f_y, a stencil loop's offsets turned, a declaration, calls turned" $?
+
+ok=0
+for d in 1 2 3; do
+  "$cwrap" -dimension=$d -Wall -Wno-unused-function stencil_dimension_axes.c -o axes$d 2> axes$d.log &&
+    [ ! -s axes$d.log ] || ok=1
+done
+[ $ok = 0 ] && [ "$(./axes1)" = "0 101" ] && [ "$(./axes2)" = "0 1 101 102" ] &&
+  [ "$(./axes3)" = "0 1 2 10 22 102 203" ]
+check "foreach_dimension () at file scope: x to y to z in 3D, x and y swapped in 2D, as written in 1D; variables, members, parameters" $?
+
+"$cwrap" -dimension=2 -c stencil_dimension_turned_bad.c -o stencil_dimension_turned_bad.o 2> stencil_dimension_turned_bad.log
+[ $? -ne 0 ] &&
+  grep -q "^stencil_dimension_turned_bad.c:5: warning: 'h_y', turned from 'h_x' by foreach_dimension (), is not declared" stencil_dimension_turned_bad.log
+check "foreach_dimension (): a name turned into one not declared, said before gcc" $?
 
 "$cwrap" -dimension=2 -c located_free.c -o located_free.o 2> located_free.log
 [ $? -ne 0 ] && [ ! -e located_free.o ] &&

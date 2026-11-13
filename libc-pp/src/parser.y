@@ -57,6 +57,9 @@ struct parse_status {
   struct stencil_def *stencils;  /* @foreach definitions, newest first */
   const char *function;   /* the function whose body is parsed, for the
                            * names of its scalars */
+  int dimension_depth;    /* foreach_dimension () statements open outside
+                           * any stencil loop */
+  const struct token *dimension_at;  /* the outermost of them */
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -274,6 +277,26 @@ static const struct stencil_def *find_stencil (const struct parse_status *status
   return NULL;
 }
 
+/* The start of a stencil loop. One inside a foreach_dimension () statement
+ * that is outside any stencil loop is an error: the loop is expanded before
+ * the statement is copied, so the copies would turn its scalars' names but
+ * not its offsets or the loop itself. */
+static struct stencil_loop *stencil_begin (struct parse_status *status,
+                                           struct ast *kw)
+{
+  if (status->dimension_depth && !status->stencil) {
+    const struct token *t = ast_token (kw), *at = status->dimension_at;
+
+    diag (t->file, t->line, DIAG_ERROR, "%s () inside foreach_dimension (): "
+          "a stencil loop is not turned there; put foreach_dimension () inside "
+          "the loop, or before a function: foreach_dimension () static void "
+          "f_x (...) { ... }", t->text);
+    diag (at->file, at->line, DIAG_NOTE, "the foreach_dimension () is here");
+    status->rejected++;
+  }
+  return stencil_loop_begin (status->stencil, kw, &status->rejected);
+}
+
 /* The end of a stencil loop's body: the loop, expanded. */
 static struct ast *stencil_use (struct scope_table *scopes,
                                 struct parse_status *status, struct ast *name,
@@ -463,6 +486,14 @@ operator_definition:
                                     (void) $4; (void) $9; }
   | AT_OPERATOR any_identifier ';'
                                   { $$ = operator_declare ($1, $2, $3); }
+  /* declared with what it depends on, for ghost_ops () to check:
+   * @prolongation f (const Prolongation * pr) (vector n, scalar alpha); */
+  | AT_OPERATOR any_identifier '(' open_scope loop_params ')' operator_deps ';'
+    close_scope
+                                  { $$ = operator_declare_typed ($1, $2, $7, $8,
+                                                                 &status->rejected);
+                                    (void) $3; (void) $4; (void) $5; (void) $6;
+                                    (void) $9; }
   ;
 
 /* (scalar zb, ...): the scalars a coupled operator depends on */
@@ -1087,8 +1118,7 @@ iteration_statement:
                                   { $$ = N (FOR_EACH_STATEMENT, $10, $7, $11); }
   /* foreach (), the stencil loop: see translate.h. The body's s[...] are
    * gathered as they reduce, then the loop is expanded with them. */
-  | FOREACH_CELLS '(' ')'         { status->stencil = stencil_loop_begin (status->stencil, $1,
-                                                                        &status->rejected);
+  | FOREACH_CELLS '(' ')'         { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
     statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
@@ -1104,22 +1134,25 @@ iteration_statement:
     statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, $3, $4, $6);
                                     (void) $5; }
   /* foreach_dimension (): the statement once per axis, rotated */
-  | FOREACH_DIMENSION '(' ')' statement
-                                  { $$ = foreach_dimension (status->stencil, $1, $2, $3, $4); }
+  | FOREACH_DIMENSION '(' ')'     { if (!status->stencil && !status->dimension_depth++)
+                                      status->dimension_at = ast_token ($1);
+                                    $$ = NULL; }
+    statement                     { if (!status->stencil)
+                                      status->dimension_depth--;
+                                    $$ = foreach_dimension (status->stencil, $1, $2, $3, $5);
+                                    (void) $4; }
   /* foreach_child (): the point moved to each child of its cell */
   | FOREACH_CHILD '(' ')'         { stencil_mover_begin (status->stencil, $1, &status->rejected);
                                     $$ = NULL; }
     statement                     { $$ = stencil_mover_end (status->stencil, $1, $2, NULL, $3, $5);
                                     (void) $4; }
   /* a loop declared with @foreach, with arguments or not */
-  | STENCIL_NAME '(' ')'          { status->stencil = stencil_loop_begin (status->stencil, $1,
-                                                                        &status->rejected);
+  | STENCIL_NAME '(' ')'          { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
     statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
   | STENCIL_NAME '(' argument_list ')'
-                                  { status->stencil = stencil_loop_begin (status->stencil, $1,
-                                                                        &status->rejected);
+                                  { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
     statement                     { $$ = stencil_use (scopes, status, $1, $3, $6);
                                     (void) $2; (void) $4; (void) $5; }
@@ -1303,7 +1336,8 @@ postfix_expression:
                                   { check_cache_arguments (scopes, $3);
                                     status->rejected += check_global_free ($1, $3);
                                     /* ghost_ops (s, prolongation (op, zb), ...) */
-                                    if (!($$ = ghost_ops_call ($1, $3, &status->rejected)))
+                                    if (!($$ = ghost_ops_call ($1, $3, scope_find (scopes, "ghost_ops_bind") != NULL,
+                                                            &status->rejected)))
                                     /* coarse (s, i, j): a cell one level up */
                                       $$ = stencil_coarse (status->stencil, $1, $2, $3, $4,
                                                            &status->rejected);
@@ -1505,7 +1539,7 @@ struct ast *parse_file (FILE *in, int *rejected)
   struct scope_table *scopes = scope_table_new ();
   yyscan_t scanner = lex_open (in, scopes);
   struct ast *root = NULL;
-  struct parse_status status = { 0, 0, NULL, NULL, 0, NULL, NULL, NULL };
+  struct parse_status status = { 0 };
   int lineno = 1;
   int failed = yyparse (&lineno, scanner, &root, scopes, &status);
 

@@ -21,6 +21,7 @@ struct scope_table {
   int param_depth;
   int typedef_seen;
   enum scope_kind declaring;
+  unsigned serial;              /* the last declaration's */
   /* Tables no scope uses, by size: free_tables[i] has MIN_BUCKETS << i buckets.
    * The arena cannot take them back, so they wait here to be used again. The
    * first slot of a free table links to the next one. */
@@ -155,7 +156,18 @@ struct var *scope_add (struct scope_table *st, const char *name,
   }
   v->kind = kind;
   v->decl = decl;
+  v->serial = ++st->serial;
   return v;
+}
+
+int scope_at_file (const struct scope_table *st)
+{
+  return !st->top->up;
+}
+
+unsigned scope_next_serial (const struct scope_table *st)
+{
+  return st->serial + 1;
 }
 
 const struct var *scope_find (const struct scope_table *st, const char *name)

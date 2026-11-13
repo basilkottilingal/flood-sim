@@ -60,12 +60,34 @@ does.
 **Coupled operators**, which read other scalars, as the water depth `h`
 prolonged from the surface `h + zb`: the operator names them in a second
 parameter list, `@prolongation prolong_lake (const Prolongation * pr) (scalar
-zb)`, and `ghost_ops (h, prolongation (prolong_lake, zb))` binds them, global
-scalars only (never freed). `ghost_ops_set ()` refuses a wrong count or a
-cycle. Wherever several scalars' ghosts are made, `ghosts_update ()`, a
-refinement or a coarsening (`foreach_scalar_ordered`), a scalar comes after
-those it depends on, a stale one of those updated with it; and marking one
-stale marks those that depend on it.
+zb)`, and `ghost_ops (h, prolongation (prolong_lake, zb))` binds them.
+`ghost_ops_set ()` refuses a wrong count or a cycle. Wherever several
+scalars' ghosts are made, `ghosts_update ()`, a refinement or a coarsening
+(`foreach_scalar_ordered`), a scalar comes after those it depends on, a stale
+one of those updated with it; and marking one stale marks those that depend
+on it. What is depended on may be scalars, vertex scalars, vectors, face
+vectors or tensors, `(vector n, scalar alpha)`, flattened to their scalars
+by the binding, and of the types the operator declares: cwrap checks where
+it sees the declaration, `ghost_ops_bind ()` as the binding runs. The scalars
+depended on may be local: freeing one while a scalar in
+use depends on it stops the run (`ghost_ops_freeing ()`). To bind a coupled
+operator for a while, keep `scalar_get_ops (s)` and give it back with
+`scalar_restore_ops ()`.
+
+**Operators that fill several scalars.** A coupled operator may also write
+the scalars it depends on, at the same cells: libvof's volume fraction `c`
+fills its interface's normal `n` and position `alpha` with it, at level jumps
+(`prolong_plane`) and on parents (`restriction_plane`). Theirs then do
+nothing: `prolong_none` and `restriction_none` (given). In one ghost update
+every restriction runs first, finest level first, then the ghosts level by
+level, each scalar after those it depends on, so `n`'s parents and jump
+ghosts are `c`'s; the walls of a scalar whose prolongation is `prolong_none`
+are made again after the prolongations that depend on it, which may have
+written what they mirror. Their ghosts at level jumps are made only with
+`c`'s: update `c` with them (`tests/test_ghosts.c`, 11). The null operators
+are never called: no parent is visited for a `restriction_none` scalar, and
+no family or level-jump region for a `prolong_none` one; `adapt_wavelet ()`
+refuses a `prolong_none` scalar, which has no wavelet of its own.
 
 **Derived scalars** are not prolonged. Fill the ghosts of the scalars they
 come from, then compute them on the halo, `block_cells (shape, GHOSTS)`, as
@@ -268,7 +290,13 @@ hashes every cell of every block; `TIMING=1` also times
 - `test_ghosts.c` also: a coupled prolongation (lake at rest, `h + zb` the
   surface at level jumps, walls and refined leaves, the bed made first
   against the order of ids), a stale bed making the depth stale, and a
-  cycle, a wrong count, and `scalar_set_ops ()` of it refused.
+  cycle, a wrong count, and `scalar_set_ops ()` of it refused; coupled
+  operators that write what they depend on, local scalars with
+  `prolong_none` and `restriction_none` (every ghost of the written one
+  made, its children too), a binding given back by `scalar_restore_ops ()`,
+  adapting on a `prolong_none` scalar and freeing a scalar depended on,
+  refused; a vector dependency bound whole, each of its components depended
+  on, and a binding of other types refused as it runs.
 
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash
@@ -640,7 +668,9 @@ Deferred; none started.
    but only while a tree exists. A scalar freed without one keeps its
    bindings, and the next scalar given its id inherits them. The
    dependencies are rebuilt over the scalars in use only, so a free id's
-   bindings count for nothing meanwhile. The fix: reset them in the free
+   bindings count for nothing meanwhile. The check that no scalar depends
+   on one being freed (`ghost_ops_freeing ()`) is in the same hook, so it
+   too runs only while a tree exists. The fix: reset and check in the free
    path whether or not a tree exists.
 4. **Prolongation's bookkeeping per cell.** `prolong_points` computes the
    coarse cell, its half and two `block_at ()` for each fine cell. Its

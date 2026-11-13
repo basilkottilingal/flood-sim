@@ -142,8 +142,16 @@
   ..   @prolongation prolong_lake (const Prolongation * pr) (scalar zb) { ... }
   ..   ghost_ops (h, prolongation (prolong_lake, zb));
   ..
+  .. What an operator depends on may be scalars, vertex scalars, vectors,
+  .. face vectors or tensors, declared so: (vector n, scalar alpha). It gets
+  .. them as declared; the binding flattens them to their scalars, n.x, n.y,
+  .. alpha (GHOST_USES_MAX at most), with their types (the signature), and
+  .. a binding of other types is refused: by cwrap, if the operator is
+  .. declared so in the file, @prolongation f (const Prolongation * pr)
+  .. (vector n, scalar alpha); and by ghost_ops_bind () as it runs.
+  ..
   .. ghost_ops () (cwrap) binds an operator and the scalars it depends on,
-  .. which must be global: never freed. It checks, as it runs, that the
+  .. which must be in use. It checks, as it runs, that the
   .. operator takes that many, and that no scalar's operators depend on it
   .. itself, through others: either stops the run with a message (unless
   .. ghost_ops_abort is 0: then ghost_ops_set () returns 1 and binds
@@ -152,10 +160,15 @@
   ..     on, wherever several are made (ghosts_update (), refining,
   ..     coarsening), and a stale one it depends on is updated with it;
   ..   - ghosts_mark_dirty (zb) marks those that depend on zb too.
+  .. The scalars depended on may be local: freeing one that a scalar in use
+  .. depends on stops the run (ghost_ops_freeing (), from the free hook of
+  .. grid-scalar.c). Bind the dependent's operators again first: to bind a
+  .. coupled operator for a while, keep scalar_get_ops (s) before, and give
+  .. it back with scalar_restore_ops () after.
   .. scalar_set_ops () binds a prolongation and a restriction that depend
   .. on nothing.
   */
-  #define GHOST_USES_MAX 4
+  #define GHOST_USES_MAX 16
   enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
 
   /* the faces of the domain, those of the dimension only: 2 axis + side,
@@ -184,11 +197,29 @@
   int       scalar_get_boundary (scalar s, int face);  /* the default where
                                                           none is bound */
   void      scalar_ops_reset (scalar s);  /* back to the defaults */
+  int       scalar_restore_ops (scalar s, ScalarOps ops);
+                                        /* a prolongation and a restriction
+                                           as scalar_get_ops () gave them,
+                                           what they depend on with them:
+                                           to bind them again, after a
+                                           ghost_ops () for a while */
+  void      ghost_ops_freeing (scalar s);  /* s is being freed: none may
+                                              depend on it */
   int       ghost_ops_set (scalar s, int kind, int face, int op,
                            const scalar * uses, int n);
-                                        /* what ghost_ops () calls; face
-                                           only for GHOST_BOUNDARY, else
-                                           GHOST_ALL_FACES */
+                                        /* face only for GHOST_BOUNDARY,
+                                           else GHOST_ALL_FACES; the types
+                                           of uses not checked */
+  int       ghost_ops_bind (scalar s, int kind, int face, int op,
+                            const scalar * uses, int n, const char * sig);
+                                        /* what ghost_ops () calls: as
+                                           ghost_ops_set (), uses the
+                                           scalars of the dependencies
+                                           flattened, sig their types (s
+                                           scalar, x vertex_scalar, v
+                                           vector, f face_vector, t tensor),
+                                           checked against the operator's
+                                           (NULL: not checked) */
   extern int ghost_ops_abort;           /* 1, the default: stop on errors */
 
   /*
@@ -221,6 +252,23 @@
   ..   bc_neumann         the cell mirrored inside: zero gradient. The default.
   ..   bc_odd             minus that: zero at the wall, for the normal
   ..                      velocity at a solid wall.
+  .. And two that do nothing:
+  ..   prolong_none       the fine cells left as they are: for a scalar that
+  ..                      another's prolongation fills, a coupled one that
+  ..                      writes the scalars it depends on, at the same fine
+  ..                      cells (a volume fraction's, filling its normal and
+  ..                      plane with it). Its own ghosts at level jumps, and
+  ..                      its children, are then made only with that scalar's:
+  ..                      update that one to have them. It is never called:
+  ..                      refinement, a ghost update at level jumps and
+  ..                      block_prolong () skip it; adapt_wavelet () and
+  ..                      block_prolong_into () refuse such a scalar, which
+  ..                      has no wavelet of its own.
+  ..   restriction_none   the parents left as they are, for a scalar whose
+  ..                      parents nothing reads, or another's restriction
+  ..                      fills. Never called either: no parent is visited
+  ..                      for it (ghost updates, tree_restrict (),
+  ..                      coarsening, block_restrict ()).
   */
   @prolongation prolong_linear;
   @prolongation prolong_minmod;
@@ -228,6 +276,8 @@
   @restriction  restriction_mean;
   @boundary     bc_neumann;
   @boundary     bc_odd;
+  @prolongation prolong_none;
+  @restriction  restriction_none;
 
   /*
   .. prolong_cells (pr) { ... }: every fine cell pr asks for, with f its

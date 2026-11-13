@@ -178,9 +178,9 @@ With `-dimension=N`, cwrap force-includes `src/scalar.h` into every file, with
 
 | `-dimension=` | Types |
 |---|---|
-| 1 | `typedef int scalar;` |
-| 2 | that, and `typedef struct { scalar x, y; } vector;` and `typedef struct { vector x, y; } tensor;` |
-| 3 | that, and `typedef struct { scalar x, y, z; } vector;` and `typedef struct { vector x, y, z; } tensor;` |
+| 1 | `typedef int scalar;`, `typedef struct { scalar x; } vector;` and `typedef struct { vector x; } tensor;` |
+| 2 | `typedef int scalar;`, `typedef struct { scalar x, y; } vector;` and `typedef struct { vector x, y; } tensor;` |
+| 3 | `typedef int scalar;`, `typedef struct { scalar x, y, z; } vector;` and `typedef struct { vector x, y, z; } tensor;` |
 
 A scalar is an id, from 0 to `NSCALAR_MAX - 1` (64), taken from one pool
 shared by the whole program. A vector or tensor is a set of scalars, and
@@ -195,6 +195,11 @@ where a scalar's values sit in a cell:
   cell's lower face along its axis (at i - 1/2 for `F.x`): fluxes, face
   velocities;
 - `vertex_scalar v;`: a scalar at the cell's lower corner.
+
+**`coord`**, in every dimension: `typedef struct { double x, y, z; } coord;`,
+a point or a direction, three members whatever the dimension, so that code
+may name `.z` where only 3D reads it. It holds no scalar: cwrap numbers
+nothing in it. `foreach_dimension ()` turns its members as any member's.
 
 They are numbered, named and freed like the others (`face_vector_free ()`;
 a global one never). `scalar_location (s)` gives where a scalar is:
@@ -344,7 +349,7 @@ A local scalar, and one from `scalar_new ()`, is freed as before.
 | `int scalar_in_use (scalar)` | whether an id is taken |
 | `int scalar_count (void)` | the number of ids in use |
 | `int n_global_scalars` | the number of file-scope and static scalars |
-| `vector vector_new (void)` | in 2 and 3 dimensions: a vector with a new id for each scalar, `x` first |
+| `vector vector_new (void)` | a vector with a new id for each scalar, `x` first |
 | `void vector_free (vector)` | frees its scalars, the last first |
 | `tensor tensor_new (void)` | a tensor of new vectors, `x` first |
 | `void tensor_free (tensor)` | frees its vectors, the last first |
@@ -851,6 +856,47 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
   outside stencil loops too (`u_x`, `v.x`), and in 1D it is the statement
   as written. libb-amr's `prolong_linear` and `prolong_minmod` are written
   with it.
+  - **A stencil loop in a `foreach_dimension ()` statement that is outside
+    any loop is an error.** The loop is expanded as it is read, before the
+    statement is copied, so the copies would turn its scalars' names but
+    neither its offsets nor the loop. Put `foreach_dimension ()` inside the
+    loop, or before a function (below).
+- **`foreach_dimension ()` before a function, or a declaration, at file
+  scope, writes it once for every axis,** as Basilisk does:
+
+      foreach_dimension ()
+      static void sweep_x (scalar c, face_vector f)
+      {
+        foreach_face_x ()
+          f.x[] = c[-1];                   /* sweep_y: foreach_face_y (),
+                                              f.y[] = c[0,-1] */
+        foreach ()
+          c[] += f.x[] - f.x[1];
+      }
+      ...
+      foreach_dimension ()
+        sweep_x (c, f);                    /* sweep_y (c, f) after it */
+
+  - **The function's tokens are read once per axis,** the names turned as
+    in a statement (`sweep_x` to `sweep_y`, `foreach_face_x` to
+    `foreach_face_y`, `f.x` to `f.y`, `x` to `y`), and each copy parsed as
+    any function: its stencil loops, scalars and caches are its own, and
+    the offsets of its accesses are turned as they are read. A name is
+    found again in each copy, so a turned one may be a stencil loop.
+  - **A declaration works too:** `foreach_dimension () static void
+    sweep_x (scalar c);` declares `sweep_x`, `sweep_y` (, `sweep_z`); and
+    `foreach_dimension () double h_x;` gives `h_x`, `h_y`. It ends at its
+    `;`, a function at the `}` of its body.
+  - **Each copy keeps the lines of the source:** the copies after the first
+    start with a linemarker back to its first line, so a message, or a
+    debugger, in `sweep_y` points at the line written for `sweep_x`. A
+    message from the body comes once per copy, naming what the copy reads
+    (`s[0,1]`).
+  - **A name turned into one not declared,** where the one written names a
+    declaration from before the copies (`h_x` declared, `h_y` not), is a
+    warning, before gcc's error: `'h_y', turned from 'h_x' by
+    foreach_dimension (), is not declared`.
+  - In 1D the function is as written, once.
 - **Loops by axis:** where `N_x`, `N_y` (, `N_z`) are `@foreach` loops and
   `N` is not, `N () statement` runs `N_x ()` with the statement, then
   `N_y ()` with it rotated as `foreach_dimension ()` rotates, and so on.
@@ -950,7 +996,8 @@ and the same with `@restriction` and `@boundary`.
 ### Coupled operators
 
 An operator that also reads other scalars names them in a second parameter
-list: they are bound per scalar, and passed to it at each call.
+list: scalars, vertex scalars, vectors, face vectors or tensors, each as
+declared, bound with it and passed to it at each call.
 
     @prolongation prolong_lake (const Prolongation * pr) (scalar zb)
     {
@@ -959,32 +1006,54 @@ list: they are bound per scalar, and passed to it at each call.
         s[] = coarse (s) + coarse (zb) - zb[];   /* the surface, less the bed */
     }
 
-    scalar zb, h;                 /* global: see below */
+    scalar zb, h;
     ...
     ghost_ops (h, prolongation (prolong_lake, zb), boundary.all (bc_odd),
                   boundary.left (bc_inflow));
 
-- **`ghost_ops (s, kind (op, scalars...), ...)`** binds operators to `s`,
-  anywhere, at any time, each with the scalars it depends on: kinds
+    /* a vector and a scalar: libvof's plane, n . x <= alpha */
+    @prolongation prolong_plane (const Prolongation * pr) (vector n, scalar alpha)
+    { ... n.x[] = coarse (n.x); ... }
+    ghost_ops (c, prolongation (prolong_plane, n, alpha));
+
+- **`ghost_ops (s, kind (op, dependencies...), ...)`** binds operators to
+  `s`, anywhere, at any time, each with what it depends on: kinds
   `prolongation`, `restriction`, and a boundary condition per face of the
   domain, `boundary.left`, `.right`, `.bottom`, `.top`, `.back`, `.front`,
   or `boundary.all` for every face. It becomes a call of libb-amr's
-  `ghost_ops_set ()` per item, in order, so a face after `boundary.all`
+  `ghost_ops_bind ()` per item, in order, so a face after `boundary.all`
   replaces it there.
 - **A boundary names its face:** a plain `boundary (op)` is an error, as is
   a face the dimension lacks (`.back` in 2D) or no face at all
   (`.middle`); `boundary.all` after a face, in one call, is a warning: it
   binds that face again.
-- **The scalars depended on must be global** (at file scope, `static` or
-  `extern`, or a member of a global vector or tensor), checked by cwrap:
-  a global scalar is never freed (see [Scalars](#a-global-scalar-is-never-freed)),
-  so a binding cannot outlive what it reads. A local one is an error.
+- **What is depended on may be global or local**, and of any of cwrap's
+  types: a name, a member (`u.x` a scalar, `t.y` a vector), an element of
+  an array of them. Each is flattened to its scalars, `n.x, n.y, alpha`, in
+  the order of a vector's or tensor's members (`GHOST_USES_MAX` at most,
+  libb-amr), with the signature of their types: a letter each, `s` scalar,
+  `x` vertex_scalar, `v` vector, `f` face_vector, `t` tensor (`"vs"`). An
+  expression cwrap cannot follow (through a call, say) is an error. libb-amr
+  stops a run that frees a scalar another's operators still depend on, so a
+  binding to a local one is given back before it goes (`scalar_get_ops ()`,
+  then `scalar_restore_ops ()`).
+- **Types are checked twice.** Where the file declares or defines the
+  operator with what it depends on, cwrap checks the binding:
+  `@prolongation prolong_plane (const Prolongation * pr) (vector n, scalar
+  alpha);` declares it so, in a header, and a definition in the same file
+  must agree. `prolongation (prolong_plane, n.x, n.y, alpha)` is then an
+  error: `'prolong_plane' depends on (vector, scalar), given (scalar,
+  scalar, scalar)`. Wherever it is, libb-amr checks again as the binding
+  runs (`ghost_ops_bind ()`), against the operator's own signature.
 - **The dispatch passes them:** `@prolongation (id, uses) (args)` calls one
-  that depends on scalars with `uses [0]`, `uses [1]`, ... after `args`;
-  without `uses`, it is an error if one of its kind depends on any.
-  `@prolongation uses (id)` is how many scalars that operator takes.
+  that depends on anything with `uses [0]`, `uses [1]`, ... after `args`,
+  made again as declared: a vector `(vector) { uses [0], uses [1] }`, a
+  tensor its vectors; without `uses`, it is an error if one of its kind
+  depends on any. In expressions: `@prolongation uses (id)` is how many
+  scalars that operator takes, flattened; `@prolongation signature (id)` its
+  signature, a string (`"vs"`); `@prolongation name (id)` its name.
 - **What libb-amr then checks, as `ghost_ops ()` runs:** that the operator
-  takes that many scalars, that they are global, and that no scalar's
+  depends on those types, that they are in use, and that no scalar's
   operators would depend on it itself through others. Either stops the run
   with a message, binding nothing. `scalar_set_ops ()` refuses an operator
   that depends on scalars.

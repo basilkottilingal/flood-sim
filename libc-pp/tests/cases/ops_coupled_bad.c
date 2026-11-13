@@ -7,10 +7,11 @@ scalar zb;
 void f (const Pr * pr, int id, scalar local)
 {
   @prolongation (id) (pr);
-  ghost_ops (zb, prolongation (needs, local));
+  ghost_ops (zb, prolongation (needs, 3));
   ghost_ops (zb, smoothing (needs));
   ghost_ops (zb, boundary (b_one));
   ghost_ops (zb, boundary.back (b_one));
   ghost_ops (zb, boundary.middle (b_one));
   ghost_ops (zb, boundary.left (b_one), boundary.all (b_one));
+  ghost_ops (zb, prolongation (needs, local));
 }

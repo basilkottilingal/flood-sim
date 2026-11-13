@@ -203,4 +203,19 @@ enum { face_location_x = CWRAP_FACE_X, face_location_y = CWRAP_FACE_Y,
     bc->b [ghost] = - bc->b [inner];
 }
 
+/*
+.. Operators that do nothing, for a scalar whose ghosts at level jumps, and
+.. children, another scalar's operator fills, as a coupled prolongation
+.. may (block-ghosts.h); or whose parents nothing reads.
+*/
+@prolongation prolong_none (const Prolongation * pr)
+{
+  (void) pr;
+}
+
+@restriction restriction_none (Index p, scalar s)
+{
+  (void) p, (void) s;
+}
+
 #endif

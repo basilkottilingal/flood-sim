@@ -131,6 +131,44 @@ static long restricted;
     s[] = coarse (s) + coarse (zb) - zb[];
 }
 
+/* a prolongation that fills a scalar it depends on too, at the same fine
+.. cells: t, whose own prolongation is prolong_none, twice its coarse cell */
+@prolongation prolong_pair (const Prolongation * pr) (scalar t)
+{
+  scalar s = pr->s;
+  foreach_prolongation (pr) {
+    s[] = coarse (s);
+    t[] = 2 * coarse (t);
+  }
+}
+
+/* and its restriction, which fills t's parents with s's: the mean */
+@restriction restriction_pair (Index p, scalar s) (scalar t)
+{
+  foreach_restriction (p) {
+    RealSum sa = 0, st = 0;
+    foreach_child () {
+      sa += s[];
+      st += t[];
+    }
+    s[] = (Real) (sa / TREE_NCHILDREN);
+    t[] = (Real) (st / TREE_NCHILDREN);
+  }
+}
+
+/* a prolongation that depends on a vector: s from the coarse cell, plus
+.. the vector's components there, which are made first */
+@prolongation prolong_vec (const Prolongation * pr) (vector g)
+{
+  scalar s = pr->s;
+  foreach_prolongation (pr) {
+    RealSum v = coarse (s);
+    foreach_dimension ()
+      v += 0 * coarse (g.x);
+    s[] = (Real) v;
+  }
+}
+
 /* the core, dispatching to the operators above and those given */
 #include "block-ghosts-impl.h"
 
@@ -708,6 +746,96 @@ int main (void)
     ghost_ops_abort = 1;
     scalar_set_ops (hl, (ScalarOps) {0});
     CHECK (!((ghost_dependents [zbl][hl / 64] >> (hl % 64)) & 1));
+  }
+
+  /* 11. coupled operators that write what they depend on, local scalars:
+   * t's prolongation and restriction do nothing, a's fill t's parents, its
+   * ghosts at level jumps and its children with a's; every ghost of t then
+   * made; a binding kept and given back; freeing t while a depends on it,
+   * refused */
+  {
+    scalar a, t;
+    ScalarOps kept = scalar_get_ops (a);
+    scalar_set_ops (t, (ScalarOps) { .prolongation = prolong_none,
+                                     .restriction = restriction_none });
+    ghost_ops (a, prolongation (prolong_pair, t),
+               restriction (restriction_pair, t));
+    BlockShape shape = tree_block_shape ();
+    foreach_leaf () {
+      Real * pa = block_data (sblocks, a), * pt = block_data (sblocks, t);
+      block_cells (shape, GHOSTS)
+        pa [c] = 1, pt [c] = -1;
+      block_cells (shape, 0)
+        pt [c] = 1;
+    }
+    ghosts_mark_dirty (t);                /* a too: it depends on t */
+    CHECK (ghosts_is_dirty (a));
+    ghosts_update (a);                    /* t, stale, first; then a, t's jumps */
+    CHECK (!ghosts_is_dirty (a) && !ghosts_is_dirty (t));
+    long twos = 0, others = 0;
+    foreach_leaf () {
+      const Real * pt = block_data (sblocks, t), * pa = block_data (sblocks, a);
+      block_cells (shape, GHOSTS) {
+        twos += pt [c] == 2;
+        others += pt [c] != 1 && pt [c] != 2;
+        others += pa [c] != 1;
+      }
+    }
+    fprintf (stderr, "  (t: %ld ghost cells from a's prolongation)\n", twos);
+    CHECK (twos > 0 && others == 0);
+    double r [3] = { 0.13, 0.71, 0.52 };
+    int before = tree_get_nleaves ();
+    CHECK (tree_refine (leaf_at (r)) > 0 && tree_get_nleaves () > before);
+    long children = 0;
+    foreach_leaf () {
+      const Real * pt = block_data (sblocks, t);
+      block_cells (shape, 0)
+        children += pt [c] == 2;
+    }
+    CHECK (children > 0);                 /* the new leaves: from a's */
+    CHECK (scalar_restore_ops (a, kept) == 0);
+    CHECK (scalar_get_ops (a).prolongation == kept.prolongation);
+    CHECK (scalar_get_ops (a).restriction == kept.restriction);
+    CHECK (!((ghost_dependents [t][a / 64] >> (a % 64)) & 1));
+    /* adapting on t, whose prolongation does nothing: refused */
+    {
+      int before2 = tree_get_nleaves ();
+      double tmax = 1e-30;
+      ghost_ops_abort = 0;
+      fprintf (stderr, "  (one refusal expected:)\n");
+      AdaptStats as = adapt_wavelet (1, (const int []) { t }, &tmax, 0, 5);
+      ghost_ops_abort = 1;
+      CHECK (as.refined == 0 && as.coarsened == 0 && tree_get_nleaves () == before2);
+    }
+    /* bound again, then t freed first: refused, a gets the defaults */
+    ghost_ops (a, prolongation (prolong_pair, t));
+    ghost_ops_abort = 0;
+    fprintf (stderr, "  (one refusal expected:)\n");
+    scalar_free (t);
+    ghost_ops_abort = 1;
+    CHECK (scalar_get_ops (a).prolongation == prolong_linear);
+  }
+
+  /* 12. typed dependencies: a vector, bound whole, flattened to its
+   * components, each depended on; a binding of other types, refused as
+   * it runs */
+  {
+    vector gv;
+    scalar b;
+    ghost_ops (b, prolongation (prolong_vec, gv));
+    int all = 1;
+    foreach_dimension ()
+      all &= (ghost_dependents [gv.x][b / 64] >> (b % 64)) & 1;
+    CHECK (all);
+    CHECK (strcmp (@prolongation signature (prolong_vec), "v") == 0);
+    CHECK (@prolongation uses (prolong_vec) == dimension);
+    ghost_ops_abort = 0;
+    fprintf (stderr, "  (one refusal expected:)\n");
+    scalar one [1] = { gv.x };
+    CHECK (ghost_ops_bind (b, GHOST_PROLONGATION, GHOST_ALL_FACES, prolong_vec,
+                           one, 1, "s") == 1);
+    ghost_ops_abort = 1;
+    scalar_set_ops (b, (ScalarOps) {0});
   }
 
   printf ("  %d leaves, %ld ghost cells at level jumps\n", tree_get_nleaves (), jumps);

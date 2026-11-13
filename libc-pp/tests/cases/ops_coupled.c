@@ -4,13 +4,13 @@ typedef struct { int s; double * out; } Pr;
 enum { GHOST_PROLONGATION, GHOST_RESTRICTION, GHOST_BOUNDARY };
 enum { GHOST_LEFT, GHOST_RIGHT, GHOST_BOTTOM, GHOST_TOP, GHOST_ALL_FACES = -1 };
 
-/* what libb-amr's ghost_ops_set () is given, kept */
+/* what libb-amr's ghost_ops_bind () is given, kept */
 static int last_kind, last_face, last_op, last_n;
 static scalar last_uses [4];
-static int ghost_ops_set (scalar s, int kind, int face, int op,
-                          const scalar * uses, int n)
+static int ghost_ops_bind (scalar s, int kind, int face, int op,
+                           const scalar * uses, int n, const char * sig)
 {
-  (void) s;
+  (void) s, (void) sig;
   last_kind = kind, last_face = face, last_op = op, last_n = n;
   for (int k = 0; k < n; k++)
     last_uses [k] = uses [k];

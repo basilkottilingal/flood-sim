@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <cwrap/cache.h>
 
@@ -54,6 +55,20 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
                           int minlevel, int maxlevel)
 {
   AdaptStats st = { 0, 0 };
+  /* a scalar with prolong_none has no wavelet of its own: another's
+   * operators fill it (block-ghosts.h). Refused: the run stops, or with
+   * ghost_ops_abort 0 nothing is adapted */
+  for (int q = 0; q < n; q++)
+    if (scalar_get_ops (s [q]).prolongation == prolong_none) {
+      fprintf (stderr, "adapt_wavelet: scalar %s (%d): its prolongation is "
+               "prolong_none, so it has no wavelet of its own: adapt on the "
+               "scalar whose operators fill it\n",
+               *scalar_name (s [q]) ? scalar_name (s [q]) : "#unnamed",
+               (int) s [q]);
+      if (ghost_ops_abort)
+        abort ();
+      return st;              /* nothing adapted */
+    }
   if (maxlevel > tree_get_depth_max ())
     maxlevel = tree_get_depth_max ();
   if (minlevel < 0)

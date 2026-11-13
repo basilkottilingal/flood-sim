@@ -33,6 +33,8 @@ struct var {
   int scalar_depth;       /* a scalar's name: 0 its own, 1 qualified by its
                            * function (f.h), n > 1 also numbered (f.h.n) */
   struct var *chain;      /* next in the hash bucket */
+  unsigned serial;        /* the order of declarations: 1, 2, ... (a
+                           * redeclaration takes a new one) */
 };
 
 struct scope_table *scope_table_new (void);
@@ -46,6 +48,11 @@ struct var *scope_add (struct scope_table *st, const char *name,
 /* The declaration of name visible now, innermost scope first, or NULL. */
 const struct var *scope_find (const struct scope_table *st, const char *name);
 int scope_is_type (const struct scope_table *st, const char *name);
+
+/* Is the file scope the current one? And the serial the next declaration
+ * will take. */
+int scope_at_file (const struct scope_table *st);
+unsigned scope_next_serial (const struct scope_table *st);
 
 /* Block and for-statement scopes. Popping the file scope does nothing. */
 void scope_push (struct scope_table *st);
