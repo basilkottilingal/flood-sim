@@ -130,10 +130,15 @@ kept at level jumps.
 
 ## Build and tests
 
-    make DIMENSION=2          # liblinear-algebra.a
+    make                      # liblinear-algebra.a, 2D, as libb-amr's
     sh tests/run.sh           # 1-3D, double and float, sanitizers
 
-The smoothers' benchmark, by hand (any DIMENSION):
+The Makefile is the others' (`../lib.mk`, `DEPS := b-amr utils`): it
+builds with the `cwrap` on the PATH, which must know `face_vector` and
+`foreach_face ()` (libc-pp of 2026-11-12 or later); `make
+CC=../libc-pp/build/cwrap` builds with this tree's own.
+
+The smoothers' benchmark, by hand (any dimension):
 
     ../libc-pp/build/cwrap -dimension=2 -D_GNU_SOURCE -std=gnu11 -O2 -I. -I.. \
       -I../libb-amr tests/bench_smoothers.c multigrid.c ../libb-amr/tree.c \
