@@ -112,6 +112,10 @@
     int level_first [BAMR_MAX_DEPTH + 2];
     const TreeItem * leaves_by_level;  /* the same, leaves only        */
     int leaf_first [BAMR_MAX_DEPTH + 2];
+    const TreeItem * parents_by_level; /* the same, the nodes with
+                                      children only (tree_has_children):
+                                      what a restriction visits        */
+    int parent_first [BAMR_MAX_DEPTH + 2];
     int depth;                     /* the deepest level with a node    */
   } TreeCaches;
 

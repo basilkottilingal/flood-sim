@@ -919,10 +919,12 @@ void tree_restrict (int s)
   ScalarOps o = scalar_get_ops (s);
   if (o.restriction == restriction_none)
     return;                   /* no parent visited */
+  /* the parents, finest level first: each after its children */
   const TreeCaches * tc = tree_caches ();
-  for (int q = 0; q < tc->nall; q++)
-    if (tree_has_children (tc->all [q].node))
-      @restriction (o.restriction, o.restriction_uses) (tc->all [q].p, s);
+  for (int l = tc->depth - 1; l >= 0; l--)
+    for (int q = tc->parent_first [l]; q < tc->parent_first [l + 1]; q++)
+      @restriction (o.restriction, o.restriction_uses)
+        (tc->parents_by_level [q].p, s);
 }
 
 /*
@@ -949,9 +951,8 @@ void ghosts_update_level (int s, int l)
     return;
   if (scalar_get_ops (s).restriction != restriction_none)
     for (int k = L - 1; k >= tree_get_depth_min (); k--)
-      for (int q = tc->level_first [k]; q < tc->level_first [k + 1]; q++)
-        if (tree_has_children (tc->by_level [q].node))
-          block_restrict (tc->by_level [q].p, s);
+      for (int q = tc->parent_first [k]; q < tc->parent_first [k + 1]; q++)
+        block_restrict (tc->parents_by_level [q].p, s);
   for (int q = tc->leaf_first [0]; q < tc->leaf_first [L]; q++)
     block_ghosts (tc->leaves_by_level [q].p, s);
   for (int q = tc->level_first [L]; q < tc->level_first [L + 1]; q++)
@@ -977,19 +978,25 @@ void ghosts_update_list (int n, const int * given, int parents)
     o [q] = scalar_get_ops (s [q]);
 
   /* 1. restriction, finest first; within a level, at once: the scalars
-   * whose restriction does something (restriction_none: no parent visited) */
+   * whose restriction does something (restriction_none: no parent visited),
+   * over the parents only (the tree's list of them). Without the parents'
+   * own ghosts, down to the coarsest leaf's level only: a parent is read
+   * by a leaf of its level beside it, and below that level there is none
+   * (on a uniform tree, no level at all) */
   int r [NSCALAR_MAX], nr = 0;
   for (int q = 0; q < n; q++)
     if (o [q].restriction != restriction_none)
       r [nr++] = q;
-  for (int l = tc->depth - 1; l >= 0 && nr; l--)
+  const TreeItem * par = tc->parents_by_level;
+  const int * pfirst = tc->parent_first;
+  int lowest = parents ? 0 : tree_get_depth_min ();
+  for (int l = tc->depth - 1; l >= lowest && nr; l--)
   {
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
-    for (int b = first [l]; b < first [l + 1]; b++)
-      if (tree_has_children (at [b].node))
-        for (int k = 0; k < nr; k++)
-          @restriction (o [r [k]].restriction, o [r [k]].restriction_uses)
-            (at [b].p, s [r [k]]);
+    for (int b = pfirst [l]; b < pfirst [l + 1]; b++)
+      for (int k = 0; k < nr; k++)
+        @restriction (o [r [k]].restriction, o [r [k]].restriction_uses)
+          (par [b].p, s [r [k]]);
   }
 
   /* 2. the ghosts, coarsest first; within a level, at once */

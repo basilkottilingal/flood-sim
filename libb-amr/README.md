@@ -19,7 +19,12 @@ foreach_leaf_parallel () {
 ```
 
 `ghosts_update (s, ...)`:
-1. **restricts**, finest level first, every parent from its children;
+1. **restricts**, finest level first, every parent from its children
+   that a leaf may read: those of the coarsest leaf's level and finer, as
+   a parent is read only by a leaf of its own level beside it (a uniform
+   tree: none). `ghosts_update_levels ()` and `tree_restrict ()` restrict
+   every parent. The loops run over the tree's list of parents
+   (`tree_caches ()->parents_by_level`), not every node;
 2. **fills the ghosts**, coarsest level first, each block's from
    - the node of its own level beside it (a leaf, or a restricted parent):
      rows copied;

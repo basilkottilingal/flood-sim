@@ -432,10 +432,24 @@ int main (void)
     CHECK (lo >= 0);
   }
 
-  /* 5. a restriction of one's own: once per parent, by ghosts_update */
+  /* 5. a restriction of one's own: once per parent that a leaf may read,
+   * by ghosts_update (those of the coarsest leaf's level and finer), once
+   * per parent by ghosts_update_levels () and tree_restrict () */
   scalar_set_ops (v, (ScalarOps) { .restriction = restriction_counted });
+  {
+    const TreeCaches * tc = tree_caches ();
+    long readable = tc->parent_first [tc->depth + 1]
+                    - tc->parent_first [tree_get_depth_min ()];
+    CHECK (tc->parent_first [tc->depth + 1]
+           == tree_get_nblocks () - tree_get_nleaves ());
+    CHECK (tree_get_depth_min () > 0 && readable < tree_get_nblocks ()
+                                                 - tree_get_nleaves ());
+    restricted = 0;
+    ghosts_update (v);
+    CHECK (restricted == readable);
+  }
   restricted = 0;
-  ghosts_update (v);
+  ghosts_update_levels (v);
   CHECK (restricted == tree_get_nblocks () - tree_get_nleaves ());
   restricted = 0;
   tree_restrict (v);

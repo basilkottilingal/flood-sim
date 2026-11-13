@@ -214,6 +214,8 @@ core, gcc -O3, a loaded laptop, so rough):
 | before (branching geometry, one reconstruction loop) | 72 | 223-227 |
 | now | 62 | 203-226 |
 | now, `-fopenmp-simd -DBLOCK_OPENMP_SIMD -march=native` | 43 | 190 |
+| with libb-amr restricting down to the coarsest leaf's level only | 32 | 144 |
+| the same, `-fopenmp-simd -DBLOCK_OPENMP_SIMD -march=native` | 30 | 139 |
 
 Per call, as scalar code, the geometry without branches is about 10% slower
 than with them (alpha 194 ns against 174, a slab's volume 56 against 50):
@@ -227,9 +229,11 @@ ghost updates 32% (`restriction_face` for the fluxes and `uf`,
 parent; the ghost copies and walls 11%; the geometry 1%.
 
 What is left, outside libvof:
-- **Restrict only the parents that are read** (libb-amr): those a leaf of
-  their level is beside, and the parents below them. A uniform tree reads
-  none; near level jumps a few. A third of the time here.
+- **Restrict only the parents that are read** (libb-amr): done in part, the
+  restriction of a ghost update stops at the coarsest leaf's level (a
+  uniform tree: none), which took the third of the time above. Left: only
+  the parents a leaf of their level is beside, and those below them, for
+  trees whose coarsest leaves are coarse.
 - **Face loops by rows** (libb-amr's `foreach_face_cells`): each face's
   cell is found by `block_at ()` from an index array, which gcc does not
   vectorise ("complicated access pattern"); rows as `block_cells_simd` has

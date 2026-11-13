@@ -15,7 +15,10 @@
   .. Parthenon), in this order:
   ..
   ..   1. restriction, finest level first: each parent gets its scalar's
-  ..      restriction of its children (the mean by default);
+  ..      restriction of its children (the mean by default); the parents
+  ..      of the coarsest leaf's level and finer only, as a parent is read
+  ..      by a leaf of its level beside it (every parent for
+  ..      ghosts_update_levels (), which makes their ghosts too);
   ..   2. the ghosts, coarsest level first, each block's from
   ..        - the node of its own level beside it, leaf or parent: a copy;
   ..        - else the leaf one level coarser that covers it (2:1 balance:

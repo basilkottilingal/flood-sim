@@ -147,9 +147,8 @@ static void cycle (scalar a, scalar res, scalar da, scalar dn,
     else {
       /* level l from level l - 1, by da's prolongation */
       const TreeCaches * tc = tree_caches ();
-      for (int q = tc->level_first [l - 1]; q < tc->level_first [l]; q++)
-        if (tree_has_children (tc->by_level [q].node))
-          block_prolong (tc->by_level [q].p, da);
+      for (int q = tc->parent_first [l - 1]; q < tc->parent_first [l]; q++)
+        block_prolong (tc->parents_by_level [q].p, da);
     }
     ghosts_update_level (da, l);
     int n = l == p.minlevel ? p.nrelax_coarse : p.nrelax;

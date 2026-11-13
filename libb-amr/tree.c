@@ -40,7 +40,8 @@ static Pool * pool_node = NULL;       /* the root, which has no siblings */
 */
 static int caches_are_dirty = 1;
 unsigned tree_generation = 0;
-static TreeItem * c_all, * c_leaves, * c_by_level, * c_leaves_by_level;
+static TreeItem * c_all, * c_leaves, * c_by_level, * c_leaves_by_level,
+  * c_parents_by_level;
 static int c_cap = 0;
 static TreeCaches caches;
 
@@ -82,7 +83,8 @@ void tree_destroy (void)
 {
   caches_changed ();
   free (c_all), free (c_leaves), free (c_by_level), free (c_leaves_by_level);
-  c_all = c_leaves = c_by_level = c_leaves_by_level = NULL;
+  free (c_parents_by_level);
+  c_all = c_leaves = c_by_level = c_leaves_by_level = c_parents_by_level = NULL;
   c_cap = 0;
   for (int l = 0; l <= BAMR_MAX_DEPTH; ++l)
   {
@@ -374,11 +376,13 @@ static void caches_update (void)
     c_leaves = realloc (c_leaves, (size_t) n * sizeof (TreeItem));
     c_by_level = realloc (c_by_level, (size_t) n * sizeof (TreeItem));
     c_leaves_by_level = realloc (c_leaves_by_level, (size_t) n * sizeof (TreeItem));
-    if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level)
+    c_parents_by_level = realloc (c_parents_by_level, (size_t) n * sizeof (TreeItem));
+    if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level || !c_parents_by_level)
       abort ();
     c_cap = n;
   }
   int count [BAMR_MAX_DEPTH + 1] = {0}, lcount [BAMR_MAX_DEPTH + 1] = {0};
+  int pcount [BAMR_MAX_DEPTH + 1] = {0};
   morton (TREE_ROOT_INDEX) {
     TreeItem it = { (Index) {IJKL}, node };
     assert (na < n);
@@ -388,27 +392,34 @@ static void caches_update (void)
       c_leaves [nl++] = it;
       lcount [level]++;
     }
+    else if (tree_has_children (node))
+      pcount [level]++;
     if (level > depth)
       depth = level;
   }
-  caches.level_first [0] = caches.leaf_first [0] = 0;
+  caches.level_first [0] = caches.leaf_first [0] = caches.parent_first [0] = 0;
   for (int l = 0; l <= BAMR_MAX_DEPTH; l++) {
     caches.level_first [l + 1] = caches.level_first [l] + count [l];
     caches.leaf_first [l + 1] = caches.leaf_first [l] + lcount [l];
+    caches.parent_first [l + 1] = caches.parent_first [l] + pcount [l];
   }
-  int next [BAMR_MAX_DEPTH + 1], lnext [BAMR_MAX_DEPTH + 1];
+  int next [BAMR_MAX_DEPTH + 1], lnext [BAMR_MAX_DEPTH + 1], pnext [BAMR_MAX_DEPTH + 1];
   for (int l = 0; l <= BAMR_MAX_DEPTH; l++)
-    next [l] = caches.level_first [l], lnext [l] = caches.leaf_first [l];
+    next [l] = caches.level_first [l], lnext [l] = caches.leaf_first [l],
+    pnext [l] = caches.parent_first [l];
   for (int q = 0; q < na; q++) {
     int l = c_all [q].p.level;
     c_by_level [next [l]++] = c_all [q];
     if (c_all [q].node->flags & BAMR_NODE_LEAF)
       c_leaves_by_level [lnext [l]++] = c_all [q];
+    else if (tree_has_children (c_all [q].node))
+      c_parents_by_level [pnext [l]++] = c_all [q];
   }
   caches.all = c_all, caches.nall = na;
   caches.leaves = c_leaves, caches.nleaves = nl;
   caches.by_level = c_by_level;
   caches.leaves_by_level = c_leaves_by_level;
+  caches.parents_by_level = c_parents_by_level;
   caches.depth = depth;
   caches_are_dirty = 0;
 }
