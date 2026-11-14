@@ -6,6 +6,7 @@
 #   test_hmesh.c   the mesh alone
 #   test_tree.c    the mesh in libb-amr's tree (hmesh-tree.h)
 #   test_clip.c    the mesh cut to a box (hm_clip ())
+#   test_vof.c     volume fractions from the manifold (hm_vof ()), 2D, 3D
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
 # on the PATH).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -16,7 +17,7 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 src="$lib/hmesh.c $lib/../libutils/bits.c"
 csrc="$src $lib/hmesh-clip.c"
-tsrc="$csrc $lib/hmesh-morton.c $lib/hmesh-tree.c $amr/tree.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
+tsrc="$csrc $lib/hmesh-morton.c $lib/hmesh-tree.c $lib/hmesh-vof.c $amr/tree.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
 warn="-Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Wno-float-conversion"
 flags="-D_GNU_SOURCE -std=gnu11 -I$lib -I$lib/.."
 san="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
@@ -48,6 +49,11 @@ for d in ${DIMS:-1 2 3}; do
   run "tree, double, sanitizers" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
   run "tree, float, sanitizers" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
   [ -n "$QUICK" ] || run "tree, double, -O2" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr -O2
+  # volume fractions: a curve in 2D, a surface in 3D (m = D - 1)
+  if [ "$d" != 1 ]; then
+    run "vof, double, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
+    run "vof, float, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
+  fi
 done
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

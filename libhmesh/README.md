@@ -118,6 +118,8 @@ top simplices alone.
 | `hm_compact_order (M, order, remap)` | the compaction, each level in a given order |
 | `hm_clip (M, origin, size)`, `hm_tree_clip (M)` | the mesh cut to the box, which then holds |
 | `hm_domain_faces (M, k, s)`, `hm_half_on_domain (M, k, h)` | the faces of the box a simplex, or a boundary half's facet, lies on |
+| `hm_vof (M, c)` | the volume fraction of every leaf cell in the scalar `c` (`m = D - 1`) |
+| `hm_vof_box`, `hm_vof_face`, `hm_vof_inside` | one cell's fraction, one face's, and the side of the closest element |
 
 The library and the program must agree on `D`: a program built with
 another dimension does not link (`hmesh_dimension_is_D`).
@@ -176,6 +178,78 @@ Every case also checks the invariants, orientations, Euler characteristic,
 isolated points and a dangling edge, and clipping twice. Two bugs made on
 purpose are caught: fans not from the lowest point (the cube's cut faces
 stop matching) and no orientation fix.
+
+## Volume fractions (hmesh-vof.h)
+
+`hm_vof (M, c)` fills a libb-amr scalar with the fraction of each leaf cell
+inside the region the manifold bounds. This is Front2VOF (J. Pan et al.,
+Exact computation of the color function for triangular element
+interfaces, Int. J. Numer. Meth. Fluids 98, 1181-1194, 2026), written once
+for a curve in 2D and a surface in 3D. It means something only for
+`m = D - 1`, so it returns -1 otherwise.
+
+**Conventions.** The normals point out of the phase:
+- 2D: an edge `(v0, v1)` has the normal `(t_y, -t_x)`, so the curve runs
+  counterclockwise about the phase;
+- 3D: a triangle has the normal `(v1 - v0) x (v2 - v0)`, so its points run
+  counterclockwise seen from outside.
+
+For the other phase, take `1 - c`. The manifold must close the phase: a
+closed curve or surface, or one cut to the domain by `hm_clip ()`, in which
+case the phase may lie along the domain's boundary, as water does along the
+bottom.
+
+**One cell** (`hm_vof_box`). By the divergence theorem with
+`F = (x - lo_x) e_x`, the volume is the sum over the pieces of `A_x (c_x - lo_x)`,
+plus `h` times the area on the face `x = lo_x + h`. That area is the same
+identity one dimension down (from the traces on the face), and then a length
+on one edge (from the crossings on it).
+
+- **Clipping** (the paper's Algorithms 1 and 2). Each element is clipped to
+  the box axis by axis. A point within `HM_VOF_EPS` (1e-12 of the cell) of a
+  face is moved onto it and flagged, so the tests "on a face" are on bits.
+- **Double counting.** Pieces lying on a face, traces on an edge of the
+  face, and crossings at a corner are each left out.
+- **What the pieces cannot tell.** On an edge, the state of its corner is
+  exact: it is the side the last crossing that does not cancel leaves.
+  Above that, a face or edge that no piece reached is taken as 0, and a
+  negative sum adds 1 (the paper's `F_v`).
+- **Unknown cells.** A cell with no piece strictly inside is "unknown":
+  its fraction is 0 or 1.
+
+**On the tree.**
+1. Each element goes to the leaves its bounding box meets. The box is halved
+   until each part's corners fall in one leaf, located by binary search on
+   the leaves' Morton keys.
+2. Within a leaf, each element goes to the cells its box meets.
+3. Each cell with elements gets `hm_vof_box ()`.
+4. An unknown cell takes the state of a face it shares with a cut cell. That
+   face is crossed by no element, so its exact measure (`hm_vof_face ()`) is
+   0 or 1. At a level jump, only the unknown cell's part of the face is
+   measured.
+5. The state then spreads from cell to cell, across leaves and levels, by a
+   breadth-first walk.
+
+Steps 4 and 5 replace the paper's Algorithm 4 (the side of the closest
+element) on the grid, and need no search for the closest element. That
+algorithm is kept as `hm_vof_inside ()`, using the closest point rather than
+the centroid, as the fallback. Cells that no cut cell reaches are set to 0
+and counted in the return value.
+
+Tested (`tests/test_vof.c`, 2D and 3D, double and float):
+
+| case | checked against | error, double |
+|---|---|---|
+| one cell cut by a large element in the plane `m . x = alpha` (the paper's 3.1): `m` along one, two or three axes, both normals, `alpha` from 0 to 1 and through the corners | the fraction under a plane, exactly | 6e-16 |
+| a slab between two parallel elements (3.2) | the difference of two | 6e-16 |
+| 2D: a 97-gon, the same reversed, a seven-armed star, a water line cut to the domain, on a tree refined over half the domain | the region's polygon clipped to each cell | 2e-13 a cell, totals 2e-16 |
+| 3D: a tilted plane with triangles larger than the cells, cut to the domain | the plane formula in each cell | 7e-15 a cell |
+| 3D: an octahedron | its tetrahedra cut to each cell by `hm_clip ()` | 5e-15 a cell |
+| 3D: a sphere of 2208 triangles | its volume by the divergence theorem | 2e-16 total |
+| no manifold | every cell left at 0 and counted | |
+
+Three bugs made on purpose are caught: no `F_v` wrap, the corner rule of an
+edge inverted, and no spreading into full and empty cells.
 
 ## In the tree (hmesh-tree.h)
 
