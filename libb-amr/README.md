@@ -315,6 +315,46 @@ It also runs `blocks`, `ghosts` and `adapt` with OpenMP (2D, 3D) and with
 the other level indices: `-DBAMR_INDEX=2` (voxel-memindex), `3` (nano-vdb)
 and `3 -DNVDB_COMPACT` (2D, 3D).
 
+### On the GPU
+
+    GPU=1 sh tests/run.sh        # the offload builds alone, on the device
+
+`GPU=1` builds tree, blocks, ghosts, adapt, stencil, faces and vertices in
+1, 2 and 3 dimensions, double and float, with OpenMP offload to an NVIDIA
+GPU (gcc's `nvptx-none` offload compiler, `gcc-13-offload-nvptx`), and runs
+them with `OMP_TARGET_OFFLOAD=MANDATORY`: no device is a failure, not a run
+on the host. `GPU_ARCH` sets the PTX target (default `sm_80`, the newest gcc
+13 knows; CUDA 13 dropped gcc's default, `sm_50`). There are no sanitizers,
+which offload does not take. `test_blocks.c` is the test with offloaded
+code: `gpu_cells` against `block_cells`, with `memcmp`.
+
+The device must give the host's bits:
+
+| Setting | Why | Without it (RTX A3000, gcc 13.3, CUDA 13.5, driver 620.70) |
+|---|---|---|
+| `-ffp-contract=off` | gcc fuses `a * b + c` into one `fma.rn` on the device, by default; read from the host's compile, not from `-foffload-options` | blocks 3D: 32 of 261 checks fail, double and float |
+| `GOMP_NVPTX_JIT=-O0` | gcc then writes `mul` and `add` without a rounding modifier, which the driver's PTX compiler may fuse (PTX ISA, `mul`, `add`) and does at -O1 and up | blocks 3D: 32 of 261 checks fail, double and float |
+
+In 2D the stencil is `... - 4 u`, and a product by 4 is exact: fused or
+not, the bits agree, which is why only 3D (`- 6 u`) shows it. The 32 are
+every `gpu_cells` check in 3D: four m, four layouts, two halos; the cells
+differ in their last bit (2 to 35% of them), and match a host computing
+`fma (-6, u, sum)` bit for bit. Both settings cost speed, so a run wants
+neither; `GOMP_NVPTX_JIT` from the environment overrides `-O0`. With both,
+42 of 42 runs pass on the device; with no device (in a sandbox), the six
+blocks runs fail on `MANDATORY`, and the others, with no target region,
+pass on the host.
+
+The OpenMP builds of the whole suite take `-foffload=disable`: a gcc built
+with `--enable-offload-defaulted` (Ubuntu's) offloads to every offload
+compiler installed, and with `gcc-13-offload-nvptx` installed, 11 blocks
+runs failed to link on `-fcf-protection` before it.
+
+Measured on an RTX A3000 Laptop GPU (Ampere, compute 8.6). The device reads
+host `malloc` memory here (the open kernel module's HMM) as `test_blocks.c`
+maps nothing; without it, `block_table ()` and `target data map` are needed
+(`block-loops.h`, 3. Which one).
+
 ### Benchmark: the level indices
 
     sh tests/bench_memindex.sh [RAW]

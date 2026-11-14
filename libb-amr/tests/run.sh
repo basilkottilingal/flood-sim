@@ -8,6 +8,10 @@
 # and 3 dimensions, double and float, only: no OpenMP, alignment, other
 # level indices or MADV_FREE. After each change; the whole before a commit,
 # with tests/bit/compare.sh (every cell bit for bit against HEAD).
+# GPU=1: only the offload builds, every test but the pool and index in 1,
+# 2 and 3 dimensions, double and float, run on an NVIDIA GPU (gcc's nvptx
+# offload compiler, gcc-NN-offload-nvptx); no sanitizers, which offload
+# does not take. GPU_ARCH: the PTX target (default sm_80, gcc 13's newest).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
 lib=$(pwd)
 dir=$(mktemp -d)
@@ -94,6 +98,38 @@ finish () {   # wait for every test, print the rest, count the failures
   done
 }
 
+# GPU=1: the offload builds alone. The host and the device must give the
+# same bits, as the tests compare with memcmp:
+#   - -ffp-contract=off: gcc fuses a * b + c into one fma, rounded once,
+#     on the device, where it is the default (the flag is read where the
+#     host compiles, not from -foffload-options);
+#   - GOMP_NVPTX_JIT=-O0: gcc then writes mul and add without a rounding
+#     modifier, which the driver's PTX compiler may fuse again at -O1 and
+#     up (PTX ISA, "mul", "add"), and does: 3D blocks failed 32 checks.
+# OMP_TARGET_OFFLOAD=MANDATORY: no device is a failure, not the host.
+# -fcf-protection=none, -fno-stack-protector: Ubuntu's defaults, which
+# nvptx refuses; -no-pie: the offload table is not position independent.
+if [ -n "$GPU" ]; then
+  flags="-D_GNU_SOURCE -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter -I$lib -I$lib/.."
+  flags="$flags -fopenmp -foffload=nvptx-none -foffload-options=nvptx-none=-misa=${GPU_ARCH:-sm_80}"
+  flags="$flags -ffp-contract=off -fcf-protection=none -fno-stack-protector -no-pie"
+  export OMP_TARGET_OFFLOAD=MANDATORY GOMP_NVPTX_JIT=${GOMP_NVPTX_JIT:--O0} OMP_NUM_THREADS=4
+  for prec in "" "-DBAMR_SINGLE"; do
+    for d in 1 2 3; do
+      run tree   $d "$prec" tests/test_tree.c $src
+      run blocks $d "$prec" tests/test_blocks.c "$lib/tree.c" $src
+      run ghosts $d "$prec" tests/test_ghosts.c "$lib/tree.c" $gsrc
+      run adapt  $d "$prec" tests/test_adapt.c "$lib/tree.c" $src
+      run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
+      run faces $d "$prec" tests/test_faces.c "$lib/tree.c" $src
+      run vertices $d "$prec" tests/test_vertices.c "$lib/tree.c" $src
+    done
+  done
+  finish
+  [ "$fails" = 0 ] && echo "all passed (GPU)"
+  exit "$fails"
+fi
+
 # the pool, giving memory back either way: MADV_DONTNEED (1) or MADV_FREE (0)
 for madv in 1 0; do
   def="-D_BAMR_MADV_DONTNEED_RECOMMENDED_=$madv"
@@ -119,8 +155,10 @@ if [ -n "$QUICK" ]; then
   [ "$fails" = 0 ] && echo "all passed (quick)"
   exit "$fails"
 fi
-# with OpenMP: threads, simd and the offload pragmas (run on the host here)
-flags="$flags -fopenmp"
+# with OpenMP: threads, simd and the offload pragmas (run on the host here:
+# -foffload=disable, as a gcc built with --enable-offload-defaulted
+# offloads to every offload compiler installed; GPU=1 for the device)
+flags="$flags -fopenmp -foffload=disable"
 export OMP_NUM_THREADS=4
 for d in 2 3; do
   run blocks $d "-fopenmp" tests/test_blocks.c "$lib/tree.c" $src

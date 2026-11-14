@@ -169,6 +169,24 @@
   ..    -march=native              the widest vectors of this machine
   ..    -DBLOCK_BACKEND=...        BLOCK_BACKEND_SERIAL, _SIMD (default) or
   ..                               _THREADS, for foreach_cell
+  ..
+  ..  An NVIDIA GPU with gcc 13 (gcc-13-offload-nvptx) and CUDA 13 wants
+  ..  more than -foffload=nvptx-none:
+  ..
+  ..    -foffload-options=nvptx-none=-misa=sm_80
+  ..                               CUDA 13 dropped sm_50, gcc 13's default
+  ..    -fcf-protection=none       Ubuntu's defaults, which nvptx refuses
+  ..    -fno-stack-protector
+  ..    -no-pie                    the offload table is not position
+  ..                               independent: the linker warns
+  ..
+  ..  The device then rounds differently from the host: gcc fuses a * b + c
+  ..  into one fma on the device, rounded once. For the host's bits, as the
+  ..  tests want, -ffp-contract=off (on the whole build: the device reads
+  ..  it from the host's compile, not from -foffload-options) and the
+  ..  environment GOMP_NVPTX_JIT=-O0 at run time, as the driver's PTX
+  ..  compiler fuses again the mul and add gcc then writes. Both cost
+  ..  speed: a run, not a test, wants neither. tests/run.sh, GPU=1.
   */
 
   #include <assert.h>
