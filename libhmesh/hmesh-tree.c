@@ -30,8 +30,6 @@ static void cache_free (void * p)
     return;
   free (C->key), free (C->order), free (C->leaf_of);
   free (C->start), free (C->stop);
-  for (int k = 0; k < HM_LEVELS; k++)
-    free (C->sorted[k].key), free (C->sorted[k].order);
   free (C->table_key), free (C->table_level);
   free (C);
 }
@@ -384,122 +382,6 @@ static double tree_cell_size (const double * x, void * ctx)
   return hm_tree_cell_size (ctx, x);
 }
 #endif
-
-/* -------- the simplices of a level by cell -------- */
-
-/* the k-simplices sorted by their centroids' keys, to the finest cells,
-   from the last order: those still in use in it, then the others */
-static void sort_level (Hmesh * M, HmTreeSorted * S, int k, int bits)
-{
-  uint32_t n = hm_count (M, k), end = hm_end (M, k), a = 0;
-  if (n > S->cap || !S->cap) {
-    S->cap = n > 2 * S->cap ? n : 2 * S->cap;
-    S->key = grow (S->key, S->cap, sizeof (uint64_t));
-    S->order = grow (S->order, S->cap, sizeof (uint32_t));
-  }
-  uint8_t * mark = calloc (end ? end : 1, 1);
-  uint64_t * byid = grow (NULL, end, sizeof (uint64_t));
-  for (uint32_t b = 0; S->valid && b < S->n; b++) {
-    uint32_t s = S->order[b];
-    if (s < end && hm_alive (M, k, s) && !mark[s]) {
-      mark[s] = 1;
-      S->order[a++] = s;
-    }
-  }
-  hm_foreach (M, k, s) {
-    if (!mark[s])
-      S->order[a++] = s;
-    double c[D];
-    hm_centroid (M, k, s, c);
-    byid[s] = hm_morton_key (c, M->origin, M->size);
-  }
-  for (a = 0; a < n; a++)
-    S->key[a] = byid[S->order[a]];
-  free (byid);
-  free (mark);
-  hm_sort_keys (S->key, S->order, n, D * (HM_MORTON_BITS - bits),
-                D * HM_MORTON_BITS);
-  S->n = n;
-  S->cell_bits = bits;
-  S->stamp = M->stamp;
-  S->valid = 1;
-}
-
-const HmTreeSorted * hm_tree_sorted (Hmesh * M, int k)
-{
-  if (k < 0 || k > M->dim)
-    return NULL;
-  HmTreeCache * C = cache_of (M);
-  int bits = depth_ok ();
-  if (!bits)
-    return NULL;
-  if (!same_box (M) && hm_tree_bind (M))
-    return NULL;
-  HmTreeSorted * S = &C->sorted[k];
-  if (!S->valid || S->stamp != M->stamp || S->cell_bits != bits)
-    sort_level (M, S, k, bits);
-  return S;
-}
-
-/* the run of the cell centred at p, of side delta, in S */
-static const HmTreeSorted * zn_sorted;
-static const Hmesh * zn_mesh;
-
-static void zn_run (double x, double y, double z, double delta, Real * first,
-                    Real * count)
-{
-  const HmTreeSorted * S = zn_sorted;
-  const Hmesh * M = zn_mesh;
-  double p[3] = { x, y, z };
-  uint64_t k = hm_morton_key (p, M->origin, M->size);
-  int cbits = (int) lround (log2 (M->size / delta));
-  int shift = D * (HM_MORTON_BITS - cbits), ss = D * (HM_MORTON_BITS -
-                                                      S->cell_bits);
-  /* the keys of the cell, at the sort's resolution: [lo, hi) */
-  uint64_t lo = shift >= 64 ? 0 : (k >> shift) << shift >> ss;
-  uint64_t hi = shift >= 64 ? UINT64_MAX : lo + ((uint64_t) 1 << (shift - ss));
-  uint32_t b[2];
-  for (int e = 0; e < 2; e++) {
-    uint64_t t = e ? hi : lo;
-    uint32_t l = 0, r = S->n;          /* the first key >> ss >= t */
-    while (l < r) {
-      uint32_t c = (l + r) / 2;
-      if (S->key[c] >> ss < t)
-        l = c + 1;
-      else
-        r = c;
-    }
-    b[e] = l;
-  }
-  if (shift >= 64)
-    b[1] = S->n;
-  *first = (Real) b[0];
-  *count = (Real) (b[1] - b[0]);
-}
-
-long hm_tree_zn (Hmesh * M, int k, scalar zsimplex, scalar nsimplex)
-{
-  const HmTreeSorted * S = hm_tree_sorted (M, k);
-  if (!S)
-    return -1;
-  if (sizeof (Real) < sizeof (double) && S->n > (1u << 24))
-    return -1;                         /* not exact in a float */
-  zn_sorted = S, zn_mesh = M;
-  foreach () {
-    Real first, count;
-#if D == 1
-    zn_run (x, 0., 0., Delta, &first, &count);
-#elif D == 2
-    zn_run (x, y, 0., Delta, &first, &count);
-#else
-    zn_run (x, y, z, Delta, &first, &count);
-#endif
-    zsimplex[] = first;
-    nsimplex[] = count;
-  }
-  zn_sorted = NULL, zn_mesh = NULL;
-  return (long) S->n;
-}
 
 /* -------- the interface of a function, in the tree's domain -------- */
 

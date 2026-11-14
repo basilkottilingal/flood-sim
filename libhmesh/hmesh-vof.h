@@ -102,9 +102,65 @@
   .. domain are left out.
   */
 
+  /*
+  .. Advecting the manifold and its volume fractions: manifold_advect ()
+  .. --------------------------------------------------------------------
+  ..
+  .. manifold_advect (M, uf, c, dt, uf_prev, dt_prev): the points moved by
+  .. the face velocity uf, and c (from hm_vof (), or a previous call: the
+  .. same mesh's fractions) brought up to date. Returns -1 if refused
+  .. (nothing changed), -2 if it cannot run (m not D - 1, dt not positive,
+  .. the mesh not in the tree's domain), else the number of edges now longer
+  .. than their cells (to remesh before the next step: hm_long_edges ()).
+  ..
+  .. The velocity at a point: each component from its faces, linear along
+  .. its axis between the two faces about the point, and along the others
+  .. between the two cell centres about it (multilinear; exact for a linear
+  .. field), read in the block of the point's leaf (ghosts updated first).
+  .. The leaf of every point comes from the point cache (hmesh-tree.h): the
+  .. radix-sorted points walked with the leaves in Morton order, no search;
+  .. the block from the leaf's node, the cell by its index (block_at ()): no
+  .. lookup in the tree's level index.
+  ..
+  ..   first order (dt_prev <= 0, uf_prev not read)   x += dt u (x)
+  ..   second order: the midpoint rule, the velocity extrapolated to
+  ..   t + dt / 2 from uf (at t) and uf_prev (at t - dt_prev),
+  ..       u' = (1 + dt / (2 dt_prev)) u - dt / (2 dt_prev) u_prev
+  ..       x' = x + dt / 2 u' (x),   x += dt u' (x')
+  ..
+  .. (Adams-Bashforth from the two fields would read u_prev where the point
+  .. is now, not where it was: for a steady flow that is u, and first order.)
+  ..
+  .. A point on a face of the box moves along it (its normal component 0); a
+  .. point that would leave the box stops on it.
+  ..
+  .. CFL: refused if a point would move HM_ADVECT_CFL (0.5) of the cell it
+  .. leaves or of the one it enters, or further. Then the interface never
+  .. crosses a cell in one step, and c changes only near it:
+  ..
+  ..   - the cells the interface cuts after the move: exact (hm_vof_box ())
+  ..   - the cells it may have cut before, or touches without a cut now:
+  ..       old c 0 or 1        kept
+  ..       old c in (0, 1)     the exact fraction of a face shared with a
+  ..                           cut cell, which no element crosses (0 or 1):
+  ..                           right however the interface left the cell,
+  ..                           from both sides too (a film, a thread); with
+  ..                           no cut neighbour, old c rounded (c > 1/2),
+  ..                           right when it left by one side
+  ..   - every other cell: not read, not written
+  ..
+  .. So the cost is the interface's, not the grid's. c is written in place,
+  .. and its ghosts marked stale (ghosts_mark_dirty ()). The tree must not
+  .. have changed under c since it was last right (adapt with a prolongation
+  .. that keeps the cells away from the interface 0 or 1).
+  */
+
   #include "hmesh.h"
 
   #define HM_VOF_EPS 1e-12
+  #ifndef HM_ADVECT_CFL
+    #define HM_ADVECT_CFL 0.5
+  #endif
 
   double hm_vof_box (const Hmesh * M, const double * lo, double h,
                      const uint32_t * elem, uint32_t n, int * known);
@@ -114,5 +170,7 @@
   int    hm_vof_inside (const Hmesh * M, const double * x,
                         const uint32_t * elem, uint32_t n);
   long   hm_vof (Hmesh * M, scalar c);
+  int    manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
+                          face_vector uf_prev, double dt_prev);
 
 #endif

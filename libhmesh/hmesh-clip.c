@@ -419,7 +419,7 @@ int hm_clip (Hmesh * M, const double * origin, double size)
 #ifdef EULERIAN_LAGRANGIAN
   M->no_edge_check = 0;
 #endif
-  M->generation++, M->stamp++;
+  M->generation++;
   return hm_set_domain (M, origin, size);
 }
 

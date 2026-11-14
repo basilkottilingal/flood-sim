@@ -265,7 +265,7 @@ uint32_t hm_vertex_add (Hmesh * M, const double * x)
     M->x[d][s] = x[d];
   if (M->dim > 0)
     M->level[0].use[s] = HM_NONE;
-  M->generation++, M->stamp++;
+  M->generation++;
   return s;
 }
 
@@ -289,13 +289,13 @@ int hm_vertex_move (Hmesh * M, uint32_t v, const double * x)
 #endif
   for (int d = 0; d < HM_DIMENSION; d++)
     M->x[d][v] = x[d];
-  M->generation++, M->stamp++;
+  M->generation++;
   return 0;
 }
 
 void hm_touch (Hmesh * M)
 {
-  M->generation++, M->stamp++;
+  M->generation++;
 }
 
 int hm_set_domain (Hmesh * M, const double * origin, double size)
@@ -316,7 +316,7 @@ int hm_set_domain (Hmesh * M, const double * origin, double size)
   M->size = size;
   for (int d = 0; d < HM_DIMENSION; d++)
     M->origin[d] = origin[d];
-  M->generation++, M->stamp++;
+  M->generation++;
   return 0;
 }
 
@@ -398,7 +398,6 @@ uint32_t hm_add (Hmesh * M, int k, const uint32_t * v)
   }
   if (k < M->dim)
     l->use[s] = HM_NONE;
-  M->stamp++;
   return s;
 }
 
@@ -430,7 +429,6 @@ int hm_remove (Hmesh * M, int k, uint32_t s)
   level_release (M, k, s);
   if (k == 0)
     M->generation++;
-  M->stamp++;
   return 0;
 }
 
@@ -551,7 +549,7 @@ int hm_compact_order (Hmesh * M, uint32_t * const * order, uint32_t ** remap)
     else
       free (map[k]);
   }
-  M->generation++, M->stamp++;
+  M->generation++;
   return 0;
 }
 

@@ -4,12 +4,12 @@
 # the times (QUICK=1 leaves that out). Run from libhmesh:
 #   sh tests/run.sh
 #   test_hmesh.c   the mesh alone
-#   test_tree.c    the mesh in libb-amr's tree (hmesh-tree.h), zsimplex and
-#                  nsimplex; with -DEULERIAN_LAGRANGIAN, edges shorter than
-#                  the cells
+#   test_tree.c    the mesh in libb-amr's tree (hmesh-tree.h); with
+#                  -DEULERIAN_LAGRANGIAN, edges shorter than the cells
 #   test_clip.c    the mesh cut to a box (hm_clip ())
 #   test_vof.c     volume fractions from the manifold (hm_vof ()), 2D, 3D
 #   test_implicit.c  the interface f = 0 (hm_from_function ()), 2D, 3D
+#   test_advect.c  the manifold moved and c updated (manifold_advect ())
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
 # on the PATH).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -62,6 +62,8 @@ for d in ${DIMS:-1 2 3}; do
     run "vof, float, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
     run "implicit, double, sanitizers" $d tests/test_implicit.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
     run "implicit, float, EULERIAN_LAGRANGIAN" $d tests/test_implicit.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE -DEULERIAN_LAGRANGIAN
+    run "advect, double, sanitizers" $d tests/test_advect.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
+    run "advect, float, sanitizers" $d tests/test_advect.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
   fi
 done
 [ "$fails" = 0 ] && echo "all passed"

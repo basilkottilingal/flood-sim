@@ -454,100 +454,6 @@ static void bench (void)
   tree_destroy ();
 }
 
-/* -------- zsimplex and nsimplex -------- */
-
-/* a curve of short edges, inside the domain: in 1D along x, else a circle
-   (z = 0.5 in 3D) */
-static Hmesh * short_curve (int n)
-{
-  Hmesh * M = hmesh_new (1);
-  hm_tree_bind (M);
-  double u[3], x[3];
-  for (int i = 0; i < n; i++) {
-    double t = 2*M_PI*i/n;
-    u[0] = HM_DIMENSION == 1 ? 0.05 + 0.9*i/n : 0.5 + 0.37*cos (t);
-    u[1] = 0.5 + 0.37*sin (t), u[2] = 0.5;
-    point_at (x, u);
-    hm_vertex_add (M, x);
-  }
-  for (uint32_t i = 0; i + (HM_DIMENSION == 1) < (uint32_t) n; i++)
-    hm_add (M, 1, (uint32_t []) { i, (i + 1) % (uint32_t) n });
-  return M;
-}
-
-/* every leaf cell's run: its simplices' centroids in it, each simplex in
-   one run */
-static void check_zn (Hmesh * M, int k, scalar zs, scalar ns,
-                      const char * when)
-{
-  long count = hm_tree_zn (M, k, zs, ns);
-  const HmTreeSorted * S = hm_tree_sorted (M, k);
-  CHECK (count == (long) hm_count (M, k) && S, "%s, level %d: %ld, not %u",
-         when, k, count, hm_count (M, k));
-  if (!S)
-    return;
-  uint8_t * seen = calloc (hm_end (M, k) + 1, 1);
-  long total = 0, outside = 0, twice = 0;
-  foreach () {
-    double lo[3], h = Delta;
-    lo[0] = x - h/2;
-#if HM_DIMENSION > 1
-    lo[1] = y - h/2;
-#endif
-#if HM_DIMENSION > 2
-    lo[2] = z - h/2;
-#endif
-    for (int a = (int) zs[]; a < (int) zs[] + (int) ns[]; a++) {
-      uint32_t s = S->order[a];
-      double c[3];
-      hm_centroid (M, k, s, c);
-      for (int d = 0; d < HM_DIMENSION; d++)
-        outside += c[d] < lo[d] - 1e-12 || c[d] > lo[d] + h + 1e-12;
-      twice += seen[s]++ > 0;
-    }
-    total += (long) ns[];
-  }
-  CHECK (total == count && !outside && !twice, "%s, level %d: %ld in runs "
-         "of %ld, %ld centroids outside their cell, %ld twice", when, k,
-         total, count, outside, twice);
-  free (seen);
-}
-
-static void test_zn (void)
-{
-  int depth = HM_DIMENSION == 3 ? 4 : 6;
-  tree (depth, 4);
-  tree_shift_resize (X0[0], X0[1], X0[2], H0);
-  refine_half (depth - 1);
-  scalar zs = scalar_new (), ns = scalar_new ();
-  Hmesh * M = short_curve (HM_DIMENSION == 3 ? 400 : 1500);
-  check_zn (M, 0, zs, ns, "built");
-  check_zn (M, 1, zs, ns, "built");
-  /* the points moved: the runs follow (M->stamp) */
-  hm_foreach (M, 0, v) {
-    double x[3];
-    for (int d = 0; d < HM_DIMENSION; d++)
-      x[d] = hm_x (M, d)[v] + 2e-3*H0*(urand () - 0.5);
-    hm_vertex_move (M, v, x);
-  }
-  check_zn (M, 1, zs, ns, "moved");
-  /* edges removed and added back: the runs follow */
-  uint32_t ne = hm_count (M, 1);
-  for (uint32_t e = 0; e < hm_end (M, 1); e += 7)
-    if (hm_alive (M, 1, e))
-      hm_remove (M, 1, e);
-  check_zn (M, 1, zs, ns, "removed");
-  hmesh_free (M);
-  M = short_curve (HM_DIMENSION == 3 ? 400 : 1500);
-  CHECK (hm_count (M, 1) == ne, "zn: the curve again");
-  /* the tree refined: the runs of the finer cells */
-  refine_half (depth);
-  check_zn (M, 1, zs, ns, "refined");
-  hmesh_free (M);
-  scalar_free (zs), scalar_free (ns);
-  tree_destroy ();
-}
-
 /* -------- edges shorter than the cells (-DEULERIAN_LAGRANGIAN) -------- */
 
 #ifdef EULERIAN_LAGRANGIAN
@@ -642,12 +548,10 @@ int main (void)
   /* the other tests make edges longer than the cells */
   (void) test_tree, (void) test_clip, (void) test_too_deep, (void) bench;
   test_el ();
-  test_zn ();
 #else
   test_tree ();
   test_clip ();
   test_too_deep ();
-  test_zn ();
   bench ();
 #endif
   if (fails)

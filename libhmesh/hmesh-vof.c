@@ -28,6 +28,7 @@
 #include "block-ghosts.h"
 #include "hmesh-vof.h"
 #include "hmesh-morton.h"
+#include "hmesh-tree.h"
 
 #define D HM_DIMENSION
 
@@ -742,27 +743,27 @@ static void write_scalar (scalar c)
 #endif
 }
 
-long hm_vof (Hmesh * M, scalar c)
-{
-  if (M->dim != D - 1 || D < 2)
-    return -1;
-  Grid G = { .M = M, .m = tree_get_block_m () };
-  G.ncell = 1;
-  for (int d = 0; d < D; d++)
-    G.ncell *= (uint32_t) G.m;
-  for (int d = 0; d < 3; d++)
-    G.origin[d] = d < D ? tree_get_origin (d) : 0.;
-  G.size = tree_get_size ();
+/* -------- the grid's leaves, the elements binned to them -------- */
 
-  /* the leaves */
+static void grid_leaves (Grid * G, Hmesh * M)
+{
+  memset (G, 0, sizeof (*G));
+  G->M = M;
+  G->m = tree_get_block_m ();
+  G->ncell = 1;
+  for (int d = 0; d < D; d++)
+    G->ncell *= (uint32_t) G->m;
+  for (int d = 0; d < 3; d++)
+    G->origin[d] = d < D ? tree_get_origin (d) : 0.;
+  G->size = tree_get_size ();
   const TreeCaches * tc = tree_caches ();
-  G.nl = (uint32_t) tc->nleaves;
-  G.lo = grow (NULL, G.nl, sizeof (*G.lo));
-  G.H = grow (NULL, G.nl, sizeof (double));
-  G.level = grow (NULL, G.nl, sizeof (int));
-  G.key = grow (NULL, G.nl, sizeof (uint64_t));
-  G.hmin = G.size;
-  for (uint32_t q = 0; q < G.nl; q++) {
+  G->nl = (uint32_t) tc->nleaves;
+  G->lo = grow (NULL, G->nl, sizeof (*G->lo));
+  G->H = grow (NULL, G->nl, sizeof (double));
+  G->level = grow (NULL, G->nl, sizeof (int));
+  G->key = grow (NULL, G->nl, sizeof (uint64_t));
+  G->hmin = G->size;
+  for (uint32_t q = 0; q < G->nl; q++) {
     Index p = tc->leaves[q].p;
     int ijk[3] = { p.i, 0, 0 };
 #if D > 1
@@ -771,21 +772,25 @@ long hm_vof (Hmesh * M, scalar c)
 #if D > 2
     ijk[2] = p.k;
 #endif
-    G.level[q] = p.level;
-    G.H[q] = G.size / (double) (1L << p.level);
+    G->level[q] = p.level;
+    G->H[q] = G->size / (double) (1L << p.level);
     for (int d = 0; d < D; d++)
-      G.lo[q][d] = G.origin[d] + ijk[d] * G.H[q];
-    G.key[q] = hm_morton_cell (ijk, p.level);
-    G.hmin = fmin (G.hmin, G.H[q]);
+      G->lo[q][d] = G->origin[d] + ijk[d] * G->H[q];
+    G->key[q] = hm_morton_cell (ijk, p.level);
+    G->hmin = fmin (G->hmin, G->H[q]);
   }
+}
 
-  /* each element to the leaves its box meets, as (leaf, element) pairs */
+/* each element to the leaves its box meets: lstart, lelem */
+static void grid_bin (Grid * G)
+{
+  const Hmesh * M = G->M;
   int m = M->dim;
   uint32_t ne = hm_end (M, m), npair = 0, cappair = 0;
   uint32_t (* pair)[2] = NULL;
-  G.emin = grow (NULL, ne, sizeof (*G.emin));
-  G.emax = grow (NULL, ne, sizeof (*G.emax));
-  double pad = HM_VOF_EPS * G.hmin / G.m;
+  G->emin = grow (NULL, ne, sizeof (*G->emin));
+  G->emax = grow (NULL, ne, sizeof (*G->emax));
+  double pad = HM_VOF_EPS * G->hmin / G->m;
   List L = { NULL, 0, 0 };
   hm_foreach (M, m, e) {
     int out = 0;
@@ -795,19 +800,19 @@ long hm_vof (Hmesh * M, scalar c)
         double x = M->x[d][hm_vertex (M, m, e, i)];
         lo = fmin (lo, x), hi = fmax (hi, x);
       }
-      G.emin[e][d] = lo - pad, G.emax[e][d] = hi + pad;
-      out |= G.emax[e][d] < G.origin[d] ||
-        G.emin[e][d] > G.origin[d] + G.size;
+      G->emin[e][d] = lo - pad, G->emax[e][d] = hi + pad;
+      out |= G->emax[e][d] < G->origin[d] ||
+        G->emin[e][d] > G->origin[d] + G->size;
     }
     if (out)
       continue;
     double bmin[3], bmax[3];
     for (int d = 0; d < D; d++) {
-      bmin[d] = fmax (G.emin[e][d], G.origin[d]);
-      bmax[d] = fmin (G.emax[e][d], G.origin[d] + G.size);
+      bmin[d] = fmax (G->emin[e][d], G->origin[d]);
+      bmax[d] = fmin (G->emax[e][d], G->origin[d] + G->size);
     }
     L.n = 0;
-    cover (&G, bmin, bmax, &L);
+    cover (G, bmin, bmax, &L);
     for (uint32_t i = 0; i < L.n; i++) {
       if (npair == cappair) {
         cappair = cappair ? 2 * cappair : 1024;
@@ -818,44 +823,61 @@ long hm_vof (Hmesh * M, scalar c)
     }
   }
   free (L.q);
-  G.lstart = calloc ((size_t) G.nl + 1, sizeof (uint32_t));
-  G.lelem = grow (NULL, npair, sizeof (uint32_t));
+  G->lstart = calloc ((size_t) G->nl + 1, sizeof (uint32_t));
+  G->lelem = grow (NULL, npair, sizeof (uint32_t));
   for (uint32_t i = 0; i < npair; i++)
-    G.lstart[pair[i][0] + 1]++;
-  for (uint32_t q = 0; q < G.nl; q++)
-    G.lstart[q + 1] += G.lstart[q];
-  uint32_t * fill = grow (NULL, G.nl, sizeof (uint32_t));
-  memcpy (fill, G.lstart, G.nl * sizeof (uint32_t));
+    G->lstart[pair[i][0] + 1]++;
+  for (uint32_t q = 0; q < G->nl; q++)
+    G->lstart[q + 1] += G->lstart[q];
+  uint32_t * fill = grow (NULL, G->nl, sizeof (uint32_t));
+  memcpy (fill, G->lstart, G->nl * sizeof (uint32_t));
   for (uint32_t i = 0; i < npair; i++)
-    G.lelem[fill[pair[i][0]]++] = pair[i][1];
+    G->lelem[fill[pair[i][0]]++] = pair[i][1];
   free (fill);
   free (pair);
+}
 
-  /* each leaf: its elements to its cells, and the cells with any cut */
-  size_t ncells = (size_t) G.nl * G.ncell;
-  G.frac = calloc (ncells ? ncells : 1, sizeof (double));
-  G.state = calloc (ncells ? ncells : 1, sizeof (uint8_t));
-  uint32_t * cstart = grow (NULL, G.ncell + 1, sizeof (uint32_t));
-  uint32_t * celem = NULL, ccap = 0, * buf = NULL, bcap = 0;
-  for (uint32_t q = 0; q < G.nl; q++) {
-    if (G.lstart[q] == G.lstart[q + 1])
+static void grid_unbin (Grid * G)
+{
+  free (G->lstart), free (G->lelem), free (G->emin), free (G->emax);
+  G->lstart = G->lelem = NULL;
+  G->emin = G->emax = NULL;
+}
+
+static void grid_free (Grid * G)
+{
+  grid_unbin (G);
+  free (G->lo), free (G->H), free (G->level), free (G->key);
+  free (G->frac), free (G->state);
+}
+
+/* every cell any element's box meets: visit (G, q, cell, its elements) */
+typedef void (* CellVisit) (Grid * G, uint32_t q, uint32_t cc,
+                            const uint32_t * elem, uint32_t n, void * ctx);
+
+static void grid_cells (Grid * G, CellVisit visit, void * ctx)
+{
+  uint32_t * cstart = grow (NULL, G->ncell + 1, sizeof (uint32_t));
+  uint32_t * celem = NULL, ccap = 0;
+  for (uint32_t q = 0; q < G->nl; q++) {
+    if (G->lstart[q] == G->lstart[q + 1])
       continue;
-    double delta = G.H[q] / G.m;
-    memset (cstart, 0, (G.ncell + 1) * sizeof (uint32_t));
+    double delta = G->H[q] / G->m;
+    memset (cstart, 0, (G->ncell + 1) * sizeof (uint32_t));
     for (int pass = 0; pass < 2; pass++) {
-      for (uint32_t i = G.lstart[q]; i < G.lstart[q + 1]; i++) {
-        uint32_t e = G.lelem[i];
+      for (uint32_t i = G->lstart[q]; i < G->lstart[q + 1]; i++) {
+        uint32_t e = G->lelem[i];
         int r0[3] = { 0, 0, 0 }, r1[3] = { 0, 0, 0 };
         for (int d = 0; d < D; d++) {
-          int a = (int) floor ((G.emin[e][d] - G.lo[q][d]) / delta);
-          int b = (int) floor ((G.emax[e][d] - G.lo[q][d]) / delta);
-          r0[d] = a < 0 ? 0 : a >= G.m ? G.m - 1 : a;
-          r1[d] = b < 0 ? 0 : b >= G.m ? G.m - 1 : b;
+          int a = (int) floor ((G->emin[e][d] - G->lo[q][d]) / delta);
+          int b = (int) floor ((G->emax[e][d] - G->lo[q][d]) / delta);
+          r0[d] = a < 0 ? 0 : a >= G->m ? G->m - 1 : a;
+          r1[d] = b < 0 ? 0 : b >= G->m ? G->m - 1 : b;
         }
         for (int k = r0[2]; k <= r1[2]; k++)
           for (int j = r0[1]; j <= r1[1]; j++)
             for (int i2 = r0[0]; i2 <= r1[0]; i2++) {
-              uint32_t cc = (uint32_t) ((k * G.m + j) * G.m + i2);
+              uint32_t cc = (uint32_t) ((k * G->m + j) * G->m + i2);
               if (pass == 0)
                 cstart[cc + 1]++;
               else
@@ -863,38 +885,60 @@ long hm_vof (Hmesh * M, scalar c)
             }
       }
       if (pass == 0) {
-        for (uint32_t cc = 0; cc < G.ncell; cc++)
+        for (uint32_t cc = 0; cc < G->ncell; cc++)
           cstart[cc + 1] += cstart[cc];
-        if (cstart[G.ncell] > ccap) {
-          ccap = cstart[G.ncell];
+        if (cstart[G->ncell] > ccap) {
+          ccap = cstart[G->ncell];
           celem = grow (celem, ccap, sizeof (uint32_t));
         }
       }
     }
     /* after the second pass cstart[cc] is the end of cell cc's list */
-    for (uint32_t cc = 0, begin = 0; cc < G.ncell; cc++) {
+    for (uint32_t cc = 0, begin = 0; cc < G->ncell; cc++) {
       uint32_t end = cstart[cc];
-      if (end > begin) {
-        double lo[3], h;
-        int known;
-        cell_box (&G, q, cc, lo, &h);
-        double f = hm_vof_box (M, lo, h, celem + begin, end - begin, &known);
-        if (known) {
-          G.frac[(size_t) q * G.ncell + cc] = f;
-          G.state[(size_t) q * G.ncell + cc] = 1;
-        }
-      }
+      if (end > begin)
+        visit (G, q, cc, celem + begin, end - begin, ctx);
       begin = end;
     }
   }
   free (cstart);
   free (celem);
+}
+
+/* -------- hm_vof (): every cell -------- */
+
+static void visit_exact (Grid * G, uint32_t q, uint32_t cc,
+                         const uint32_t * elem, uint32_t n, void * ctx)
+{
+  (void) ctx;
+  double lo[3], h;
+  int known;
+  cell_box (G, q, cc, lo, &h);
+  double f = hm_vof_box (G->M, lo, h, elem, n, &known);
+  if (known) {
+    G->frac[(size_t) q * G->ncell + cc] = f;
+    G->state[(size_t) q * G->ncell + cc] = 1;
+  }
+}
+
+long hm_vof (Hmesh * M, scalar c)
+{
+  if (M->dim != D - 1 || D < 2)
+    return -1;
+  Grid G;
+  grid_leaves (&G, M);
+  grid_bin (&G);
+  size_t ncells = (size_t) G.nl * G.ncell;
+  G.frac = calloc (ncells ? ncells : 1, sizeof (double));
+  G.state = calloc (ncells ? ncells : 1, sizeof (uint8_t));
+  grid_cells (&G, visit_exact, NULL);
 
   /*
   .. The unknown cells: from a cut neighbour, across a face no element
   .. crosses, then from cell to cell. Both ways round, so that a level jump
   .. is crossed whichever side finds the other.
   */
+  uint32_t * buf = NULL, bcap = 0;
   uint64_t * queue = grow (NULL, ncells, sizeof (uint64_t));
   size_t head = 0, tail = 0;
   for (size_t i = 0; i < ncells; i++) {
@@ -946,9 +990,332 @@ long hm_vof (Hmesh * M, scalar c)
   writing = &G;
   write_scalar (c);
   writing = NULL;
-
-  free (G.lo), free (G.H), free (G.level), free (G.key);
-  free (G.lstart), free (G.lelem), free (G.emin), free (G.emax);
-  free (G.frac), free (G.state);
+  grid_free (&G);
   return left;
+}
+
+/* -------- manifold_advect () -------- */
+
+/* the value of cell cc (interior, i fastest) of leaf q in a scalar's block:
+   the leaf's node from the tree's list, its block, the cell's index in it;
+   no lookup in the tree's level index */
+static Real * cell_value (scalar s, uint32_t q, uint32_t cc, int m,
+                          BlockShape sh)
+{
+  int x[3] = { 0, 0, 0 };
+  for (int d = 0; d < D; d++) {
+    x[d] = (int) (cc % (uint32_t) m);
+    cc /= (uint32_t) m;
+  }
+  return block_data (tree_caches ()->leaves[q].node->s, s) +
+    block_at (sh, x);
+}
+
+/*
+.. Component a of a face vector at the point s (in cells of leaf q, from its
+.. lower corner): linear along a between the faces i and i + 1 (face m in
+.. the ghost layer), and along each other axis between the cell centres j
+.. and j + 1 (j from -1, a ghost, to m - 1). Exact for a linear field.
+*/
+static double face_interp (scalar f, uint32_t q, const double * s, int a,
+                           int m, BlockShape sh)
+{
+  const Real * b = block_data (tree_caches ()->leaves[q].node->s, f);
+  int i0[3] = { 0, 0, 0 };
+  double w[3] = { 0, 0, 0 };
+  for (int d = 0; d < D; d++) {
+    double t = d == a ? s[d] : s[d] - 0.5;
+    int lo = d == a ? 0 : -1;
+    int i = (int) floor (t);
+    i = i < lo ? lo : i > m - 1 ? m - 1 : i;
+    i0[d] = i;
+    w[d] = t - i;
+  }
+  double v = 0;
+  for (int corner = 0; corner < 1 << D; corner++) {
+    int x[3] = { 0, 0, 0 };
+    double wt = 1;
+    for (int d = 0; d < D; d++) {
+      int up = corner >> d & 1;
+      x[d] = i0[d] + up;
+      wt *= up ? w[d] : 1 - w[d];
+    }
+    if (wt != 0)
+      v += wt * b[block_at (sh, x)];
+  }
+  return v;
+}
+
+/* the velocity of the face vector (components comp) at x in leaf q */
+static void velocity (const Grid * G, const int * comp, uint32_t q,
+                      const double * x, BlockShape sh, double * u)
+{
+  double s[3] = { 0, 0, 0 }, delta = G->H[q] / G->m;
+  for (int d = 0; d < D; d++)
+    s[d] = (x[d] - G->lo[q][d]) / delta;
+  for (int a = 0; a < D; a++)
+    u[a] = face_interp (comp[a], q, s, a, G->m, sh);
+}
+
+/* the velocity to move by at x (leaf q): uf's, or extrapolated in time
+   from uf and uf_prev */
+static void velocity_at (const Grid * G, const int * cu, const int * cp,
+                         int second, double c1, double c0, uint32_t q,
+                         const double * x, BlockShape sh, double * u)
+{
+  velocity (G, cu, q, x, sh, u);
+  if (second) {
+    double up[3] = { 0, 0, 0 };
+    velocity (G, cp, q, x, sh, up);
+    for (int d = 0; d < D; d++)
+      u[d] = c1 * u[d] + c0 * up[d];
+  }
+}
+
+/* x moved by s u: along a face of the box it is on, stopped on the box */
+static void step (const Grid * G, const double * x, double s,
+                  const double * u, double * xn)
+{
+  for (int d = 0; d < D; d++) {
+    double lo = G->origin[d], hi = G->origin[d] + G->size;
+    xn[d] = x[d] == lo || x[d] == hi ? x[d] : x[d] + s * u[d];
+    xn[d] = xn[d] < lo ? lo : xn[d] > hi ? hi : xn[d];
+  }
+}
+
+/* a set of cells by key q ncell + cc, each with a fraction and a state */
+typedef struct {
+  uint64_t * key;            /* key + 1, 0 empty */
+  double   * f;
+  uint8_t  * st;             /* 0 a candidate, 1 cut (f exact) */
+  size_t     cap, n;
+} CellMap;
+
+static size_t cellmap_slot (CellMap * C, uint64_t key, int insert)
+{
+  if (insert && 2 * (C->n + 1) > C->cap) {
+    CellMap N = { NULL, NULL, NULL, C->cap ? 2 * C->cap : 1024, 0 };
+    N.key = calloc (N.cap, sizeof (uint64_t));
+    N.f = grow (NULL, N.cap, sizeof (double));
+    N.st = grow (NULL, N.cap, sizeof (uint8_t));
+    if (!N.key) {
+      fprintf (stderr, "hmesh: out of memory\n");
+      abort ();
+    }
+    for (size_t i = 0; i < C->cap; i++)
+      if (C->key[i]) {
+        size_t j = (C->key[i] * 0x9E3779B97F4A7C15ull) & (N.cap - 1);
+        while (N.key[j])
+          j = (j + 1) & (N.cap - 1);
+        N.key[j] = C->key[i], N.f[j] = C->f[i], N.st[j] = C->st[i];
+        N.n++;
+      }
+    free (C->key), free (C->f), free (C->st);
+    *C = N;
+  }
+  if (!C->cap)
+    return SIZE_MAX;
+  uint64_t k1 = key + 1;
+  size_t j = (k1 * 0x9E3779B97F4A7C15ull) & (C->cap - 1);
+  while (C->key[j] && C->key[j] != k1)
+    j = (j + 1) & (C->cap - 1);
+  if (C->key[j])
+    return j;
+  if (!insert)
+    return SIZE_MAX;
+  C->key[j] = k1, C->f[j] = 0, C->st[j] = 0;
+  C->n++;
+  return j;
+}
+
+static void cellmap_free (CellMap * C)
+{
+  free (C->key), free (C->f), free (C->st);
+}
+
+static void visit_candidate (Grid * G, uint32_t q, uint32_t cc,
+                             const uint32_t * elem, uint32_t n, void * ctx)
+{
+  (void) elem, (void) n;
+  cellmap_slot (ctx, (uint64_t) q * G->ncell + cc, 1);
+}
+
+static void visit_cut (Grid * G, uint32_t q, uint32_t cc,
+                       const uint32_t * elem, uint32_t n, void * ctx)
+{
+  CellMap * C = ctx;
+  double lo[3], h;
+  int known;
+  cell_box (G, q, cc, lo, &h);
+  double f = hm_vof_box (G->M, lo, h, elem, n, &known);
+  size_t j = cellmap_slot (C, (uint64_t) q * G->ncell + cc, 1);
+  if (known)
+    C->f[j] = f, C->st[j] = 1;
+}
+
+/* the component ids of a face vector */
+static void components (face_vector f, int * comp)
+{
+  comp[0] = f.x;
+#if D > 1
+  comp[1] = f.y;
+#endif
+#if D > 2
+  comp[2] = f.z;
+#endif
+}
+
+int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
+                     face_vector uf_prev, double dt_prev)
+{
+  if (M->dim != D - 1 || D < 2 || !(dt > 0))
+    return -2;
+  const HmTreeCache * TC = hm_tree_cache (M);
+  if (!TC || TC->outside)
+    return -2;
+  int second = dt_prev > 0, cu[3] = { 0, 0, 0 }, cp[3] = { 0, 0, 0 };
+  components (uf, cu);
+  ghosts_update_list (D, cu, 0);
+  if (second) {
+    components (uf_prev, cp);
+    ghosts_update_list (D, cp, 0);
+  }
+  BlockShape sh = tree_block_shape ();
+  Grid G;
+  grid_leaves (&G, M);
+
+  /*
+  .. Each point's displacement, from the velocities at its leaf (the point
+  .. cache's merge walk: no search). First order: x + dt u (x). Second
+  .. order: the midpoint rule with the velocity extrapolated to t + dt / 2,
+  .. u' = (1 + dt / 2 dt_prev) u - dt / 2 dt_prev u_prev, x' = x + dt / 2
+  .. u' (x), x + dt u' (x'). (Adams-Bashforth would need each point's own
+  .. velocity at its previous position: u_prev read where the point is now
+  .. is u for a steady flow, and that is first order.) A point on the box
+  .. moves along it; one that would leave it stops on it. None moves if one
+  .. would go HM_ADVECT_CFL of the cell it leaves or enters, or further.
+  */
+  double c1 = 1, c0 = 0;
+  if (second)
+    c1 = 1 + dt / (2 * dt_prev), c0 = - dt / (2 * dt_prev);
+  uint32_t end = hm_end (M, 0);
+  double (* dx)[3] = grow (NULL, end, sizeof (*dx));
+  int refused = 0;
+  hm_foreach (M, 0, v) {
+    uint32_t q = TC->leaf_of[v];
+    double x[3] = { 0, 0, 0 }, u[3] = { 0, 0, 0 };
+    for (int d = 0; d < D; d++)
+      x[d] = M->x[d][v];
+    velocity_at (&G, cu, cp, second, c1, c0, q, x, sh, u);
+    if (second) {
+      /* the midpoint, and its leaf: this one, or found */
+      double xm[3] = { 0, 0, 0 };
+      step (&G, x, 0.5 * dt, u, xm);
+      uint32_t qm = q;
+      for (int d = 0; d < D; d++)
+        if (xm[d] < G.lo[q][d] || xm[d] >= G.lo[q][d] + G.H[q])
+          qm = HM_NONE;
+      if (qm == HM_NONE && (qm = hm_tree_locate (M, xm)) == HM_NONE) {
+        refused = -2;
+        break;
+      }
+      velocity_at (&G, cu, cp, second, c1, c0, qm, xm, sh, u);
+    }
+    double xn[3] = { 0, 0, 0 }, l = 0;
+    step (&G, x, dt, u, xn);
+    for (int d = 0; d < D; d++) {
+      dx[v][d] = xn[d] - x[d];
+      l += dx[v][d] * dx[v][d];
+    }
+    double h = fmin (G.H[q] / G.m, hm_tree_cell_size (M, xn));
+    if (!(sqrt (l) < HM_ADVECT_CFL * h)) {
+      refused = -1;
+      break;
+    }
+  }
+  if (refused) {
+    free (dx);
+    grid_free (&G);
+    return refused;
+  }
+
+  /* the cells the interface may cut before the move */
+  CellMap old = { NULL, NULL, NULL, 0, 0 }, now = { NULL, NULL, NULL, 0, 0 };
+  grid_bin (&G);
+  grid_cells (&G, visit_candidate, &old);
+  grid_unbin (&G);
+
+  /* the move */
+  hm_foreach (M, 0, v)
+    for (int d = 0; d < D; d++)
+      M->x[d][v] += dx[v][d];
+  free (dx);
+  hm_touch (M);
+
+  /* the cells cut after it: exact */
+  grid_bin (&G);
+  grid_cells (&G, visit_cut, &now);
+  int m = G.m;
+  for (size_t j = 0; j < now.cap; j++)
+    if (now.key[j] && now.st[j] == 1) {
+      uint64_t k = now.key[j] - 1;
+      *cell_value (c, (uint32_t) (k / G.ncell), (uint32_t) (k % G.ncell), m,
+                   sh) = (Real) now.f[j];
+    }
+
+  /*
+  .. The cells not cut now that may have been, or are touched without a cut:
+  .. an old c of 0 or 1 is kept; else the exact fraction of a face shared
+  .. with a cut cell, which no element crosses; else the old c rounded.
+  .. Every other cell is left as it was.
+  */
+  uint32_t * buf = NULL, bcap = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    CellMap * S = pass ? &now : &old;
+    for (size_t j = 0; j < S->cap; j++) {
+      if (!S->key[j] || (pass && S->st[j] == 1))
+        continue;
+      uint64_t k = S->key[j] - 1;
+      if (!pass) {
+        size_t i = cellmap_slot (&now, k, 0);
+        if (i != SIZE_MAX)
+          continue;                    /* in now: the second pass */
+      }
+      uint32_t q = (uint32_t) (k / G.ncell), cc = (uint32_t) (k % G.ncell);
+      Real * cv = cell_value (c, q, cc, m, sh);
+      double o = *cv;
+      if (o <= 0 || o >= 1)
+        continue;
+      int st = -1;
+      for (int a = 0; a < D && st < 0; a++)
+        for (int s = 0; s < 2 && st < 0; s++) {
+          uint32_t qn, cn;
+          if (!neighbour (&G, q, cc, a, s, &qn, &cn))
+            continue;
+          size_t jn = cellmap_slot (&now, (uint64_t) qn * G.ncell + cn, 0);
+          if (jn != SIZE_MAX && now.st[jn] == 1)
+            st = state_across (&G, qn, cn, q, cc, a, s, &buf, &bcap);
+        }
+      *cv = (Real) (st >= 0 ? st : o > 0.5);
+    }
+  }
+  free (buf);
+  cellmap_free (&old);
+  cellmap_free (&now);
+  ghosts_mark_dirty (c);
+
+  /* the edges now longer than their cells */
+  int longer = 0;
+  hm_foreach (M, 1, e) {
+    double a[3] = { 0, 0, 0 }, b[3] = { 0, 0, 0 }, l = 0;
+    for (int d = 0; d < D; d++) {
+      a[d] = M->x[d][hm_vertex (M, 1, e, 0)];
+      b[d] = M->x[d][hm_vertex (M, 1, e, 1)];
+      l += (b[d] - a[d]) * (b[d] - a[d]);
+    }
+    longer += !(sqrt (l) < fmin (hm_tree_cell_size (M, a),
+                                 hm_tree_cell_size (M, b)));
+  }
+  grid_free (&G);
+  return longer;
 }

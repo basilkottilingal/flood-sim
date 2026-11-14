@@ -178,9 +178,6 @@
     /* changes with the points: added, removed, moved, renumbered, or the
        box changed; a cache of the points compares it */
     unsigned  generation;
-    /* changes with anything: the points, and simplices added or removed;
-       a cache of simplices compares it */
-    unsigned  stamp;
   #ifdef EULERIAN_LAGRANGIAN
     /* the size of the cell at x, an edge's bound: hm_set_cell_size () */
     double (* cell_size) (const double * x, void * ctx);
@@ -217,9 +214,9 @@
   .. A computation that couples the manifold with the grid (spreading forces
   .. from it, interpolating velocities to it, volume fractions) needs every
   .. edge shorter than the cells it lies in: then a simplex touches only the
-  .. cell its centroid is in and the cells next to it, and the 3^D cells
-  .. about a cell hold every simplex that touches it (hmesh-tree.h,
-  .. hm_tree_zn ()).
+  .. cell its centroid is in and the cells next to it, and a point moved by
+  .. less than half a cell stays within the cells about it
+  .. (manifold_advect (), hmesh-vof.h).
   ..
   .. Built with -DEULERIAN_LAGRANGIAN (library and program alike: they do not
   .. link otherwise), with a cell size given (hm_set_cell_size (); the tree's,

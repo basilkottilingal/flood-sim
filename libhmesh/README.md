@@ -119,7 +119,7 @@ top simplices alone.
 | `hm_clip (M, origin, size)`, `hm_tree_clip (M)` | the mesh cut to the box, which then holds |
 | `hm_domain_faces (M, k, s)`, `hm_half_on_domain (M, k, h)` | the faces of the box a simplex, or a boundary half's facet, lies on |
 | `hm_vof (M, c)` | the volume fraction of every leaf cell in the scalar `c` (`m = D - 1`) |
-| `hm_tree_sorted (M, k)`, `hm_tree_zn (M, k, zsimplex, nsimplex)` | the k-simplices sorted by their centroids' cells, and each leaf cell's run |
+| `manifold_advect (M, uf, c, dt, uf_prev, dt_prev)` | the points moved by a face velocity, `c` updated near the interface |
 | `hm_tree_locate (M, x)`, `hm_tree_cell_size (M, x)` | the leaf at a point, and its cell size |
 | `hm_from_function (M, f, lo, size, n)`, `hm_tree_from_function (M, f)` | the interface f = 0 of `f (x, y)` or `f (x, y, z)` |
 | `hm_set_cell_size`, `hm_edge_fits`, `hm_long_edges` | with `-DEULERIAN_LAGRANGIAN`: edges shorter than the cells |
@@ -266,38 +266,6 @@ Tested (`test_tree.c` with the flag, 1D-3D):
 
 Removing the check from `hm_add ()` is caught.
 
-## The simplices of a cell: zsimplex, nsimplex (hmesh-tree.h)
-
-`hm_tree_sorted (M, k)` sorts the k-simplices by the Morton key of their
-centroids, to the tree's finest cells, with the same radix sort as the
-points. It sorts again from the last order only when the mesh changed
-(`M->stamp`: points added, moved or removed, simplices added or removed).
-
-So the simplices whose centroid is in a cell, of any level, are one run of
-`order []`. `hm_tree_zn (M, k, zsimplex, nsimplex)` writes every leaf
-cell's run into two scalars, each by a binary search on the cell's key
-range:
-
-```c
-scalar zsimplex = scalar_new (), nsimplex = scalar_new ();
-hm_tree_zn (M, M->dim, zsimplex, nsimplex);
-const HmTreeSorted * S = hm_tree_sorted (M, M->dim);
-foreach ()
-  for (int a = zsimplex[]; a < zsimplex[] + nsimplex[]; a++)
-    ... S->order[a] ...
-```
-
-With the edges shorter than the cells, the runs of the 3^D cells about a
-cell hold every simplex that touches it. Read the runs at the cell or at
-neighbours of the same level: at a level jump, their ghosts are
-interpolated values, not runs. In float (`-DBAMR_SINGLE`) more than 2^24
-simplices are refused, as indices above that are not exact.
-
-Tested: points and edges of a curve, on a tree refined over half its
-domain; each simplex in exactly one run, its centroid in that cell; again
-after the points moved, after edges were removed, and after the tree was
-refined. Ranges made twice too wide are caught.
-
 ## Volume fractions (hmesh-vof.h)
 
 `hm_vof (M, c)` fills a libb-amr scalar with the fraction of each leaf cell
@@ -369,6 +337,81 @@ Tested (`tests/test_vof.c`, 2D and 3D, double and float):
 
 Three bugs made on purpose are caught: no `F_v` wrap, the corner rule of an
 edge inverted, and no spreading into full and empty cells.
+
+## Advection (manifold_advect, hmesh-vof.h)
+
+```c
+hm_tree_from_function (M, f);          /* or any mesh bound to the tree */
+hm_vof (M, c);                         /* once, to initialize c */
+...
+int r = manifold_advect (M, uf, c, dt, uf_prev, dt_prev);
+```
+
+The points are moved by the face velocity `uf`, and `c` is brought up to
+date from its old values. The return value is -1 if the step was refused
+(nothing changed), -2 if it cannot run, and otherwise the number of edges
+now longer than their cells, to remesh before the next step.
+
+**The velocity at a point.**
+- Each component is read from its faces: linear along its own axis, between
+  the cell centres along the others. This is multilinear, and exact for a
+  linear field.
+- It is read in the block of the point's leaf, ghosts updated first.
+- The leaf comes from the point cache: the radix-sorted points walked
+  together with the Morton-ordered leaves, with no search.
+- The block comes from the leaf's node, and the cell by `block_at ()`, with
+  no lookup in the level index (`memindex.h`, `nano-vdb.h`).
+
+**Time integration.**
+- First order (`dt_prev <= 0`): `x += dt u (x)`.
+- Second order: the midpoint rule, with the velocity extrapolated to
+  `t + dt/2`: `u' = (1 + dt/(2 dt_prev)) u - dt/(2 dt_prev) u_prev`, then
+  `x' = x + dt/2 u' (x)` and `x += dt u' (x')`.
+- Adams-Bashforth from the two fields would read `u_prev` where the point is
+  now, not where it was. For a steady flow that is `u` again, which is first
+  order.
+
+**Points on the box** move along it. A point that would leave the box stops
+on it.
+
+**CFL.** The step is refused if a point would move `HM_ADVECT_CFL` (0.5) or
+more of the cell it leaves or of the one it enters. Then the interface never
+crosses a cell in one step, and `c` changes only near it:
+
+| cells | new c |
+|---|---|
+| cut after the move | exact (F2V) |
+| cut before, or touched now without a cut, old c 0 or 1 | kept |
+| the same, old c in (0, 1) | the exact fraction of a face shared with a cut cell (0 or 1: no element crosses it); with no cut neighbour, old c rounded |
+| every other cell | neither read nor written |
+
+The face check makes the update right however the interface left a cell,
+including from both sides at once (a thread widening, a film). Rounding old
+c is right only when it left through one side.
+
+The cost is the interface's, not the grid's. `c` is written in place and its
+ghosts marked stale. If the tree adapted in between, `c` must have been
+prolonged with bulk cells kept at exactly 0 or 1.
+
+Tested (`tests/test_advect.c`, 2D and 3D, double and float):
+
+| case | result |
+|---|---|
+| one step of a translation, rotation and stretch | every point moved by `dt u (x)`, to 1e-16; c equal to `hm_vof ()` of the moved mesh |
+| 40 steps (6 in 3D) on a tree with level jumps | c equal to `hm_vof ()` after every step |
+| steady rotation, a quarter turn in 48 and 96 steps | order 1.01 first order, 2.00 second order |
+| a rotation speeding up (1 + t) | 1.01, 2.00 |
+| a thread in one cell column (c = 0.4), widened by 0.35 of a cell on both sides | the column 1, from its neighbours' faces |
+| a translation along the walls | the points on y = 0, 1 stay on them |
+| 0.6 of a cell in one step | refused: no point moved, c unchanged |
+| a far cell set to 0.25 | still 0.25: neither read nor written |
+| stretched until edges outgrow their cells | the count returned is the count |
+
+Three bugs made on purpose are caught:
+- no face check, rounding only: the thread's column comes out 0;
+- the cells the interface left not updated: c is off by 0.03 after one step;
+- the face interpolation shifted by half a cell: the points are off by
+  4e-5.
 
 ## In the tree (hmesh-tree.h)
 
