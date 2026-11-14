@@ -105,8 +105,17 @@
   ..                              size (hm_set_cell_size ())
   */
 
+  /*
+  .. hm_tree_from_function (M, f): the interface f = 0 (hmesh-implicit.h) in
+  .. the tree's domain, on a lattice of half its finest cell (2 m 2^depth a
+  .. side), so that every edge is shorter than the cells; then bound to the
+  .. tree (hm_tree_bind ()). f is evaluated (2 m 2^depth + 1)^D times. The
+  .. number of simplices added, or -1.
+  */
+
   #include "hmesh.h"
   #include "hmesh-morton.h"
+  #include "hmesh-implicit.h"
 
   typedef struct {
     unsigned   stamp;
@@ -144,6 +153,7 @@
   const HmTreeSorted * hm_tree_sorted (Hmesh * M, int k);
   long                hm_tree_zn (Hmesh * M, int k, scalar zsimplex,
                                 scalar nsimplex);
+  long                hm_tree_from_function (Hmesh * M, HmFunction f);
   uint32_t            hm_tree_locate (Hmesh * M, const double * x);
   double              hm_tree_cell_size (Hmesh * M, const double * x);
 

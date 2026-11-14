@@ -500,3 +500,18 @@ long hm_tree_zn (Hmesh * M, int k, scalar zsimplex, scalar nsimplex)
   zn_sorted = NULL, zn_mesh = NULL;
   return (long) S->n;
 }
+
+/* -------- the interface of a function, in the tree's domain -------- */
+
+long hm_tree_from_function (Hmesh * M, HmFunction f)
+{
+  if (!depth_ok ())
+    return -1;
+  double o[D], h;
+  tree_box (o, &h);
+  int n = 2 * tree_get_block_m () << tree_get_depth ();
+  long added = hm_from_function (M, f, o, h, n);
+  if (added < 0 || hm_tree_bind (M))
+    return -1;
+  return added;
+}

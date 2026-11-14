@@ -9,6 +9,7 @@
 #                  the cells
 #   test_clip.c    the mesh cut to a box (hm_clip ())
 #   test_vof.c     volume fractions from the manifold (hm_vof ()), 2D, 3D
+#   test_implicit.c  the interface f = 0 (hm_from_function ()), 2D, 3D
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
 # on the PATH).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -19,7 +20,7 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 src="$lib/hmesh.c $lib/../libutils/bits.c"
 csrc="$src $lib/hmesh-clip.c"
-tsrc="$csrc $lib/hmesh-morton.c $lib/hmesh-tree.c $lib/hmesh-vof.c $amr/tree.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
+tsrc="$csrc $lib/hmesh-morton.c $lib/hmesh-tree.c $lib/hmesh-vof.c $lib/hmesh-implicit.c $amr/tree.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
 warn="-Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Wno-float-conversion"
 flags="-D_GNU_SOURCE -std=gnu11 -I$lib -I$lib/.."
 san="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
@@ -59,6 +60,8 @@ for d in ${DIMS:-1 2 3}; do
   if [ "$d" != 1 ]; then
     run "vof, double, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
     run "vof, float, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
+    run "implicit, double, sanitizers" $d tests/test_implicit.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
+    run "implicit, float, EULERIAN_LAGRANGIAN" $d tests/test_implicit.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE -DEULERIAN_LAGRANGIAN
   fi
 done
 [ "$fails" = 0 ] && echo "all passed"

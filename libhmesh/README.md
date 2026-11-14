@@ -121,6 +121,7 @@ top simplices alone.
 | `hm_vof (M, c)` | the volume fraction of every leaf cell in the scalar `c` (`m = D - 1`) |
 | `hm_tree_sorted (M, k)`, `hm_tree_zn (M, k, zsimplex, nsimplex)` | the k-simplices sorted by their centroids' cells, and each leaf cell's run |
 | `hm_tree_locate (M, x)`, `hm_tree_cell_size (M, x)` | the leaf at a point, and its cell size |
+| `hm_from_function (M, f, lo, size, n)`, `hm_tree_from_function (M, f)` | the interface f = 0 of `f (x, y)` or `f (x, y, z)` |
 | `hm_set_cell_size`, `hm_edge_fits`, `hm_long_edges` | with `-DEULERIAN_LAGRANGIAN`: edges shorter than the cells |
 | `hm_vof_box`, `hm_vof_face`, `hm_vof_inside` | one cell's fraction, one face's, and the side of the closest element |
 
@@ -181,6 +182,57 @@ Every case also checks the invariants, orientations, Euler characteristic,
 isolated points and a dangling edge, and clipping twice. Two bugs made on
 purpose are caught: fans not from the lowest point (the cube's cut faces
 stop matching) and no orientation fix.
+
+## From a function: the interface f = 0 (hmesh-implicit.h)
+
+`hm_from_function (M, f, lo, size, n)` adds the interface `f = 0` to M,
+sampled on a lattice of n cells a side over the box. The function is
+`f (x, y)` in 2D and `f (x, y, z)` in 3D, with `f < 0` inside the phase and
+`f > 0` outside. `hm_tree_from_function (M, f)` does the same over the
+tree's domain, on a lattice of half its finest cell, then binds the mesh.
+
+```c
+double ball (double x, double y, double z)
+{ return sqrt (sq (x - 0.5) + sq (y - 0.5) + sq (z - 0.5)) - 0.3; }
+
+Hmesh * M = hmesh_new (2);
+hm_tree_from_function (M, ball);   /* then hm_vof (M, c), ... */
+```
+
+- **Marching simplices.** Each lattice cell is split along its main diagonal
+  the same way everywhere: two triangles in 2D, six Kuhn tetrahedra in 3D.
+  Neighbours split shared faces alike, so the interface is conforming, and
+  no case is ambiguous (marching squares and marching cubes have ambiguous
+  ones).
+- **One point per lattice edge** that changes sign (`f <= 0` counts as in),
+  shared by every simplex on that edge. It is the root of f along the edge,
+  by Illinois regula falsi to round-off. A root exactly at a node is that
+  node's point, and the flat simplices it would make are skipped.
+- **Orientation.** Normals point toward `f > 0`, out of the phase, as
+  `hm_vof ()` expects.
+- **Edges shorter than the cells.** An interface edge lies in one lattice
+  simplex, so it is at most `sqrt (2) h` in 2D and `sqrt (3) h` in 3D. With
+  `h` half the finest cell, the tree version keeps every edge shorter than
+  its cell (`-DEULERIAN_LAGRANGIAN`).
+- **Where the phase reaches the box**, the interface ends on its faces, as
+  after `hm_clip ()`.
+- **Limits.** Features smaller than `h` can be missed. f is evaluated
+  `(n + 1)^D` times, one layer of nodes at a time.
+
+Tested (`tests/test_implicit.c`, 2D and 3D):
+
+| case | result |
+|---|---|
+| every point | on f = 0 to 1e-12 |
+| circle; two circles; sphere; torus; two spheres | closed, Euler 0, 0, 2, 0, 4 |
+| every normal | along grad f |
+| enclosed area (circle), volume (sphere) | second order: 2.09, 2.00 |
+| a line, a plane through lattice nodes | no flat simplex, length or area exact (1e-13) |
+| a water surface reaching the box | every open half on its faces |
+| on a refined tree | longest edge 0.55 (2D), 0.86 (3D) of its cell; `hm_vof ()` total equals the enclosed volume to 1e-15 |
+
+Two bugs made on purpose are caught: no orientation fix, and points not
+shared between neighbouring simplices.
 
 ## Edges shorter than the cells (-DEULERIAN_LAGRANGIAN)
 
