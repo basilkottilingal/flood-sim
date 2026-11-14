@@ -117,6 +117,15 @@ int hm_tree_bind (Hmesh * M)
   return 0;
 }
 
+int hm_tree_clip (Hmesh * M)
+{
+  if (!depth_ok ())
+    return -1;
+  double o[HM_DIMENSION], h;
+  tree_box (o, &h);
+  return hm_clip (M, o, h);
+}
+
 static int same_box (const Hmesh * M)
 {
   double o[HM_DIMENSION], h;

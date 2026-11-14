@@ -507,6 +507,7 @@ int hm_field_new (Hmesh * M, int k, const char * name, int ncomp,
   }
   HmField * F = &M->field[f];
   F->level = k;
+  F->real = 0;
   F->ncomp = ncomp;
   F->esize = esize;
   F->name = name ? strdup (name) : NULL;
@@ -537,12 +538,18 @@ void hm_field_free (Hmesh * M, int f)
 
 int hm_scalar_new (Hmesh * M, int k, const char * name)
 {
-  return hm_field_new (M, k, name, 1, sizeof (HmReal));
+  int f = hm_field_new (M, k, name, 1, sizeof (HmReal));
+  if (f >= 0)
+    M->field[f].real = 1;
+  return f;
 }
 
 int hm_vector_new (Hmesh * M, int k, const char * name)
 {
-  return hm_field_new (M, k, name, HM_DIMENSION, sizeof (HmReal));
+  int f = hm_field_new (M, k, name, HM_DIMENSION, sizeof (HmReal));
+  if (f >= 0)
+    M->field[f].real = 1;
+  return f;
 }
 
 /* -------- geometry -------- */

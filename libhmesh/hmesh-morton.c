@@ -90,6 +90,79 @@ static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
   return 1;
 }
 
+/*
+.. Notes on the radix sort
+.. -----------------------
+..
+.. LSD (least significant digit first). Each pass is a counting sort on one
+.. digit: count the keys of each digit value, turn the counts into starting
+.. offsets (an exclusive prefix sum), then scatter every (key, id) pair to
+.. its offset. A counting sort is stable, so after the pass on digit d the
+.. keys are in order by digits 0 ... d, which is why the passes go from the
+.. lowest digit up and why the whole sort is stable (Knuth, 5.2.5). Its
+.. cost is the same whatever the input, (hi - lo) / RADIX_BITS passes of
+.. two reads and a write per key, with no comparison and no branch on the
+.. data: it does not get worse on adversarial input, and does not get
+.. better on sorted input either, which is what the descents check in
+.. hm_sort_keys () is for.
+..
+.. Why stable matters here, twice over:
+..   - the passes compose (above);
+..   - a sort on bits lo ... hi - 1 only (the tree's cells) keeps the
+..     order the points had within a cell: the last cache's, so that the
+..     next sort starts from an order nearly right.
+..
+.. The digit: 11 bits. The counts are 2^11 4 byte words, 8 KiB, which stay
+.. in L1 while the keys stream past; 64 bits take 6 passes (8 with 8 bit
+.. digits, 4 with 16 bit, whose 256 KiB of counts would not stay in L1).
+.. This is the choice of Herf's "Radix Tricks" for 32 bit floats (three
+.. passes of 11 bits). Measured here: about 4 to 5 ns a key a pass for 2^20
+.. keys, memory bound.
+..
+.. A pass is skipped when every key has the same digit (the count of the
+.. first key's digit is n): the high bits of keys in a domain mostly empty,
+.. or a sort to coarse cells. Terdiman ("Radix Sort Revisited") also checks
+.. for sorted input before sorting; here hm_sort_keys () does, and tries
+.. insertion for a few descents.
+..
+.. Two buffers, swapped each pass ("ping-pong"); after an odd number of
+.. passes the result is in the second, and is copied back. The histogram of
+.. every digit could be made in one read of the keys before the first pass
+.. (Terdiman, Herf), a further saving of up to a pass of reads; not done.
+..
+.. What else could be done:
+..   - MSD radix, recursing in each bucket, stops early where buckets get
+..     small and suits keys of many bits; it is not stable without care,
+..     and recursion costs where buckets are large.
+..   - On a GPU, or in parallel, the same LSD scheme with per-block
+..     histograms and a scan: Merrill and Grimshaw (2011), CUB's
+..     DeviceRadixSort.
+..   - For the leaves alone, the points could be counted into the leaves
+..     (one counting sort keyed by the leaf, nleaves buckets) instead of
+..     sorted along the whole curve; the curve order is kept as it also
+..     gives the order within a leaf and the duplicates.
+..
+.. References
+..   D. E. Knuth, The Art of Computer Programming, Vol. 3, Sorting and
+..     Searching, 2nd ed., Addison-Wesley, 1998, 5.2.5 (sorting by
+..     distribution).
+..   P. Terdiman, Radix Sort Revisited, 2000 (codercorner.com).
+..   M. Herf, Radix Tricks, 2001 (stereopsis.com/radix.html).
+..   D. Merrill, A. Grimshaw, High performance and scalable radix sorting,
+..     Parallel Processing Letters 21 (2), 2011.
+..   G. M. Morton, A computer oriented geodetic data base and a new
+..     technique in file sequencing, IBM, 1966: the curve.
+..   H. Sundar, R. S. Sampath, G. Biros, Bottom-up construction and 2:1
+..     balance refinement of linear octrees in parallel, SIAM J. Sci.
+..     Comput. 30 (5), 2008: an octree as its leaves' Morton keys, sorted.
+..   T. Karras, Maximizing parallelism in the construction of BVHs, octrees,
+..     and k-d trees, High Performance Graphics, 2012: the tree implicit in
+..     sorted keys (each node a common prefix), the "one point a leaf" tree
+..     of hmesh-tree.h.
+..   S. E. Anderson, Bit Twiddling Hacks (graphics.stanford.edu/~seander/
+..     bithacks.html): the interleaving by masks of spread () above.
+*/
+
 /* 11 bits a digit: 6 passes over 64 bit keys, the counts in L1 */
 #define RADIX_BITS 11
 #define RADIX      (1 << RADIX_BITS)

@@ -311,6 +311,60 @@ static void test_tree (void)
   tree_destroy ();
 }
 
+/* a mesh across the tree's domain, cut to it: its points on the domain's
+   faces in the leaves there */
+static void test_clip (void)
+{
+  int depth = HM_DIMENSION == 3 ? 4 : 6;
+  tree (depth, 4);
+  tree_shift_resize (X0[0], X0[1], X0[2], H0);
+  refine_half (depth - 1);
+  int m = HM_DIMENSION == 1 ? 1 : 2;
+  Hmesh * M = hmesh_new (m);
+  int n = 16;
+  double u[3], x[3];
+  if (m == 1) {
+    for (int i = 0; i <= n; i++) {
+      u[0] = -0.3 + 1.6*i/n;
+      point_at (x, u);
+      hm_vertex_add (M, x);
+    }
+    for (uint32_t i = 0; i < (uint32_t) n; i++)
+      hm_add (M, 1, (uint32_t []) { i, i + 1 });
+  }
+  else {
+    /* a square larger than the domain, rotated, at z = 0.4 */
+    for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++) {
+        double a = -0.4 + 1.8*i/n - 0.5, b = -0.4 + 1.8*j/n - 0.5;
+        u[0] = 0.5 + 0.9*a - 0.44*b, u[1] = 0.5 + 0.44*a + 0.9*b, u[2] = 0.4;
+        point_at (x, u);
+        hm_vertex_add (M, x);
+      }
+    uint32_t w = (uint32_t) n + 1;
+    for (uint32_t j = 0; j < (uint32_t) n; j++)
+      for (uint32_t i = 0; i < (uint32_t) n; i++) {
+        uint32_t a = j*w + i;
+        hm_add (M, 2, (uint32_t []) { a, a + 1, a + w + 1 });
+        hm_add (M, 2, (uint32_t []) { a, a + w + 1, a + w });
+      }
+  }
+  CHECK (hm_tree_clip (M) == 0, "clip to the tree");
+  uint32_t on = 0;
+  hm_foreach (M, 0, v)
+    on += hm_domain_faces (M, 0, v) != 0;
+  CHECK (on > 0, "clip: no point on the domain's faces");
+  check_cache (M, "clipped");
+  double area = 0;
+  hm_foreach (M, m, s)
+    area += hm_measure (M, m, s);
+  double want = m == 1 ? H0 : H0*H0;
+  CHECK (fabs (area - want) < 1e-11*want, "clip: measure %.15g, not %.15g",
+         area, want);
+  hmesh_free (M);
+  tree_destroy ();
+}
+
 static void test_too_deep (void)
 {
 #if HM_DIMENSION == 3
@@ -402,6 +456,7 @@ static void bench (void)
 int main (void)
 {
   test_tree ();
+  test_clip ();
   test_too_deep ();
   bench ();
   if (fails)

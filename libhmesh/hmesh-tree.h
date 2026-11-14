@@ -13,6 +13,10 @@
   .. must be at most HM_MORTON_BITS (52 in 1D, 32 in 2D, 21 in 3D: in 3D a
   .. depth of 17 with blocks of 16 cells).
   ..
+  .. hm_tree_clip (M): a mesh crossing the tree's domain cut to it
+  .. (hm_clip (), hmesh.h), which binds it as hm_tree_bind () does; -1 if
+  .. the tree is too deep.
+  ..
   .. hm_tree_cache (M): the cache, made again if the tree changed
   .. (tree_generation) or the points did (M->generation: added, removed,
   .. moved, renumbered; hm_touch () after writing hm_x ()); bound first if
@@ -72,6 +76,7 @@
   } HmTreeCache;
 
   int                 hm_tree_bind (Hmesh * M);
+  int                 hm_tree_clip (Hmesh * M);
   const HmTreeCache * hm_tree_cache (Hmesh * M);
   int                 hm_compact_morton (Hmesh * M, uint32_t ** remap);
 

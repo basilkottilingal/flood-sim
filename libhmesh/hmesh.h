@@ -159,6 +159,8 @@
   typedef struct {
     int      level;       /* -1: a free field id */
     int      ncomp;
+    int      real;        /* HmReal values (hm_scalar_new, hm_vector_new):
+                             interpolated where hm_clip () cuts an edge */
     size_t   esize;
     char   * name;
     void  ** data;        /* ncomp arrays of level's cap elements */
@@ -219,6 +221,59 @@
   int  hm_set_domain (Hmesh * M, const double * origin, double size);
   int  hm_vertex_move (Hmesh * M, uint32_t v, const double * x);
   void hm_touch (Hmesh * M);
+
+  /*
+  .. A manifold crossing the box (hmesh-clip.c)
+  .. ------------------------------------------
+  ..
+  .. hm_clip (M, origin, size): the mesh cut to the box, which then becomes
+  .. its domain (hm_set_domain ()). Build the mesh first with its points
+  .. anywhere (no domain, or after hm_set_domain () was never called), then
+  .. clip; for points that moved out, write them through hm_x () and clip
+  .. again. -1 if size is not positive.
+  ..
+  .. The box is cut by one plane at a time, x = x0, x = x0 + h0, y = y0, ...
+  .. (Sutherland and Hodgman's reentrant clipping, on the complex):
+  ..
+  ..   - a point within HM_CLIP_SNAP size of the plane is moved onto it;
+  ..     the others are in or out
+  ..   - an edge from in to out gets one new point, where it crosses: the
+  ..     edge is stored once, so every simplex on it shares the point and
+  ..     the cut mesh stays conforming
+  ..   - a maximal simplex (one of level m, or a lower one that is the face
+  ..     of none) with points in and out is replaced by the simplices of its
+  ..     part inside; one with none in goes; the faces nothing uses then go
+  ..     too (hm_remove_closure ())
+  ..   - the part inside is triangulated from its points of lowest id: a
+  ..     polygon by the fan from its lowest point, a polyhedron by the cone
+  ..     from its lowest point to the fans of its faces it is not on. A face
+  ..     two tetrahedra share is cut the same on both sides, as both choose
+  ..     by the same ids (Dompierre et al. 1999): no point added inside
+  ..   - each new simplex in the orientation of the one it comes from: the
+  ..     sign of the determinant of its points' barycentric coordinates in
+  ..     that simplex
+  ..
+  .. Fields: a new point's HmReal values are interpolated along its edge
+  .. (any other field takes the nearer end's), a new maximal simplex takes the
+  .. values of the one it comes from; the other new faces are zero.
+  ..
+  .. Afterwards the halves on the box are boundary halves, twin (h) = h, next
+  .. as ever; hm_half_on_domain () tells them from the manifold's own
+  .. boundary by the faces of the box their facet lies on:
+  ..
+  ..   hm_domain_faces (M, k, s)    the faces of the box every point of s is
+  ..                                on: bit 2 d the lower face along d, bit
+  ..                                2 d + 1 the upper; 0 without a box
+  ..   hm_half_on_domain (M, k, h)  hm_domain_faces () of h's facet if h is
+  ..                                a boundary half, else 0
+  ..
+  .. The points are on the faces exactly (the coordinate is the plane's), so
+  .. these are exact.
+  */
+  #define HM_CLIP_SNAP 1e-10
+  int hm_clip (Hmesh * M, const double * origin, double size);
+  int hm_domain_faces (const Hmesh * M, int k, uint32_t s);
+  int hm_half_on_domain (const Hmesh * M, int k, uint32_t h);
 
   /*
   .. hm_compact (M, remap): ids 0 ... n - 1 on every level, in the order of

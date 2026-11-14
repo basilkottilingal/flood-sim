@@ -116,14 +116,71 @@ top simplices alone.
 | `hm_set_domain (M, origin, size)` | the box `[origin, origin + size]^D` (closed) the points must stay in; -1 if a point is outside already |
 | `hm_vertex_move (M, v, x)`, `hm_touch (M)` | a checked move; after writing `hm_x ()` directly |
 | `hm_compact_order (M, order, remap)` | the compaction, each level in a given order |
+| `hm_clip (M, origin, size)`, `hm_tree_clip (M)` | the mesh cut to the box, which then holds |
+| `hm_domain_faces (M, k, s)`, `hm_half_on_domain (M, k, h)` | the faces of the box a simplex, or a boundary half's facet, lies on |
 
 The library and the program must agree on `D`: a program built with
 another dimension does not link (`hmesh_dimension_is_D`).
 
+## Crossing the box (hmesh-clip.c)
+
+A manifold built larger than the domain is cut to it:
+`hm_clip (M, origin, size)`, or `hm_tree_clip (M)` for the tree's domain.
+Build the mesh with its points anywhere, clip, and the box then holds
+(`hm_set_domain ()`). For points that moved out, write them through `hm_x ()`
+and clip again.
+
+- **One plane at a time** (Sutherland and Hodgman, on the complex). A point
+  within `HM_CLIP_SNAP` (1e-10) of the box's size from the plane is moved
+  onto it, so no sliver is made. The others are in or out.
+- **One new point an edge.** Each edge that crosses gets one point where it
+  crosses. The edge is stored once, so every simplex on it shares the point
+  and the cut mesh stays conforming.
+- **The part inside of each simplex across the plane**, maximal ones only
+  (the top level, and lower ones that are the face of nothing):
+  - a segment: its end out moved to the cut;
+  - a triangle or quadrangle: the fan from its lowest point;
+  - a polyhedron: the cone from its lowest point to the fans of the faces it
+    is not on.
+
+  Both sides of a shared face choose by the same global ids, so they agree
+  (Dompierre et al.). No point is added inside.
+- **What lies out goes**, with the faces nothing uses then.
+- **Orientation kept.** Each new simplex has the sign of the determinant of
+  its points' barycentric coordinates in the simplex it comes from.
+- **Fields.** A new point's HmReal values are interpolated along its edge
+  (exact for linear fields). A new maximal simplex takes the values of the
+  one it comes from. Other new faces are zero.
+
+**Twin and next on the box.** A half whose facet is on the box is a
+boundary half: `twin (h) == h`, and `next` is as ever. `hm_half_on_domain
+(M, k, h)` tells it from the manifold's own boundary by the faces of the box
+its facet lies on, as a mask: bit `2 d` the lower face along `d`, `2 d + 1`
+the upper. `hm_domain_faces (M, k, s)` gives the same for any simplex. The
+cut points lie on the faces exactly (the coordinate is the plane's), so
+these tests are exact.
+
+Tested (`tests/test_clip.c`), each against what the cut must give exactly:
+
+| case | result |
+|---|---|
+| a straight curve | its length inside, its two ends on x = 0 and x = 1 |
+| a circle crossing every side of the square | four arcs, eight ends on the box, Euler 4 |
+| a rotated triangulation covering the square | area 1, boundary all on the box, of length 4 |
+| one half out | area 1/4, boundary 1 on the box and 1 off |
+| a tilted plane in the cube, cut by its sides and by z = 0, 1 | area 2/3 sqrt (13/4) |
+| a rotated cube of tetrahedra covering the cube | volume 1, boundary 6, on all six faces |
+
+Every case also checks the invariants, orientations, Euler characteristic,
+`d d = 0`, the twins' signs, and the fields. The suite also covers snapping,
+isolated points and a dangling edge, and clipping twice. Two bugs made on
+purpose are caught: fans not from the lowest point (the cube's cut faces
+stop matching) and no orientation fix.
+
 ## In the tree (hmesh-tree.h)
 
-The manifold inside libb-amr's tree, which must hold it whole for now:
-crossing the domain's boundary is left for later.
+The manifold inside libb-amr's tree, after `hm_tree_clip ()` if it
+crossed the domain's boundary.
 
 - **The box.** `hm_tree_bind (M)` takes the tree's domain from
   `tree_get_origin ()` and `tree_get_size ()` (libb-amr unchanged), and from
@@ -223,8 +280,12 @@ else in memory.
 
 ## Next
 
-- **The domain's boundary.** A manifold crossing it: simplices cut on the
-  boundary, the cut facets boundary halves tagged with their face.
+- **Periodic boxes.** The boundary halves on a face linked to those on the
+  opposite one. Their facets are distinct simplices, a translation apart,
+  so the twin cycle, which joins the halves of one facet, would need an
+  identification of the two.
+- **Clipping as points move.** Today the whole mesh is clipped again. Only
+  the simplices near the box need to be.
 - **Ranks.** Each point's rank under MPI, from its leaf's `pid`.
 - **Order.** The halves' vertices, twins and facets could be interleaved
   into one record, if cycle walks are where the time goes.
