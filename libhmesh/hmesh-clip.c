@@ -408,12 +408,18 @@ int hm_clip (Hmesh * M, const double * origin, double size)
   if (!(size > 0.))
     return -1;
   M->domain = 0;                       /* the new points are on it */
+#ifdef EULERIAN_LAGRANGIAN
+  M->no_edge_check = 1;                /* every piece made: hm_long_edges () */
+#endif
   double snap = HM_CLIP_SNAP * size;
   for (int d = 0; d < HM_DIMENSION; d++) {
     clip_plane (M, d, 0, origin[d], snap);
     clip_plane (M, d, 1, origin[d] + size, snap);
   }
-  M->generation++;
+#ifdef EULERIAN_LAGRANGIAN
+  M->no_edge_check = 0;
+#endif
+  M->generation++, M->stamp++;
   return hm_set_domain (M, origin, size);
 }
 

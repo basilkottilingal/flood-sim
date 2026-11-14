@@ -8,7 +8,10 @@
 #include <string.h>
 
 #include "tree.h"
+#include "block-ghosts.h"
 #include "hmesh-tree.h"
+
+#define D HM_DIMENSION
 
 static void * grow (void * p, size_t n, size_t e)
 {
@@ -27,6 +30,9 @@ static void cache_free (void * p)
     return;
   free (C->key), free (C->order), free (C->leaf_of);
   free (C->start), free (C->stop);
+  for (int k = 0; k < HM_LEVELS; k++)
+    free (C->sorted[k].key), free (C->sorted[k].order);
+  free (C->table_key), free (C->table_level);
   free (C);
 }
 
@@ -42,6 +48,10 @@ static HmTreeCache * cache_of (Hmesh * M)
   }
   return M->ext;
 }
+
+#ifdef EULERIAN_LAGRANGIAN
+static double tree_cell_size (const double * x, void * ctx);
+#endif
 
 /* the bits an axis the tree's finest cells need, if at most the keys', or
    0 */
@@ -114,6 +124,9 @@ int hm_tree_bind (Hmesh * M)
     fprintf (stderr, "hmesh: a point is outside the tree's domain\n");
     return -1;
   }
+#ifdef EULERIAN_LAGRANGIAN
+  hm_set_cell_size (M, tree_cell_size, M);
+#endif
   return 0;
 }
 
@@ -123,7 +136,12 @@ int hm_tree_clip (Hmesh * M)
     return -1;
   double o[HM_DIMENSION], h;
   tree_box (o, &h);
-  return hm_clip (M, o, h);
+  if (hm_clip (M, o, h))
+    return -1;
+#ifdef EULERIAN_LAGRANGIAN
+  hm_set_cell_size (M, tree_cell_size, M);
+#endif
+  return 0;
 }
 
 static int same_box (const Hmesh * M)
@@ -290,4 +308,195 @@ int hm_compact_morton (Hmesh * M, uint32_t ** remap)
       C->leaf_of[a] = q;
   C->mesh_generation = M->generation;
   return 0;
+}
+
+/* -------- points in the tree -------- */
+
+/* the leaves' keys and levels, made again when the tree changed */
+static void table_update (HmTreeCache * C)
+{
+  if (C->table_valid && C->table_generation == tree_generation)
+    return;
+  const TreeCaches * tc = tree_caches ();
+  uint32_t nl = (uint32_t) tc->nleaves;
+  if (nl > C->table_cap || !C->table_cap) {
+    C->table_cap = nl > 2 * C->table_cap ? nl : 2 * C->table_cap;
+    C->table_key = grow (C->table_key, C->table_cap, sizeof (uint64_t));
+    C->table_level = grow (C->table_level, C->table_cap, sizeof (int));
+  }
+  for (uint32_t q = 0; q < nl; q++) {
+    Index p = tc->leaves[q].p;
+    int ijk[3] = { p.i, 0, 0 };
+#if D > 1
+    ijk[1] = p.j;
+#endif
+#if D > 2
+    ijk[2] = p.k;
+#endif
+    C->table_key[q] = hm_morton_cell (ijk, p.level);
+    C->table_level[q] = p.level;
+  }
+  C->table_n = nl;
+  C->table_generation = tree_generation;
+  C->table_valid = 1;
+}
+
+uint32_t hm_tree_locate (Hmesh * M, const double * x)
+{
+  double o[D], h;
+  tree_box (o, &h);
+  for (int d = 0; d < D; d++)
+    if (!(x[d] >= o[d] && x[d] <= o[d] + h))
+      return HM_NONE;
+  HmTreeCache * C = cache_of (M);
+  table_update (C);
+  if (!C->table_n)
+    return HM_NONE;
+  uint64_t k = hm_morton_key (x, o, h);
+  uint32_t a = 0, b = C->table_n;        /* the last leaf whose key <= k */
+  while (b - a > 1) {
+    uint32_t c = (a + b) / 2;
+    if (C->table_key[c] <= k)
+      a = c;
+    else
+      b = c;
+  }
+  int shift = D * (HM_MORTON_BITS - C->table_level[a]);
+  if (C->table_key[a] > k ||
+      (shift < 64 && k >> shift != C->table_key[a] >> shift))
+    return HM_NONE;                      /* a pruned part */
+  return a;
+}
+
+double hm_tree_cell_size (Hmesh * M, const double * x)
+{
+  uint32_t q = hm_tree_locate (M, x);
+  if (q == HM_NONE)
+    return 0.;
+  HmTreeCache * C = M->ext;
+  return tree_get_size () / ((double) tree_get_block_m () *
+                             (double) (1L << C->table_level[q]));
+}
+
+#ifdef EULERIAN_LAGRANGIAN
+static double tree_cell_size (const double * x, void * ctx)
+{
+  return hm_tree_cell_size (ctx, x);
+}
+#endif
+
+/* -------- the simplices of a level by cell -------- */
+
+/* the k-simplices sorted by their centroids' keys, to the finest cells,
+   from the last order: those still in use in it, then the others */
+static void sort_level (Hmesh * M, HmTreeSorted * S, int k, int bits)
+{
+  uint32_t n = hm_count (M, k), end = hm_end (M, k), a = 0;
+  if (n > S->cap || !S->cap) {
+    S->cap = n > 2 * S->cap ? n : 2 * S->cap;
+    S->key = grow (S->key, S->cap, sizeof (uint64_t));
+    S->order = grow (S->order, S->cap, sizeof (uint32_t));
+  }
+  uint8_t * mark = calloc (end ? end : 1, 1);
+  uint64_t * byid = grow (NULL, end, sizeof (uint64_t));
+  for (uint32_t b = 0; S->valid && b < S->n; b++) {
+    uint32_t s = S->order[b];
+    if (s < end && hm_alive (M, k, s) && !mark[s]) {
+      mark[s] = 1;
+      S->order[a++] = s;
+    }
+  }
+  hm_foreach (M, k, s) {
+    if (!mark[s])
+      S->order[a++] = s;
+    double c[D];
+    hm_centroid (M, k, s, c);
+    byid[s] = hm_morton_key (c, M->origin, M->size);
+  }
+  for (a = 0; a < n; a++)
+    S->key[a] = byid[S->order[a]];
+  free (byid);
+  free (mark);
+  hm_sort_keys (S->key, S->order, n, D * (HM_MORTON_BITS - bits),
+                D * HM_MORTON_BITS);
+  S->n = n;
+  S->cell_bits = bits;
+  S->stamp = M->stamp;
+  S->valid = 1;
+}
+
+const HmTreeSorted * hm_tree_sorted (Hmesh * M, int k)
+{
+  if (k < 0 || k > M->dim)
+    return NULL;
+  HmTreeCache * C = cache_of (M);
+  int bits = depth_ok ();
+  if (!bits)
+    return NULL;
+  if (!same_box (M) && hm_tree_bind (M))
+    return NULL;
+  HmTreeSorted * S = &C->sorted[k];
+  if (!S->valid || S->stamp != M->stamp || S->cell_bits != bits)
+    sort_level (M, S, k, bits);
+  return S;
+}
+
+/* the run of the cell centred at p, of side delta, in S */
+static const HmTreeSorted * zn_sorted;
+static const Hmesh * zn_mesh;
+
+static void zn_run (double x, double y, double z, double delta, Real * first,
+                    Real * count)
+{
+  const HmTreeSorted * S = zn_sorted;
+  const Hmesh * M = zn_mesh;
+  double p[3] = { x, y, z };
+  uint64_t k = hm_morton_key (p, M->origin, M->size);
+  int cbits = (int) lround (log2 (M->size / delta));
+  int shift = D * (HM_MORTON_BITS - cbits), ss = D * (HM_MORTON_BITS -
+                                                      S->cell_bits);
+  /* the keys of the cell, at the sort's resolution: [lo, hi) */
+  uint64_t lo = shift >= 64 ? 0 : (k >> shift) << shift >> ss;
+  uint64_t hi = shift >= 64 ? UINT64_MAX : lo + ((uint64_t) 1 << (shift - ss));
+  uint32_t b[2];
+  for (int e = 0; e < 2; e++) {
+    uint64_t t = e ? hi : lo;
+    uint32_t l = 0, r = S->n;          /* the first key >> ss >= t */
+    while (l < r) {
+      uint32_t c = (l + r) / 2;
+      if (S->key[c] >> ss < t)
+        l = c + 1;
+      else
+        r = c;
+    }
+    b[e] = l;
+  }
+  if (shift >= 64)
+    b[1] = S->n;
+  *first = (Real) b[0];
+  *count = (Real) (b[1] - b[0]);
+}
+
+long hm_tree_zn (Hmesh * M, int k, scalar zsimplex, scalar nsimplex)
+{
+  const HmTreeSorted * S = hm_tree_sorted (M, k);
+  if (!S)
+    return -1;
+  if (sizeof (Real) < sizeof (double) && S->n > (1u << 24))
+    return -1;                         /* not exact in a float */
+  zn_sorted = S, zn_mesh = M;
+  foreach () {
+    Real first, count;
+#if D == 1
+    zn_run (x, 0., 0., Delta, &first, &count);
+#elif D == 2
+    zn_run (x, y, 0., Delta, &first, &count);
+#else
+    zn_run (x, y, z, Delta, &first, &count);
+#endif
+    zsimplex[] = first;
+    nsimplex[] = count;
+  }
+  zn_sorted = NULL, zn_mesh = NULL;
+  return (long) S->n;
 }

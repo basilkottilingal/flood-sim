@@ -119,6 +119,9 @@ top simplices alone.
 | `hm_clip (M, origin, size)`, `hm_tree_clip (M)` | the mesh cut to the box, which then holds |
 | `hm_domain_faces (M, k, s)`, `hm_half_on_domain (M, k, h)` | the faces of the box a simplex, or a boundary half's facet, lies on |
 | `hm_vof (M, c)` | the volume fraction of every leaf cell in the scalar `c` (`m = D - 1`) |
+| `hm_tree_sorted (M, k)`, `hm_tree_zn (M, k, zsimplex, nsimplex)` | the k-simplices sorted by their centroids' cells, and each leaf cell's run |
+| `hm_tree_locate (M, x)`, `hm_tree_cell_size (M, x)` | the leaf at a point, and its cell size |
+| `hm_set_cell_size`, `hm_edge_fits`, `hm_long_edges` | with `-DEULERIAN_LAGRANGIAN`: edges shorter than the cells |
 | `hm_vof_box`, `hm_vof_face`, `hm_vof_inside` | one cell's fraction, one face's, and the side of the closest element |
 
 The library and the program must agree on `D`: a program built with
@@ -178,6 +181,70 @@ Every case also checks the invariants, orientations, Euler characteristic,
 isolated points and a dangling edge, and clipping twice. Two bugs made on
 purpose are caught: fans not from the lowest point (the cube's cut faces
 stop matching) and no orientation fix.
+
+## Edges shorter than the cells (-DEULERIAN_LAGRANGIAN)
+
+A computation that couples the manifold with the grid needs every edge
+shorter than the cells it lies in. Then a simplex touches only the cell its
+centroid is in and the cells next to it.
+
+Build with `-DEULERIAN_LAGRANGIAN`, the library and the program alike: they
+do not link otherwise, as the flag changes `Hmesh`. With a cell size given
+(`hm_set_cell_size ()`, or the tree's leaf cell at a point, set by
+`hm_tree_bind ()` and `hm_tree_clip ()`), an edge from a to b fits if
+`|b - a| < HM_EDGE_FACTOR min (cell (a), cell (b))`. `HM_EDGE_FACTOR` is 1
+unless defined.
+
+| | with the flag and a cell size |
+|---|---|
+| `hm_add ()` | refuses a simplex with an edge that does not fit, before it makes anything |
+| `hm_vertex_move ()` | refuses a move that stretches an edge at the point |
+| `hm_check ()` | fails on an edge that does not fit |
+| `hm_long_edges ()` | counts them: after a refinement shrinks the cells, or a clip |
+| `hm_clip ()` | makes every piece whatever its edges (count them after) |
+
+Tested (`test_tree.c` with the flag, 1D-3D):
+- 0.6 of a cell fits and 1.2 does not;
+- a triangle with one long edge is refused, with nothing made;
+- an edge across a level jump, 1.5 of the fine cell, is refused;
+- a move to 1.2 of a cell is refused and the point stays;
+- a refinement leaves edges too long, which `hm_long_edges ()` counts and
+  `hm_check ()` reports;
+- a clip keeps its long piece.
+
+Removing the check from `hm_add ()` is caught.
+
+## The simplices of a cell: zsimplex, nsimplex (hmesh-tree.h)
+
+`hm_tree_sorted (M, k)` sorts the k-simplices by the Morton key of their
+centroids, to the tree's finest cells, with the same radix sort as the
+points. It sorts again from the last order only when the mesh changed
+(`M->stamp`: points added, moved or removed, simplices added or removed).
+
+So the simplices whose centroid is in a cell, of any level, are one run of
+`order []`. `hm_tree_zn (M, k, zsimplex, nsimplex)` writes every leaf
+cell's run into two scalars, each by a binary search on the cell's key
+range:
+
+```c
+scalar zsimplex = scalar_new (), nsimplex = scalar_new ();
+hm_tree_zn (M, M->dim, zsimplex, nsimplex);
+const HmTreeSorted * S = hm_tree_sorted (M, M->dim);
+foreach ()
+  for (int a = zsimplex[]; a < zsimplex[] + nsimplex[]; a++)
+    ... S->order[a] ...
+```
+
+With the edges shorter than the cells, the runs of the 3^D cells about a
+cell hold every simplex that touches it. Read the runs at the cell or at
+neighbours of the same level: at a level jump, their ghosts are
+interpolated values, not runs. In float (`-DBAMR_SINGLE`) more than 2^24
+simplices are refused, as indices above that are not exact.
+
+Tested: points and edges of a curve, on a tree refined over half its
+domain; each simplex in exactly one run, its centroid in that cell; again
+after the points moved, after edges were removed, and after the tree was
+refined. Ranges made twice too wide are caught.
 
 ## Volume fractions (hmesh-vof.h)
 

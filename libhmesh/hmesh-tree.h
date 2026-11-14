@@ -58,8 +58,63 @@
   .. its fields, read in memory order. -1 if the cache cannot be made.
   */
 
+  /*
+  .. The simplices of a level by cell: zsimplex and nsimplex
+  .. -------------------------------------------------------
+  ..
+  .. hm_tree_sorted (M, k): the k-simplices sorted along the curve by the
+  .. key of their centroid, to the tree's finest cells (the same sort as the
+  .. points'), so that the simplices whose centroid is in a cell, of any
+  .. level, are a run of order []:
+  ..
+  ..   order[a], key[a]   a < n: the simplex, its centroid's key
+  ..
+  .. made again only when the mesh changed (M->stamp: points added, moved,
+  .. removed, simplices added or removed) or the tree's depth did, from the
+  .. last order (sorted already if no centroid changed cells).
+  ..
+  .. hm_tree_zn (M, k, zsimplex, nsimplex): for every leaf cell, zsimplex[]
+  .. the first index of its run in order [] and nsimplex[] its length:
+  ..
+  ..   const HmTreeSorted * S = hm_tree_sorted (M, k);
+  ..   foreach ()
+  ..     for (int a = zsimplex[]; a < zsimplex[] + nsimplex[]; a++)
+  ..       ... S->order[a] ...
+  ..
+  .. Each run by a binary search on the cell's key range (its centre's key,
+  .. the bits below the cell cleared). Returns the number of k-simplices, or
+  .. -1 (k out of range, the tree too deep, a point outside the domain, or
+  .. more simplices than a float holds exactly, 2^24, with -DBAMR_SINGLE).
+  ..
+  .. With every edge shorter than the cells (-DEULERIAN_LAGRANGIAN, hmesh.h),
+  .. a simplex touches only the cell its centroid is in and the cells next
+  .. to it: the runs of the 3^D cells about a cell hold every simplex that
+  .. touches it. Read z and n at the cell itself or at neighbours of the same
+  .. level: at a level jump, their ghost values are interpolated, not runs.
+  .. (Inside foreach (), z is the cell's centre: do not name a scalar z.)
+  ..
+  .. Points in the tree
+  .. ------------------
+  ..
+  ..   hm_tree_locate (M, x)      the index in tree_caches ()->leaves of the
+  ..                              leaf x is in, HM_NONE outside the domain or
+  ..                              in a pruned part
+  ..   hm_tree_cell_size (M, x)   the size of the leaf cell x is in, 0 if
+  ..                              none: with -DEULERIAN_LAGRANGIAN,
+  ..                              hm_tree_bind () makes it the mesh's cell
+  ..                              size (hm_set_cell_size ())
+  */
+
   #include "hmesh.h"
   #include "hmesh-morton.h"
+
+  typedef struct {
+    unsigned   stamp;
+    int        valid, cell_bits;
+    uint32_t   n, cap;
+    uint64_t * key;
+    uint32_t * order;
+  } HmTreeSorted;
 
   typedef struct {
     unsigned   tree_generation, mesh_generation;
@@ -73,12 +128,24 @@
     uint32_t   nleaves, nleaves_cap;
     uint32_t   outside, duplicates;
     int        cell_bits;       /* the sort's bits an axis */
+    HmTreeSorted sorted[HM_LEVELS];   /* hm_tree_sorted () */
+    /* the leaves' keys and levels, for hm_tree_locate () */
+    unsigned   table_generation;
+    int        table_valid;
+    uint32_t   table_n, table_cap;
+    uint64_t * table_key;
+    int      * table_level;
   } HmTreeCache;
 
   int                 hm_tree_bind (Hmesh * M);
   int                 hm_tree_clip (Hmesh * M);
   const HmTreeCache * hm_tree_cache (Hmesh * M);
   int                 hm_compact_morton (Hmesh * M, uint32_t ** remap);
+  const HmTreeSorted * hm_tree_sorted (Hmesh * M, int k);
+  long                hm_tree_zn (Hmesh * M, int k, scalar zsimplex,
+                                scalar nsimplex);
+  uint32_t            hm_tree_locate (Hmesh * M, const double * x);
+  double              hm_tree_cell_size (Hmesh * M, const double * x);
 
   /* the points v of leaf q */
   #define hm_foreach_leaf_point(C, q, v)                                \

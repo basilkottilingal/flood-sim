@@ -178,6 +178,15 @@
     /* changes with the points: added, removed, moved, renumbered, or the
        box changed; a cache of the points compares it */
     unsigned  generation;
+    /* changes with anything: the points, and simplices added or removed;
+       a cache of simplices compares it */
+    unsigned  stamp;
+  #ifdef EULERIAN_LAGRANGIAN
+    /* the size of the cell at x, an edge's bound: hm_set_cell_size () */
+    double (* cell_size) (const double * x, void * ctx);
+    void    * cell_ctx;
+    int       no_edge_check;           /* in hm_clip () */
+  #endif
     /* a cache another layer keeps with the mesh (hmesh-tree.h), freed with
        it by ext_free () */
     void    * ext;
@@ -190,6 +199,51 @@
   extern const int HM_TAG (HM_DIMENSION);
   static const int * const hmesh_dimension_check __attribute__ ((used)) =
     &HM_TAG (HM_DIMENSION);
+
+  /* and on EULERIAN_LAGRANGIAN, which changes Hmesh */
+  #ifdef EULERIAN_LAGRANGIAN
+    #define HM_EL_TAG hmesh_is_eulerian_lagrangian
+  #else
+    #define HM_EL_TAG hmesh_is_not_eulerian_lagrangian
+  #endif
+  extern const int HM_EL_TAG;
+  static const int * const hmesh_el_check __attribute__ ((used)) =
+    &HM_EL_TAG;
+
+  /*
+  .. Eulerian-Lagrangian: edges shorter than the cells (-DEULERIAN_LAGRANGIAN)
+  .. -------------------------------------------------------------------------
+  ..
+  .. A computation that couples the manifold with the grid (spreading forces
+  .. from it, interpolating velocities to it, volume fractions) needs every
+  .. edge shorter than the cells it lies in: then a simplex touches only the
+  .. cell its centroid is in and the cells next to it, and the 3^D cells
+  .. about a cell hold every simplex that touches it (hmesh-tree.h,
+  .. hm_tree_zn ()).
+  ..
+  .. Built with -DEULERIAN_LAGRANGIAN (library and program alike: they do not
+  .. link otherwise), with a cell size given (hm_set_cell_size (); the tree's,
+  .. by hm_tree_bind ()), an edge from a to b fits if
+  ..
+  ..   |b - a| < HM_EDGE_FACTOR min (cell_size (a), cell_size (b))
+  ..
+  .. HM_EDGE_FACTOR 1 unless defined. Then
+  ..   hm_add ()          refuses (HM_NONE) a simplex with an edge that does
+  ..                      not fit, before it makes anything
+  ..   hm_vertex_move ()  refuses (-1) a move that stretches an edge at the
+  ..                      point beyond its bound
+  ..   hm_check ()        fails on an edge that does not fit
+  ..   hm_long_edges ()   counts the edges that do not fit: after the cells
+  ..                      changed (a refinement shrinks them), or a clip
+  ..   hm_clip ()         is not refused: its pieces are made whatever their
+  ..                      edges (count them after)
+  .. Without a cell size, nothing is checked.
+  */
+  #ifdef EULERIAN_LAGRANGIAN
+    #ifndef HM_EDGE_FACTOR
+      #define HM_EDGE_FACTOR 1.
+    #endif
+  #endif
 
   /* the mesh */
   Hmesh * hmesh_new (int dim);       /* NULL unless 0 <= dim <= D */
@@ -270,6 +324,15 @@
   .. The points are on the faces exactly (the coordinate is the plane's), so
   .. these are exact.
   */
+  #ifdef EULERIAN_LAGRANGIAN
+    void     hm_set_cell_size (Hmesh * M,
+                               double (* f) (const double * x, void * ctx),
+                               void * ctx);
+    int      hm_edge_fits (const Hmesh * M, const double * a,
+                           const double * b);
+    uint32_t hm_long_edges (const Hmesh * M);
+  #endif
+
   #define HM_CLIP_SNAP 1e-10
   int hm_clip (Hmesh * M, const double * origin, double size);
   int hm_domain_faces (const Hmesh * M, int k, uint32_t s);

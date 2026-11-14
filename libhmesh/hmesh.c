@@ -9,8 +9,60 @@
 #include "hmesh.h"
 
 const int HM_TAG (HM_DIMENSION) = HM_DIMENSION;
+const int HM_EL_TAG = 1;
 
 Hmesh * hmesh = NULL;
+
+/* -------- Eulerian-Lagrangian: edges shorter than the cells -------- */
+
+#ifdef EULERIAN_LAGRANGIAN
+void hm_set_cell_size (Hmesh * M, double (* f) (const double * x, void * ctx),
+                       void * ctx)
+{
+  M->cell_size = f;
+  M->cell_ctx = ctx;
+}
+
+int hm_edge_fits (const Hmesh * M, const double * a, const double * b)
+{
+  if (!M->cell_size || M->no_edge_check)
+    return 1;
+  double l = 0;
+  for (int d = 0; d < HM_DIMENSION; d++)
+    l += (b[d] - a[d])*(b[d] - a[d]);
+  double h = fmin (M->cell_size (a, M->cell_ctx),
+                   M->cell_size (b, M->cell_ctx));
+  return sqrt (l) < HM_EDGE_FACTOR * h;
+}
+
+static void point_of (const Hmesh * M, uint32_t v, double * x)
+{
+  for (int d = 0; d < HM_DIMENSION; d++)
+    x[d] = M->x[d][v];
+}
+
+/* every edge of the simplex v [0 ... k] fits */
+static int edges_fit (const Hmesh * M, int k, const uint32_t * v)
+{
+  for (int i = 0; i <= k; i++)
+    for (int j = 0; j < i; j++) {
+      double a[HM_DIMENSION], b[HM_DIMENSION];
+      point_of (M, v[i], a), point_of (M, v[j], b);
+      if (!hm_edge_fits (M, a, b))
+        return 0;
+    }
+  return 1;
+}
+
+uint32_t hm_long_edges (const Hmesh * M)
+{
+  uint32_t n = 0;
+  if (M->dim >= 1)
+    hm_foreach (M, 1, e)
+      n += !edges_fit (M, 1, &M->level[1].vert[2 * (size_t) e]);
+  return n;
+}
+#endif
 
 static void * xrealloc (void * p, size_t n)
 {
@@ -213,7 +265,7 @@ uint32_t hm_vertex_add (Hmesh * M, const double * x)
     M->x[d][s] = x[d];
   if (M->dim > 0)
     M->level[0].use[s] = HM_NONE;
-  M->generation++;
+  M->generation++, M->stamp++;
   return s;
 }
 
@@ -221,15 +273,29 @@ int hm_vertex_move (Hmesh * M, uint32_t v, const double * x)
 {
   if (!hm_alive (M, 0, v) || !hm_inside (M, x))
     return -1;
+#ifdef EULERIAN_LAGRANGIAN
+  /* every edge at v, from x: the cycle of v's use, each half's vertex the
+     edge's other end */
+  if (M->dim >= 1 && M->level[0].use[v] != HM_NONE) {
+    uint32_t h0 = M->level[0].use[v], h = h0;
+    do {
+      double b[HM_DIMENSION];
+      point_of (M, M->level[1].vert[h], b);
+      if (!hm_edge_fits (M, x, b))
+        return -1;
+      h = M->level[1].twin[h];
+    } while (h != h0);
+  }
+#endif
   for (int d = 0; d < HM_DIMENSION; d++)
     M->x[d][v] = x[d];
-  M->generation++;
+  M->generation++, M->stamp++;
   return 0;
 }
 
 void hm_touch (Hmesh * M)
 {
-  M->generation++;
+  M->generation++, M->stamp++;
 }
 
 int hm_set_domain (Hmesh * M, const double * origin, double size)
@@ -250,7 +316,7 @@ int hm_set_domain (Hmesh * M, const double * origin, double size)
   M->size = size;
   for (int d = 0; d < HM_DIMENSION; d++)
     M->origin[d] = origin[d];
-  M->generation++;
+  M->generation++, M->stamp++;
   return 0;
 }
 
@@ -296,6 +362,10 @@ uint32_t hm_add (Hmesh * M, int k, const uint32_t * v)
   uint32_t s = hm_find (M, k, v);
   if (s != HM_NONE)
     return s;
+#ifdef EULERIAN_LAGRANGIAN
+  if (!edges_fit (M, k, v))            /* before anything is made */
+    return HM_NONE;
+#endif
 
   /* the facets, found or made, before s, so that level k is not grown
      while s is written */
@@ -328,6 +398,7 @@ uint32_t hm_add (Hmesh * M, int k, const uint32_t * v)
   }
   if (k < M->dim)
     l->use[s] = HM_NONE;
+  M->stamp++;
   return s;
 }
 
@@ -359,6 +430,7 @@ int hm_remove (Hmesh * M, int k, uint32_t s)
   level_release (M, k, s);
   if (k == 0)
     M->generation++;
+  M->stamp++;
   return 0;
 }
 
@@ -479,7 +551,7 @@ int hm_compact_order (Hmesh * M, uint32_t * const * order, uint32_t ** remap)
     else
       free (map[k]);
   }
-  M->generation++;
+  M->generation++, M->stamp++;
   return 0;
 }
 
@@ -722,6 +794,12 @@ int hm_check (const Hmesh * M)
               k - 1, f, len, count[f]);
     }
   }
+#ifdef EULERIAN_LAGRANGIAN
+  if (m >= 1)
+    hm_foreach (M, 1, e)
+      if (!edges_fit (M, 1, &M->level[1].vert[2 * (size_t) e]))
+        FAIL ("edge %u not shorter than its cells", e);
+#endif
   free (count);
   return 0;
 }

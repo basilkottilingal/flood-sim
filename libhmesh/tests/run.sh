@@ -4,7 +4,9 @@
 # the times (QUICK=1 leaves that out). Run from libhmesh:
 #   sh tests/run.sh
 #   test_hmesh.c   the mesh alone
-#   test_tree.c    the mesh in libb-amr's tree (hmesh-tree.h)
+#   test_tree.c    the mesh in libb-amr's tree (hmesh-tree.h), zsimplex and
+#                  nsimplex; with -DEULERIAN_LAGRANGIAN, edges shorter than
+#                  the cells
 #   test_clip.c    the mesh cut to a box (hm_clip ())
 #   test_vof.c     volume fractions from the manifold (hm_vof ()), 2D, 3D
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
@@ -49,6 +51,10 @@ for d in ${DIMS:-1 2 3}; do
   run "tree, double, sanitizers" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san
   run "tree, float, sanitizers" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DBAMR_SINGLE
   [ -n "$QUICK" ] || run "tree, double, -O2" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr -O2
+  # edges shorter than the cells: the tree's checks, and the mesh alone
+  # unchanged with no cell size given
+  run "tree, EULERIAN_LAGRANGIAN, sanitizers" $d tests/test_tree.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san -DEULERIAN_LAGRANGIAN
+  run "mesh, EULERIAN_LAGRANGIAN, sanitizers" $d tests/test_hmesh.c "$src" $warn $san -DEULERIAN_LAGRANGIAN
   # volume fractions: a curve in 2D, a surface in 3D (m = D - 1)
   if [ "$d" != 1 ]; then
     run "vof, double, sanitizers" $d tests/test_vof.c "$tsrc" -Wall -Wextra -Wno-unused-parameter -I$amr $san

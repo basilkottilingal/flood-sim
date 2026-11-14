@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "tree.h"
+#include "block-ghosts.h"
 #include "hmesh-tree.h"
 
 static int fails = 0;
@@ -453,12 +454,202 @@ static void bench (void)
   tree_destroy ();
 }
 
+/* -------- zsimplex and nsimplex -------- */
+
+/* a curve of short edges, inside the domain: in 1D along x, else a circle
+   (z = 0.5 in 3D) */
+static Hmesh * short_curve (int n)
+{
+  Hmesh * M = hmesh_new (1);
+  hm_tree_bind (M);
+  double u[3], x[3];
+  for (int i = 0; i < n; i++) {
+    double t = 2*M_PI*i/n;
+    u[0] = HM_DIMENSION == 1 ? 0.05 + 0.9*i/n : 0.5 + 0.37*cos (t);
+    u[1] = 0.5 + 0.37*sin (t), u[2] = 0.5;
+    point_at (x, u);
+    hm_vertex_add (M, x);
+  }
+  for (uint32_t i = 0; i + (HM_DIMENSION == 1) < (uint32_t) n; i++)
+    hm_add (M, 1, (uint32_t []) { i, (i + 1) % (uint32_t) n });
+  return M;
+}
+
+/* every leaf cell's run: its simplices' centroids in it, each simplex in
+   one run */
+static void check_zn (Hmesh * M, int k, scalar zs, scalar ns,
+                      const char * when)
+{
+  long count = hm_tree_zn (M, k, zs, ns);
+  const HmTreeSorted * S = hm_tree_sorted (M, k);
+  CHECK (count == (long) hm_count (M, k) && S, "%s, level %d: %ld, not %u",
+         when, k, count, hm_count (M, k));
+  if (!S)
+    return;
+  uint8_t * seen = calloc (hm_end (M, k) + 1, 1);
+  long total = 0, outside = 0, twice = 0;
+  foreach () {
+    double lo[3], h = Delta;
+    lo[0] = x - h/2;
+#if HM_DIMENSION > 1
+    lo[1] = y - h/2;
+#endif
+#if HM_DIMENSION > 2
+    lo[2] = z - h/2;
+#endif
+    for (int a = (int) zs[]; a < (int) zs[] + (int) ns[]; a++) {
+      uint32_t s = S->order[a];
+      double c[3];
+      hm_centroid (M, k, s, c);
+      for (int d = 0; d < HM_DIMENSION; d++)
+        outside += c[d] < lo[d] - 1e-12 || c[d] > lo[d] + h + 1e-12;
+      twice += seen[s]++ > 0;
+    }
+    total += (long) ns[];
+  }
+  CHECK (total == count && !outside && !twice, "%s, level %d: %ld in runs "
+         "of %ld, %ld centroids outside their cell, %ld twice", when, k,
+         total, count, outside, twice);
+  free (seen);
+}
+
+static void test_zn (void)
+{
+  int depth = HM_DIMENSION == 3 ? 4 : 6;
+  tree (depth, 4);
+  tree_shift_resize (X0[0], X0[1], X0[2], H0);
+  refine_half (depth - 1);
+  scalar zs = scalar_new (), ns = scalar_new ();
+  Hmesh * M = short_curve (HM_DIMENSION == 3 ? 400 : 1500);
+  check_zn (M, 0, zs, ns, "built");
+  check_zn (M, 1, zs, ns, "built");
+  /* the points moved: the runs follow (M->stamp) */
+  hm_foreach (M, 0, v) {
+    double x[3];
+    for (int d = 0; d < HM_DIMENSION; d++)
+      x[d] = hm_x (M, d)[v] + 2e-3*H0*(urand () - 0.5);
+    hm_vertex_move (M, v, x);
+  }
+  check_zn (M, 1, zs, ns, "moved");
+  /* edges removed and added back: the runs follow */
+  uint32_t ne = hm_count (M, 1);
+  for (uint32_t e = 0; e < hm_end (M, 1); e += 7)
+    if (hm_alive (M, 1, e))
+      hm_remove (M, 1, e);
+  check_zn (M, 1, zs, ns, "removed");
+  hmesh_free (M);
+  M = short_curve (HM_DIMENSION == 3 ? 400 : 1500);
+  CHECK (hm_count (M, 1) == ne, "zn: the curve again");
+  /* the tree refined: the runs of the finer cells */
+  refine_half (depth);
+  check_zn (M, 1, zs, ns, "refined");
+  hmesh_free (M);
+  scalar_free (zs), scalar_free (ns);
+  tree_destroy ();
+}
+
+/* -------- edges shorter than the cells (-DEULERIAN_LAGRANGIAN) -------- */
+
+#ifdef EULERIAN_LAGRANGIAN
+static void test_el (void)
+{
+  int depth = HM_DIMENSION == 3 ? 4 : 6;
+  tree (depth, 4);
+  tree_shift_resize (X0[0], X0[1], X0[2], H0);
+  refine_half (depth - 1);
+  Hmesh * M = hmesh_new (HM_DIMENSION >= 2 ? 2 : 1);
+  CHECK (hm_tree_bind (M) == 0, "el: bind");
+  double u[3] = { 0.25, 0.5, 0.5 }, a[3], b[3], c[3];
+  point_at (a, u);
+  double hf = hm_tree_cell_size (M, a);
+  u[0] = 0.75;
+  point_at (b, u);
+  double hc = hm_tree_cell_size (M, b);
+  CHECK (hf > 0 && hc > hf, "el: cells %g and %g, not finer on the left",
+         hf, hc);
+  /* in the fine half: 0.6 of a cell fits, 1.2 does not */
+  uint32_t va = hm_vertex_add (M, a);
+  for (int d = 0; d < HM_DIMENSION; d++)
+    b[d] = a[d], c[d] = a[d];
+  b[0] += 0.6*hf, c[0] += 1.2*hf;
+  uint32_t vb = hm_vertex_add (M, b), vc = hm_vertex_add (M, c);
+  CHECK (hm_add (M, 1, (uint32_t []) { va, vc }) == HM_NONE,
+         "el: an edge of 1.2 cells made");
+  uint32_t e = hm_add (M, 1, (uint32_t []) { va, vb });
+  CHECK (e != HM_NONE, "el: an edge of 0.6 cells refused");
+#if HM_DIMENSION >= 2
+  /* a triangle with one edge too long: refused, nothing made */
+  uint32_t edges = hm_count (M, 1);
+  CHECK (hm_add (M, 2, (uint32_t []) { va, vb, vc }) == HM_NONE &&
+         hm_count (M, 1) == edges, "el: a triangle with a long edge made");
+  double d3[3] = { a[0], a[1], a[2] };
+  d3[1] += 0.5*hf;
+  uint32_t vd = hm_vertex_add (M, d3);
+  CHECK (hm_add (M, 2, (uint32_t []) { va, vb, vd }) != HM_NONE,
+         "el: a small triangle refused");
+#endif
+  /* across the level jump at x = 0.5: 1.5 of the fine cell, under the
+     coarse one; the smaller cell bounds it */
+  u[0] = 0.5 - 1e-3;
+  point_at (a, u);
+  double ha = hm_tree_cell_size (M, a);
+  for (int d = 0; d < HM_DIMENSION; d++)
+    b[d] = a[d];
+  b[0] += 1.5*ha;
+  double hb = hm_tree_cell_size (M, b);
+  uint32_t p = hm_vertex_add (M, a), q = hm_vertex_add (M, b);
+  CHECK (hb == 2*ha && hm_add (M, 1, (uint32_t []) { p, q }) == HM_NONE,
+         "el: an edge across the jump (cells %g, %g), longer than the fine "
+         "cell, made", ha, hb);
+  /* a move that stretches an edge: refused, the point left */
+  double x0 = hm_x (M, 0)[vb];
+  for (int d = 0; d < HM_DIMENSION; d++)
+    c[d] = hm_x (M, d)[vb];
+  c[0] += 0.6*hf;
+  CHECK (hm_vertex_move (M, vb, c) == -1 && hm_x (M, 0)[vb] == x0,
+         "el: a move to 1.2 cells made");
+  c[0] = x0 + 0.2*hf;
+  CHECK (hm_vertex_move (M, vb, c) == 0, "el: a move to 0.8 cells refused");
+  CHECK (hm_long_edges (M) == 0 && hm_check (M) == 0, "el: invariants");
+  /* the tree refined: the cells halve, the edges no longer fit */
+  refine_half (depth);
+  uint32_t longer = hm_long_edges (M);
+  CHECK (longer > 0, "el: no long edge after refinement");
+  fprintf (stderr, "     (expected) ");
+  CHECK (hm_check (M) == -1, "el: hm_check () after refinement");
+  printf ("el: %u edges too long after the refinement\n", longer);
+  hmesh_free (M);
+
+  /* clipped: every piece made, long or not, counted after */
+  M = hmesh_new (1);
+  u[0] = -0.2, u[1] = 0.5, u[2] = 0.5;
+  point_at (a, u);
+  u[0] = 1.2;
+  point_at (b, u);
+  p = hm_vertex_add (M, a), q = hm_vertex_add (M, b);
+  hm_add (M, 1, (uint32_t []) { p, q });   /* no cell size yet: made */
+  CHECK (hm_tree_clip (M) == 0 && hm_count (M, 1) == 1 &&
+         hm_long_edges (M) == 1, "el: clip: %u edges, %u long",
+         hm_count (M, 1), hm_long_edges (M));
+  hmesh_free (M);
+  tree_destroy ();
+}
+#endif
+
 int main (void)
 {
+#ifdef EULERIAN_LAGRANGIAN
+  /* the other tests make edges longer than the cells */
+  (void) test_tree, (void) test_clip, (void) test_too_deep, (void) bench;
+  test_el ();
+  test_zn ();
+#else
   test_tree ();
   test_clip ();
   test_too_deep ();
+  test_zn ();
   bench ();
+#endif
   if (fails)
     printf ("%d failed\n", fails);
   else
