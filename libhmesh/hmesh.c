@@ -44,6 +44,8 @@ void hmesh_free (Hmesh * M)
 {
   if (!M)
     return;
+  if (M->ext_free)
+    M->ext_free (M->ext);
   for (int k = 0; k <= M->dim; k++) {
     HmLevel * l = &M->level[k];
     free (l->alive);
@@ -202,6 +204,8 @@ static uint32_t half_sign (const Hmesh * M, int k, int i, uint32_t f,
 
 uint32_t hm_vertex_add (Hmesh * M, const double * x)
 {
+  if (!hm_inside (M, x))
+    return HM_NONE;
   uint32_t s = level_alloc (M, 0);
   if (s == HM_NONE)
     return HM_NONE;
@@ -209,7 +213,45 @@ uint32_t hm_vertex_add (Hmesh * M, const double * x)
     M->x[d][s] = x[d];
   if (M->dim > 0)
     M->level[0].use[s] = HM_NONE;
+  M->generation++;
   return s;
+}
+
+int hm_vertex_move (Hmesh * M, uint32_t v, const double * x)
+{
+  if (!hm_alive (M, 0, v) || !hm_inside (M, x))
+    return -1;
+  for (int d = 0; d < HM_DIMENSION; d++)
+    M->x[d][v] = x[d];
+  M->generation++;
+  return 0;
+}
+
+void hm_touch (Hmesh * M)
+{
+  M->generation++;
+}
+
+int hm_set_domain (Hmesh * M, const double * origin, double size)
+{
+  if (!(size > 0.))
+    return -1;
+  Hmesh box = { .domain = 1, .size = size };
+  for (int d = 0; d < HM_DIMENSION; d++)
+    box.origin[d] = origin[d];
+  hm_foreach (M, 0, v) {
+    double x[HM_DIMENSION];
+    for (int d = 0; d < HM_DIMENSION; d++)
+      x[d] = M->x[d][v];
+    if (!hm_inside (&box, x))
+      return -1;
+  }
+  M->domain = 1;
+  M->size = size;
+  for (int d = 0; d < HM_DIMENSION; d++)
+    M->origin[d] = origin[d];
+  M->generation++;
+  return 0;
 }
 
 /*
@@ -315,6 +357,8 @@ int hm_remove (Hmesh * M, int k, uint32_t s)
   for (int i = 0; k >= 1 && i <= k; i++)
     unlink_half (M, k, hm_half (k, s, i));
   level_release (M, k, s);
+  if (k == 0)
+    M->generation++;
   return 0;
 }
 
@@ -333,53 +377,93 @@ int hm_remove_closure (Hmesh * M, int k, uint32_t s)
 
 /* -------- compaction -------- */
 
-void hm_compact (Hmesh * M, uint32_t ** remap)
+/* a new array of cap entries of e bytes: entry t is entry inv[t] of p,
+   t < n; p freed */
+static void * permuted (void * p, size_t e, uint32_t cap, const uint32_t * inv,
+                        uint32_t n)
 {
-  int m = M->dim;
-  uint32_t * map[HM_LEVELS] = { NULL };
+  char * q = xrealloc (NULL, (size_t) (cap ? cap : 1) * e);
+  for (uint32_t t = 0; t < n; t++)
+    memcpy (q + (size_t) t * e, (char *) p + (size_t) inv[t] * e, e);
+  free (p);
+  return q;
+}
+
+int hm_compact_order (Hmesh * M, uint32_t * const * order, uint32_t ** remap)
+{
+  int m = M->dim, ok = 1;
+  uint32_t * map[HM_LEVELS] = { NULL }, * inv[HM_LEVELS] = { NULL };
   for (int k = 0; k <= m; k++) {
     HmLevel * l = &M->level[k];
-    map[k] = xrealloc (NULL, (size_t) l->end * sizeof (uint32_t));
-    uint32_t n = 0;
+    map[k] = xrealloc (NULL, (size_t) (l->end ? l->end : 1) *
+                       sizeof (uint32_t));
+    inv[k] = xrealloc (NULL, (size_t) (l->n ? l->n : 1) * sizeof (uint32_t));
     for (uint32_t s = 0; s < l->end; s++)
-      map[k][s] = hm_alive (M, k, s) ? n++ : HM_NONE;
+      map[k][s] = HM_NONE;
+    if (order && order[k])
+      for (uint32_t t = 0; t < l->n && ok; t++) {
+        uint32_t s = order[k][t];
+        if (!hm_alive (M, k, s) || map[k][s] != HM_NONE)
+          ok = 0;
+        else {
+          map[k][s] = t;
+          inv[k][t] = s;
+        }
+      }
+    else {
+      uint32_t t = 0;
+      hm_foreach (M, k, s) {
+        map[k][s] = t;
+        inv[k][t++] = s;
+      }
+    }
+  }
+  if (!ok) {
+    for (int k = 0; k <= m; k++)
+      free (map[k]), free (inv[k]);
+    return -1;
   }
 
-  /* each level in place: a simplex moves down (t <= s), into what was
-     read already */
+  /* each level into new arrays, every reference through the maps */
   for (int k = 0; k <= m; k++) {
     HmLevel * l = &M->level[k];
-    uint32_t a = (uint32_t) k + 1, b = (uint32_t) k + 2;
-    for (uint32_t s = 0; s < l->end; s++) {
-      uint32_t t = map[k][s];
-      if (t == HM_NONE)
-        continue;
-      for (uint32_t i = 0; k >= 1 && i < a; i++) {
-        uint32_t src = a * s + i, dst = a * t + i;
-        uint32_t tw = l->twin[src], fc = l->facet[src];
-        l->vert[dst] = map[0][l->vert[src]];
-        l->twin[dst] = a * map[k][tw / a] + tw % a;
-        l->facet[dst] = map[k - 1][fc & ~HM_FLIP] | (fc & HM_FLIP);
-      }
-      if (k < m) {
-        uint32_t u = l->use[s];
-        l->use[t] = u == HM_NONE ? HM_NONE : b * map[k + 1][u / b] + u % b;
-      }
-      if (k == 0)
-        for (int d = 0; d < HM_DIMENSION; d++)
-          M->x[d][t] = M->x[d][s];
-      for (int f = 0; f < M->nfield; f++)
-        if (M->field[f].level == k && t != s) {
-          size_t e = M->field[f].esize;
-          for (int c = 0; c < M->field[f].ncomp; c++) {
-            char * p = M->field[f].data[c];
-            memcpy (p + (size_t) t * e, p + (size_t) s * e, e);
-          }
+    uint32_t a = (uint32_t) k + 1, b = (uint32_t) k + 2, n = l->n;
+    uint32_t cap = l->cap ? l->cap : 1;
+    if (k >= 1) {
+      uint32_t * vert = xrealloc (NULL, (size_t) a * cap * sizeof (uint32_t));
+      uint32_t * twin = xrealloc (NULL, (size_t) a * cap * sizeof (uint32_t));
+      uint32_t * facet = xrealloc (NULL, (size_t) a * cap * sizeof (uint32_t));
+      for (uint32_t t = 0; t < n; t++)
+        for (uint32_t i = 0; i < a; i++) {
+          uint32_t src = a * inv[k][t] + i, dst = a * t + i;
+          uint32_t tw = l->twin[src], fc = l->facet[src];
+          vert[dst] = map[0][l->vert[src]];
+          twin[dst] = a * map[k][tw / a] + tw % a;
+          facet[dst] = map[k - 1][fc & ~HM_FLIP] | (fc & HM_FLIP);
         }
+      free (l->vert), free (l->twin), free (l->facet);
+      l->vert = vert, l->twin = twin, l->facet = facet;
     }
+    if (k < m) {
+      uint32_t * use = xrealloc (NULL, (size_t) cap * sizeof (uint32_t));
+      for (uint32_t t = 0; t < n; t++) {
+        uint32_t u = l->use[inv[k][t]];
+        use[t] = u == HM_NONE ? HM_NONE : b * map[k + 1][u / b] + u % b;
+      }
+      free (l->use);
+      l->use = use;
+    }
+    if (k == 0)
+      for (int d = 0; d < HM_DIMENSION; d++)
+        M->x[d] = permuted (M->x[d], sizeof (double), cap, inv[k], n);
+    for (int f = 0; f < M->nfield; f++)
+      if (M->field[f].level == k)
+        for (int c = 0; c < M->field[f].ncomp; c++)
+          M->field[f].data[c] = permuted (M->field[f].data[c],
+                                          M->field[f].esize, cap, inv[k], n);
     /* the bits: n ones, then zeros */
-    uint32_t n = l->n;
-    memset (l->alive, 0, words (l->end) * sizeof (uint64_t));
+    if (l->alive)
+      memset (l->alive, 0, words (l->end) * sizeof (uint64_t));
     for (uint32_t w = 0; w < n / 64; w++)
       l->alive[w] = ~(uint64_t) 0;
     if (n % 64)
@@ -388,11 +472,20 @@ void hm_compact (Hmesh * M, uint32_t ** remap)
     l->nfreed = 0;
   }
 
-  for (int k = 0; k <= m; k++)
+  for (int k = 0; k <= m; k++) {
+    free (inv[k]);
     if (remap)
       remap[k] = map[k];
     else
       free (map[k]);
+  }
+  M->generation++;
+  return 0;
+}
+
+void hm_compact (Hmesh * M, uint32_t ** remap)
+{
+  hm_compact_order (M, NULL, remap);
 }
 
 /* -------- fields -------- */
@@ -555,8 +648,16 @@ int hm_check (const Hmesh * M)
     for (uint32_t j = 0; j < l->nfreed; j++)
       if (l->freed[j] >= l->end || hm_alive (M, k, l->freed[j]))
         FAIL ("level %d: freed id %u in use", k, l->freed[j]);
-    if (k == 0)
+    if (k == 0) {
+      hm_foreach (M, 0, v) {
+        double x[HM_DIMENSION];
+        for (int d = 0; d < HM_DIMENSION; d++)
+          x[d] = M->x[d][v];
+        if (!hm_inside (M, x))
+          FAIL ("point %u outside the domain", v);
+      }
       continue;
+    }
 
     /* each simplex: its vertices, facets, signs, twins */
     const HmLevel * lf = &M->level[k - 1];

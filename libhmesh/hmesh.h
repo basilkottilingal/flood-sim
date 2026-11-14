@@ -170,6 +170,16 @@
     double  * x[HM_DIMENSION];         /* the points' coordinates */
     HmField * field;
     int       nfield, capfield;
+    /* the box the points must stay in: hm_set_domain () */
+    int       domain;
+    double    origin[HM_DIMENSION], size;
+    /* changes with the points: added, removed, moved, renumbered, or the
+       box changed; a cache of the points compares it */
+    unsigned  generation;
+    /* a cache another layer keeps with the mesh (hmesh-tree.h), freed with
+       it by ext_free () */
+    void    * ext;
+    void   (* ext_free) (void *);
   } Hmesh;
 
   /* the library and the program must agree on D: see real.h in libb-amr */
@@ -196,12 +206,34 @@
   int      hm_remove_closure (Hmesh * M, int k, uint32_t s);
 
   /*
-  .. hm_compact (M, remap): ids 0 ... n - 1 on every level. With remap not
-  .. NULL, remap[k] is set to a malloc'ed map from each old id (< the old
-  .. hm_end ()) to the new one, HM_NONE for an id not in use, which the caller
-  .. frees.
+  .. The box the points stay in: [origin, origin + size] along each axis,
+  .. closed. hm_set_domain () refuses (-1, the box unchanged) a size not
+  .. positive, or a box that would leave a point in use outside. Then
+  .. hm_vertex_add () and hm_vertex_move () refuse a point outside (or NaN),
+  .. and hm_check () finds one written outside through hm_x ().
+  ..
+  .. hm_vertex_move (M, v, x): v moved to x; -1 if v is not in use or x is
+  .. outside. hm_touch (M): the points were written through hm_x (), for
+  .. the caches of them (M->generation).
+  */
+  int  hm_set_domain (Hmesh * M, const double * origin, double size);
+  int  hm_vertex_move (Hmesh * M, uint32_t v, const double * x);
+  void hm_touch (Hmesh * M);
+
+  /*
+  .. hm_compact (M, remap): ids 0 ... n - 1 on every level, in the order of
+  .. the old ones. With remap not NULL, remap[k] is set to a malloc'ed map
+  .. from each old id (< the old hm_end ()) to the new one, HM_NONE for an id
+  .. not in use, which the caller frees.
+  ..
+  .. hm_compact_order (M, order, remap): the same, level k in the order
+  .. order[k], the hm_count (M, k) ids in use, each once (order or order[k]
+  .. NULL: the order of the ids). -1, and nothing changed, if an order[k] is
+  .. not that.
   */
   void hm_compact (Hmesh * M, uint32_t ** remap);
+  int  hm_compact_order (Hmesh * M, uint32_t * const * order,
+                         uint32_t ** remap);
 
   /* fields */
   int    hm_field_new (Hmesh * M, int k, const char * name, int ncomp,
@@ -308,5 +340,16 @@
 
   static inline double * hm_x (const Hmesh * M, int c)
   { return M->x[c]; }
+
+  /* x in the box, or no box; a NaN is not in it */
+  static inline int hm_inside (const Hmesh * M, const double * x)
+  {
+    if (!M->domain)
+      return 1;
+    for (int d = 0; d < HM_DIMENSION; d++)
+      if (!(x[d] >= M->origin[d] && x[d] <= M->origin[d] + M->size))
+        return 0;
+    return 1;
+  }
 
 #endif

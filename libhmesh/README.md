@@ -113,9 +113,67 @@ top simplices alone.
 | `hm_x (M, d)` | the points' coordinate `d` |
 | `hm_measure`, `hm_volume_signed`, `hm_centroid` | length, area or volume (a Gram determinant, any `k <= D`), signed when `k = m = D`, centroid |
 | `hm_check (M)` | every invariant, O(size), for tests |
+| `hm_set_domain (M, origin, size)` | the box `[origin, origin + size]^D` (closed) the points must stay in; -1 if a point is outside already |
+| `hm_vertex_move (M, v, x)`, `hm_touch (M)` | a checked move; after writing `hm_x ()` directly |
+| `hm_compact_order (M, order, remap)` | the compaction, each level in a given order |
 
 The library and the program must agree on `D`: a program built with
 another dimension does not link (`hmesh_dimension_is_D`).
+
+## In the tree (hmesh-tree.h)
+
+The manifold inside libb-amr's tree, which must hold it whole for now:
+crossing the domain's boundary is left for later.
+
+- **The box.** `hm_tree_bind (M)` takes the tree's domain from
+  `tree_get_origin ()` and `tree_get_size ()` (libb-amr unchanged), and from
+  then on a point outside it is refused, by `hm_vertex_add ()` and
+  `hm_vertex_move ()`; `hm_check ()` finds one written outside through
+  `hm_x ()`. If the domain moves (`tree_shift_resize ()`), the next cache
+  binds again, and fails if that leaves a point outside.
+- **The keys.** 64 bit Morton keys, x in the lowest bit as in
+  `index_child ()`, so that sorted keys run along `tree_caches ()->leaves`.
+  52 bits an axis in 1D, 32 in 2D, 21 in 3D (`hmesh-morton.h`). The tree
+  must not be deeper than the keys can tell its cells apart:
+  `tree_get_depth_max () + log2 (block_m) <= bits`, so 17 with blocks of 16
+  in 3D, checked by `hm_tree_bind ()` and the cache.
+- **The cache.** `hm_tree_cache (M)` gives the points sorted along the curve
+  (`order[]`, `key[]`), each point's leaf (`leaf_of[]`, an index into
+  `tree_caches ()->leaves`, so its block and its `pid`), each leaf's range of
+  points (`start[]`, `stop[]`, `hm_foreach_leaf_point ()`), the points in no
+  leaf, and the duplicates (two points closer than `size / 2^bits` on every
+  axis). One walk along the leaves and the sorted points together; no point
+  located by descending the tree. It is made again only when
+  `tree_generation` or the mesh's generation (points added, removed, moved,
+  renumbered) changed.
+- **The sort.** To the tree's finest cells only (`D (depth_max + log2 m)`
+  bits, 11 a radix pass), as that is all the leaves and cells need. It
+  starts from the last order: nothing to do if no point changed its cell,
+  insertion if a few did, else radix.
+- **The imaginary tree** with at most one point a leaf is the sorted keys:
+  the smallest cell about a point holding no other is set by the longest
+  common prefix of its key with its neighbours'. Nothing more is stored.
+- **Memory order.** `hm_compact_morton (M, remap)` renumbers every level
+  along the curve (points by their whole keys, a k-simplex by its
+  centroid's), so that a leaf's points are the ids `start[q] ... stop[q] - 1`
+  and their fields are read in memory order.
+
+The cache's cost, 2^20 points in about as many cells (a uniform tree,
+blocks of 16), -O2, a loaded laptop, ns a point:
+
+| | 1D | 2D | 3D |
+|---|---|---|---|
+| from nothing | 52 | 64 | 70 |
+| after every point moved 1e-5, ids in no order | 46 | 59 | 52 |
+| after `hm_compact_morton ()`, nothing moved | 27 | 42 | 47 |
+| after `hm_compact_morton ()`, every point moved | 43 | 54 | 67 |
+
+For comparison, a step of libvof's advection is 30-60 ns a cell (2D), and
+a curve or surface in the domain has far fewer points than the grid has
+cells: rebuilding the cache at every step is cheap. Most of its time is
+memory traffic, not the sort itself: computing the keys (about 10 ns a
+point), the radix passes (about 4 ns a point each, 2 to 6 of them), and
+the walk.
 
 ## Tests
 
@@ -138,6 +196,15 @@ QUICK=1 sh tests/run.sh    # without the -O2 runs
   level still the measures of their simplices, then the same after
   compaction.
 - **Refusals.** And `hm_check ()` finding eight kinds of corruption.
+- **In the tree** (`test_tree.c`, linked with libb-amr). A tree refined
+  over half its domain, the domain moved and resized: points outside, NaN,
+  on the upper faces and the corners; a tree too deep for the keys (3D);
+  each point in the one leaf whose box holds it, by brute force (a face
+  shared by two leaves to the upper one), the ranges, the keys, the
+  duplicate found; again after the points moved, were written through
+  `hm_x ()`, were removed and added, after the tree was refined, after the
+  domain moved from under a point and back; `hm_compact_morton ()`. A
+  cache made wrong on purpose (one leaf off) is caught.
 
 Measured at -O2 on a loaded laptop (taking out a random simplex and adding
 it back; the time is dominated by memory misses at random ids, not by the
@@ -156,12 +223,11 @@ else in memory.
 
 ## Next
 
-- **Coupling.** Each point linked to its leaf block of libb-amr, and its
-  rank under MPI. The map from `hm_compact ()` is there for that.
-- **Order.** Compaction in Morton order of the centroids, so that the
-  mesh's memory follows the tree's. The halves' vertices, twins and facets
-  could also be interleaved into one record, if cycle walks are where the
-  time goes.
+- **The domain's boundary.** A manifold crossing it: simplices cut on the
+  boundary, the cut facets boundary halves tagged with their face.
+- **Ranks.** Each point's rank under MPI, from its leaf's `pid`.
+- **Order.** The halves' vertices, twins and facets could be interleaved
+  into one record, if cycle walks are where the time goes.
 - **Topological operations.** Edge flip, split and collapse, built on
   `hm_add ()` and `hm_remove ()` (ids stay stable through them).
 - **Ordered cycles.** The cofaces about an edge of a volume, or about a
