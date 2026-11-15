@@ -408,12 +408,13 @@ The trees, uniform at a base level and refined on a shell of radius 0.3:
 
 The columns:
 - **CPU:** 16 threads.
-- **GPU:** the benchmark's kernels.
-- **`gpu_cells`:** the same kernels built on the library's `gpu_cells ()`
-  (`-DBENCH_GPU_CELLS`). This changes only restriction, prolongation and
+- **GPU:** the benchmark's kernels on `gpu_cells ()` as it is now: one
+  flat simd loop (below).
+- **old `gpu_cells`:** the same before that change, its four loops
+  collapsed and no simd. This changes only restriction, prolongation and
   the stencil.
 
-| 3D | double CPU | double GPU | CPU / GPU | `gpu_cells` | float CPU | float GPU | CPU / GPU | `gpu_cells` |
+| 3D | double CPU | double GPU | CPU / GPU | old `gpu_cells` | float CPU | float GPU | CPU / GPU | old `gpu_cells` |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|
 | restriction | 11.2 | 1.41 | 7.9 | 7.55 | 5.60 | 1.06 | 5.3 | 2.57 |
 | ghosts: copies (15.5 M) | 27.7 | 3.22 | 8.6 | | 19.0 | 2.66 | 7.1 | |
@@ -435,6 +436,14 @@ The columns:
 | stencil | 3.94 | 0.52 | 7.6 | 0.73 | 0.41 | 1.8 |
 | step | 7.23 | 3.88 | 1.9 | 2.10 | 3.66 | 0.6 |
 
+After the library's `gpu_cells ()` changed, run2.sh gave the GPU column
+again to within 1% (3D double step 9.40 ms, float 6.60).
+
+The CPU times of that second run differed by up to 40% (3D double step
+112 ms, 2D double 14.6 ms). The CPU step is noisy, and in several runs it
+came out above the sum of its parts (`ghosts_update` + stencil). Read the
+CPU ratios as good to about 1.5 times either way.
+
 Reading it:
 
 - **3D:** the GPU takes a step 8.6 times faster than 16 threads in double,
@@ -452,18 +461,134 @@ Reading it:
     0.2 ms a launch whatever its size, so they lose to the CPU.
   - Only the stencil, one launch, wins.
   - In float the CPU takes the step.
-  - Larger 2D trees, or fewer launches (the levels fused, which the
-    order of jumps across levels allows only partly), would change that.
-- **`gpu_cells ()` as it is wastes the GPU.** gcc's nvptx back end makes an
+  - Larger trees or larger blocks change that: see the block sizes below.
+- **`gpu_cells ()` was wasting the GPU.** gcc's nvptx back end makes an
   OpenMP thread a warp, and its 32 lanes work only in a simd loop. Without
-  simd, one lane in 32 does the work.
-  - With `simd` added to `gpu_cells`' four collapsed loops, it was 2.8
-    times slower still.
-  - One flat loop over block x cell with `simd`, the cell split by
-    shifts (m is a power of 2), is what the benchmark uses: 13 times
-    `gpu_cells` on the 3D stencil and 20 times on prolongation, in
-    double.
-  - `block-loops.h` is unchanged.
+  simd, one lane in 32 did the work.
+  - With `simd` added to the four collapsed loops, it was 2.8 times
+    slower still.
+  - `gpu_cells ()` is now one flat loop over block x cell with `simd`.
+    Each axis of the region visited (m + 2 halo cells) is padded to a
+    power of 2, so that the flat index splits by shifts. The lanes that
+    fall in the padding do nothing, and at halo 0 there is none, as m is
+    a power of 2.
+  - The signature is the same, and so are the cells visited and, on the
+    host, their order (that of `block_cells`). Its locals are prefixed
+    `bamr_`, so that none hides a name the loop's body uses (the
+    benchmark's restriction has an `h` of its own).
+  - It is 13 times the old loop on the 3D stencil and 20 times on
+    prolongation, in double:
+
+    | 3D, m 16, ms, double (float) | old `gpu_cells` | new | 16 CPU threads |
+    |---|--:|--:|--:|
+    | stencil | 47.3 (12.4) | 3.52 (1.79) | 36-39 (19-21) |
+    | prolongation | 47.7 (14.0) | 2.38 (1.39) | 25-27 (15-16) |
+    | restriction | 7.55 (2.57) | 1.42 (1.06) | 11-13 (5.6-5.8) |
+    | step | 59.3 (18.3) | 9.40 (6.60) | 80-112 (45-48) |
+
+    The CPU column is the range of two runs.
+  - Checked:
+
+    | test | result |
+    |---|---|
+    | `GPU=1 sh tests/run.sh`, bit for bit, with every halo and both layouts in `test_blocks.c` | 42 of 42 |
+    | `sh tests/run.sh`, the whole host suite | 109 of 109 |
+    | break: the padding test off by one (`>=` to `>`) | `blocks` fails, 6 of 6 runs |
+    | break: cj off by one | `blocks` fails, 4 of 4 (2D, 3D; 1D has no cj) |
+    | break: the last block left out | `blocks` fails, 6 of 6 |
+    | `tests/run2.sh`, device against host to a tolerance | every check, 2D and 3D, double and float |
+    | `tests/run2.sh`, GPU times against the benchmark's own flat loop | the same to 1% (3D step 9.40 ms double, 6.60 float) |
+
+#### 2D, block sizes
+
+    DIMS=2 ARGS2="5 9 4;4 8 5;3 7 6;2 6 7;1 5 8;6 10 4;5 9 5;4 8 6;3 7 7;2 6 8" sh tests/run2.sh
+
+The same shell at two finest cells, 1/8192 and 1/16384, with blocks of
+m = 16 to 256.
+- **The trees:** base and depth shift with m, so that m 2^depth stays
+  fixed. The tree column is base-depth-blockdepth. With m = 128 and 256,
+  2:1 balance from the shell lifts the coarsest leaves to level 3.
+- **Mcells:** the cells a step writes.
+- **Times** in ms. GPU ghosts and GPU stencil are those phases alone;
+  upload moves every block.
+- **The GPU columns** ran on the benchmark's own flat loop, the same as
+  the new `gpu_cells ()`.
+
+| finest cell | m | tree | Real | Mcells | CPU step | GPU step | CPU / GPU | GPU, old `gpu_cells` | GPU ghosts | GPU stencil | upload |
+|--:|--:|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1/8192 | 16 | 5-9-4 | double | 3.02 | 3.96 | 3.73 | 1.1 | 6.91 | 2.27 | 0.44 | 4.55 |
+| 1/8192 | 16 | 5-9-4 | float | 3.02 | 1.03 | 3.55 | 0.3 | 4.59 | 2.22 | 0.35 | 2.26 |
+| 1/8192 | 32 | 4-8-5 | double | 4.85 | 6.97 | 3.88 | 1.8 | 9.99 | 2.25 | 0.52 | 7.20 |
+| 1/8192 | 32 | 4-8-5 | float | 4.85 | 1.90 | 3.66 | 0.5 | 5.56 | 2.22 | 0.41 | 3.45 |
+| 1/8192 | 64 | 3-7-6 | double | 8.56 | 13.87 | 4.20 | 3.3 | 16.00 | 2.22 | 0.72 | 12.46 |
+| 1/8192 | 64 | 3-7-6 | float | 8.56 | 4.93 | 3.85 | 1.3 | 7.41 | 2.21 | 0.52 | 5.85 |
+| 1/8192 | 128 | 2-6-7 | double | 15.40 | 35.42 | 4.55 | 7.8 | 26.35 | 1.78 | 1.47 | 22.28 |
+| 1/8192 | 128 | 2-6-7 | float | 15.40 | 14.04 | 3.53 | 4.0 | 10.06 | 1.75 | 0.74 | 11.62 |
+| 1/8192 | 256 | 1-5-8 | double | 22.57 | 34.34 | 4.98 | 6.9 | 37.59 | 1.29 | 2.47 | 34.57 |
+| 1/8192 | 256 | 1-5-8 | float | 22.57 | 21.42 | 3.43 | 6.2 | 13.55 | 1.28 | 1.28 | 18.50 |
+| 1/16384 | 16 | 6-10-4 | double | 6.96 | 18.89 | 4.30 | 4.4 | 11.55 | 2.52 | 0.66 | 11.29 |
+| 1/16384 | 16 | 6-10-4 | float | 6.96 | 7.22 | 3.97 | 1.8 | 6.19 | 2.45 | 0.46 | 5.59 |
+| 1/16384 | 32 | 5-9-5 | double | 10.15 | 18.47 | 4.56 | 4.1 | 17.25 | 2.47 | 0.80 | 15.47 |
+| 1/16384 | 32 | 5-9-5 | float | 10.15 | 16.23 | 4.13 | 3.9 | 7.92 | 2.42 | 0.57 | 9.35 |
+| 1/16384 | 64 | 4-8-6 | double | 17.71 | 27.58 | 5.23 | 5.3 | 29.52 | 2.42 | 1.20 | 25.69 |
+| 1/16384 | 64 | 4-8-6 | float | 17.71 | 89.01 | 4.54 | 19.6 | 11.71 | 2.42 | 0.80 | 13.91 |
+| 1/16384 | 128 | 3-7-7 | double | 32.70 | 64.76 | 7.46 | 8.7 | 53.68 | 2.43 | 2.79 | 51.76 |
+| 1/16384 | 128 | 3-7-7 | float | 32.70 | 30.33 | 5.25 | 5.8 | 19.52 | 2.37 | 1.26 | 25.05 |
+| 1/16384 | 256 | 2-6-8 | double | 60.14 | 110.97 | 10.87 | 10.2 | 97.28 | 1.98 | 5.95 | 96.58 |
+| 1/16384 | 256 | 2-6-8 | float | 60.14 | 53.59 | 6.79 | 7.9 | 34.52 | 1.94 | 2.97 | 47.29 |
+
+In short, the GPU's lead on a step (CPU / GPU; below 1 the CPU wins):
+
+| m | 1/8192 double | 1/8192 float | 1/16384 double | 1/16384 float |
+|--:|--:|--:|--:|--:|
+| 16 | 1.1 | 0.3 | 4.4 | 1.8 |
+| 32 | 1.8 | 0.5 | 4.1 | 3.9 |
+| 64 | 3.3 | 1.3 | 5.3 | 3.7 * |
+| 128 | 7.8 | 4.0 | 8.7 | 5.8 |
+| 256 | 6.9 | 6.2 | 10.2 | 7.9 |
+
+\* The CPU step of that run is off (89 ms, see below): 3.7 is from its
+phases instead, restriction + ghosts + stencil (2.1 + 2.7 + 12.0 = 16.9
+ms) against the GPU's step (4.54 ms).
+
+- **The GPU has a floor of about 3.5 ms a step,** whatever the size.
+  - Restriction (about 1 ms) and the ghosts (about 2 ms) launch once per
+    level and kind, at about 0.2 ms a launch.
+  - Up to about 5 M cells a step, that floor is the step.
+- **Per cell, the CPU stays about flat; the GPU gets cheaper with size.**
+  - CPU: 1.2-1.6 ns a cell on the double stencil for every m.
+  - GPU: from 0.27 ns at m = 16 (1/8192) to 0.05-0.14 ns from m = 128,
+    as the launches are spread over more cells.
+- **So the GPU's lead grows with m and with resolution:**
+  - at 1/8192, from 1.1 (double) and 0.3 (float) at m = 16 to 7-8 and
+    4-6 at m = 128-256;
+  - at 1/16384, from 4.4 and 1.8 at m = 16 to 10 and 8 at m = 256;
+  - the CPU wins only in float at m = 16 and 32 on the coarser shell.
+- **The ghosts on the GPU cost about 2 ms whatever m is.** The CPU's
+  shrink as m grows (from 7 ms at m = 16 to 2 at m = 256 at 1/16384,
+  double), as the ghost cells' share falls as 4 g / m.
+- **One CPU point is off:** 4-8-6 float took 89 ms a step, against 28 in
+  double, while restriction, ghosts and stencil add up to 16.9 ms; its
+  `ghosts_update` (19.3 ms, against 4.9 for its parts) is off too.
+  Probably a disturbed run; it was not repeated.
+- **Old `gpu_cells ()` against new:**
+  - 1.3 to 2.7 times the step at m = 16;
+  - 3 to 9 times at m = 128-256, where the stencil and prolongation
+    dominate.
+
+Next, on the GPU: the launches.
+- **About 0.2 ms a target region** is far more than a CUDA kernel launch
+  costs (microseconds). It is likely libgomp's own work at each region:
+  its mappings looked up, its arguments copied, a synchronisation. Not
+  measured apart yet: an empty target region, timed, would say.
+- **The ghosts and restriction launch once per level and kind,** so the
+  2D GPU step has a floor of about 3.5 ms.
+- **Fewer launches would lower it:**
+  - levels fused, as far as the order allows (a level jump reads the
+    coarser level's ghosts, filled first);
+  - the copies and prolongations of a level in one kernel;
+  - `nowait`, with dependences.
+- **That matters most in 2D and for small trees.**
 
 ### Benchmark: the level indices
 

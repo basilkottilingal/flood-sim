@@ -10,10 +10,9 @@
 # DIMS (2 3), PRECS (double float): what to run.
 # ARGS2, ARGS3: base depth blockdepth of the tree (default 4 8 5, 2 5 4):
 #   uniform at level base, refined to depth on a shell; blocks of
-#   2^blockdepth cells a side.
+#   2^blockdepth cells a side. Several trees: ';' between them, as
+#   ARGS2="5 9 4; 4 8 5; 3 7 6" (the same finest cell, m 16, 32, 64).
 # GPU=0: the CPU only. GPU_ARCH: the PTX target (default sm_80).
-# GPU_CELLS=0: no build with the library's gpu_cells () (no simd) to
-#   compare with.
 # RAW: a file to keep the raw lines in.
 # Times are medians of 7 or more calls; the machine should be idle.
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -36,7 +35,6 @@ precs=${PRECS:-double float}
 
 variants=cpu
 [ "${GPU:-1}" != 0 ] && variants="$variants gpu"
-[ "${GPU:-1}" != 0 ] && [ "${GPU_CELLS:-1}" != 0 ] && variants="$variants gpuc"
 
 # every binary at once
 fails=0 pids=
@@ -47,7 +45,6 @@ for d in $dims; do
       case $v in
         cpu)  f="$cpu" ;;
         gpu)  f="$gpu" ;;
-        gpuc) f="$gpu -DBENCH_GPU_CELLS" ;;
       esac
       ( "$cwrap" -dimension=$d $f $pf tests/bench_gpu.c $src -lm -o "$dir/$v$d$p" \
           > "$dir/$v$d$p.log" 2>&1 || echo failed >> "$dir/$v$d$p.log" ) &
@@ -67,27 +64,33 @@ for d in $dims; do
 done
 [ "$fails" = 0 ] || exit "$fails"
 
-# one at a time: they would compete
+# one at a time: they would compete. ARGSd may list several trees, ';'
+# between them: each a case of its own, tagged base-depth-blockdepth
 for d in $dims; do
-  eval args=\${ARGS$d:-}
-  [ -z "$args" ] && { [ $d = 2 ] && args="4 8 5" || args="2 5 4"; }
-  for p in $precs; do
-    for v in $variants; do
-      mode=dev; [ $v = cpu ] && mode=cpu
-      if [ $v = cpu ]; then
-        "$dir/$v$d$p" $mode $args > "$dir/out" 2>&1
-      else
-        OMP_TARGET_OFFLOAD=MANDATORY "$dir/$v$d$p" $mode $args > "$dir/out" 2>&1
-      fi
-      st=$?
-      grep '^T\|^C' "$dir/out" | sort -u | sed "s/^/  [$v] /" | grep -v "^  \[gpuc\] T"
-      sed -n "s/^R \([^ ]*\) \([^ ]*\) [^ ]* /R \1 \2 $v /p" "$dir/out" >> "$raw"
-      if [ $st != 0 ]; then
-        echo "FAIL $v ${d}D $p (exit $st)"; grep -v '^[RTC] ' "$dir/out" | tail -5
-        fails=$((fails + 1))
-      fi
+  eval list=\${ARGS$d:-}
+  [ -z "$list" ] && { [ $d = 2 ] && list="4 8 5" || list="2 5 4"; }
+  echo "$list" | tr ';' '\n' > "$dir/cases"
+  while read -r args; do
+    [ -z "$args" ] && continue
+    tag=$(echo $args | tr ' ' -)
+    for p in $precs; do
+      for v in $variants; do
+        mode=dev; [ $v = cpu ] && mode=cpu
+        if [ $v = cpu ]; then
+          "$dir/$v$d$p" $mode $args > "$dir/out" 2>&1 < /dev/null
+        else
+          OMP_TARGET_OFFLOAD=MANDATORY "$dir/$v$d$p" $mode $args > "$dir/out" 2>&1 < /dev/null
+        fi
+        st=$?
+        grep '^T\|^C' "$dir/out" | sort -u | sed "s/^/  [$v $tag] /"
+        sed -n "s/^R \([^ ]*\) \([^ ]*\) [^ ]* /R \1 \2,$tag $v /p" "$dir/out" >> "$raw"
+        if [ $st != 0 ]; then
+          echo "FAIL $v ${d}D $p $tag (exit $st)"; grep -v '^[RTC] ' "$dir/out" | tail -5
+          fails=$((fails + 1))
+        fi
+      done
     done
-  done
+  done < "$dir/cases"
 done
 
 echo
@@ -100,13 +103,13 @@ $1 == "R" {
 function col(k, v) { return ((k, v) in ms) ? sprintf ("%.3f", ms [k, v]) : "-" }
 function ns(k, v) { return ((k, v) in ms) && cells [k] > 0 ? sprintf ("%.2f", 1e6 * ms [k, v] / cells [k]) : "-" }
 END {
-  printf "| case | phase | cells | CPU ms | CPU ns/cell | GPU ms | GPU ns/cell | CPU / GPU | GPU, gpu_cells () ms |\n"
-  printf "|---|---|--:|--:|--:|--:|--:|--:|--:|\n"
+  printf "| case | phase | cells | CPU ms | CPU ns/cell | GPU ms | GPU ns/cell | CPU / GPU |\n"
+  printf "|---|---|--:|--:|--:|--:|--:|--:|\n"
   for (i = 0; i < n; i++) {
     k = order [i]
     r = ((k, "cpu") in ms) && ((k, "gpu") in ms) && ms [k, "gpu"] > 0 ? sprintf ("%.1f", ms [k, "cpu"] / ms [k, "gpu"]) : "-"
-    printf "| %s | %d | %s | %s | %s | %s | %s | %s |\n", k, cells [k], col(k, "cpu"),
-      ns(k, "cpu"), col(k, "gpu"), ns(k, "gpu"), r, col(k, "gpuc")
+    printf "| %s | %d | %s | %s | %s | %s | %s |\n", k, cells [k], col(k, "cpu"),
+      ns(k, "cpu"), col(k, "gpu"), ns(k, "gpu"), r
   }
 }' "$raw"
 cat <<EOF

@@ -517,37 +517,55 @@
   .. number blk, to index its data: u [blk][c] from block_table (), or
   .. u [blk * shape.cells + c] from one device array. See 3. Which one.
   .. Without offload, it runs on the host, in the same order as block_cells.
+  ..
+  .. One flat simd loop over block x cell: gcc's nvptx back end makes an
+  .. OpenMP thread a warp and gives its 32 lanes work only in a simd loop,
+  .. so without simd one lane in 32 works; and simd over loops collapsed
+  .. (blk, ck, cj, ci) was slower still. Each axis of the visited region,
+  .. m + 2 halo cells, is padded to a power of 2, so that the flat index
+  .. splits by shifts; the lanes in the padding do nothing. With halo 0
+  .. there is none (m is a power of 2). RTX A3000, 3D, m = 16, double: 13
+  .. times the collapsed loops on a stencil (tests/run2.sh).
   */
   @loop gpu_cells (BlockShape shape, int nblocks, int halo) : blk, CIJK, c, shape
   {
-    int h = block_halo (shape, halo);
-    int ilo = shape.ox - h, ihi = shape.ox + shape.m + h;
-    int jlo = shape.g - h, jhi = shape.g + shape.m + h;
-    (void) jlo, (void) jhi;
+    int bamr_h = block_halo (shape, halo), bamr_n = shape.m + 2 * bamr_h;
+    int bamr_ln = 0;
+    while ((1 << bamr_ln) < bamr_n)
+      bamr_ln++;
+    int bamr_mask = (1 << bamr_ln) - 1;
+    int bamr_ilo = shape.ox - bamr_h, bamr_jlo = shape.g - bamr_h;
+    int bamr_sy = shape.sy, bamr_sz = shape.sz;
+    (void) bamr_jlo, (void) bamr_sy, (void) bamr_sz;
+    long bamr_total = (long) nblocks << (dimension * bamr_ln);
   #if BLOCK_OFFLOAD
-    #if dimension == 1
-    BLOCK_PRAGMA (omp target teams distribute parallel for collapse (2))
-    #elif dimension == 2
-    BLOCK_PRAGMA (omp target teams distribute parallel for collapse (3))
-    #else
-    BLOCK_PRAGMA (omp target teams distribute parallel for collapse (4))
-    #endif
+    BLOCK_PRAGMA (omp target teams distribute parallel for simd)
   #endif
-    for (int blk = 0; blk < nblocks; blk++)
-  #if dimension > 2
-    for (int ck = jlo; ck < jhi; ck++)
-  #endif
-  #if dimension > 1
-    for (int cj = jlo; cj < jhi; cj++)
-  #endif
-    for (int ci = ilo; ci < ihi; ci++)
+    for (long bamr_e = 0; bamr_e < bamr_total; bamr_e++)
     {
+      int blk = (int) (bamr_e >> (dimension * bamr_ln));
+      int ci = (int) (bamr_e & bamr_mask);
+      if (ci >= bamr_n)
+        continue;
+      ci += bamr_ilo;
+  #if dimension > 1
+      int cj = (int) ((bamr_e >> bamr_ln) & bamr_mask);
+      if (cj >= bamr_n)
+        continue;
+      cj += bamr_jlo;
+  #endif
+  #if dimension > 2
+      int ck = (int) ((bamr_e >> (2 * bamr_ln)) & bamr_mask);
+      if (ck >= bamr_n)
+        continue;
+      ck += bamr_jlo;
+  #endif
       int c = ci
   #if dimension > 1
-        + cj * shape.sy
+        + cj * bamr_sy
   #endif
   #if dimension > 2
-        + ck * shape.sz
+        + ck * bamr_sz
   #endif
         ;
       (void) c;

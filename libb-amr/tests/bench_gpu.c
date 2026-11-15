@@ -248,53 +248,6 @@ static void cpu_step (void)
 /* dev: the blocks on the device                                          */
 /* ---------------------------------------------------------------------- */
 
-/*
-.. dev_cells: gpu_cells () (block-loops.h) as one flat loop with simd.
-.. gcc's nvptx back end makes an OpenMP thread a warp, and gives its 32
-.. lanes work only in a simd loop: without simd, one lane in 32 works
-.. (the copy kernels: 2.3 times faster with it); but simd over gpu_cells'
-.. collapsed loops was 2.8 times slower than without. -DBENCH_GPU_CELLS
-.. takes gpu_cells () as it is instead, to compare.
-*/
-@loop dev_cells (BlockShape shape, int nblocks, int halo) : blk, CIJK, c, shape
-{
-#ifdef BENCH_GPU_CELLS
-  gpu_cells (shape, nblocks, halo)
-    {...}
-#else
-  /* the interior only (halo 0), as one loop over block x cell, the index
-   * split by shifts: m is a power of 2 */
-  assert (halo == 0);
-  (void) halo;
-  int lm = 0;
-  while ((1 << lm) < shape.m)
-    lm++;
-  int mask = shape.m - 1, ox = shape.ox, g = shape.g, sy = shape.sy;
-# if dimension > 2
-  int sz = shape.sz;
-# endif
-  long n = (long) nblocks << (dimension * lm);
-# if BLOCK_OFFLOAD
-  BLOCK_PRAGMA (omp target teams distribute parallel for simd)
-# endif
-  for (long e = 0; e < n; e++)
-  {
-    int blk = (int) (e >> (dimension * lm));
-    int ci = ox + (int) (e & mask), cj = g + (int) ((e >> lm) & mask);
-# if dimension > 2
-    int ck = g + (int) ((e >> (2 * lm)) & mask);
-# endif
-    int c = ci + cj * sy
-# if dimension > 2
-      + ck * sz
-# endif
-      ;
-    (void) c;
-    {...}
-  }
-#endif
-}
-
 enum { NC = TREE_NCHILDREN };
 enum { K_COPY, K_WALLC, K_JUMP, K_WALLP, NK };   /* copy kinds, then
                                                     prolongation kinds */
@@ -569,7 +522,7 @@ static void dev_restrict (void)
     int q0 = tc->parent_first [l], np = tc->parent_first [l + 1] - q0;
     if (!np)
       continue;
-    dev_cells (shape, np, 0) {
+    gpu_cells (shape, np, 0) {
       int x0 = ci - ox, x1 = cj - g, k = (x0 >= h) | (x1 >= h) << 1;
       int f0 = 2 * x0 - (x0 >= h) * m, f1 = 2 * x1 - (x1 >= h) * m;
 #if dimension > 2
@@ -681,7 +634,7 @@ static void dev_prolong (void)
     if (!np)
       continue;
     /* block blk: child blk % NC of parent blk / NC */
-    dev_cells (shape, np * NC, 0) {
+    gpu_cells (shape, np * NC, 0) {
       int q = q0 + blk / NC, k = blk % NC;
       int X0 = (k & 1) * m + ci - ox, X1 = ((k >> 1) & 1) * m + cj - g;
       int C = (X0 >> 1) + ox + ((X1 >> 1) + g) * sy;
@@ -708,7 +661,7 @@ static void dev_stencil (void)
   const int * lf = LF;
   long cl = cells;
   Real kd = kdiff;
-  dev_cells (shape, nleaves, 0) {
+  gpu_cells (shape, nleaves, 0) {
     const Real * a = u_ + lf [blk] * cl;
     v_ [lf [blk] * cl + c] = a [c] + kd * LAP (a);
   }
