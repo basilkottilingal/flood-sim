@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _MPI
@@ -10,16 +11,18 @@
 #include "block-ghosts.h"
 #include "tree-mpi.h"
 
-/* a node needed by the process being pruned for, set only during
-.. tree_prune (): a bit no other code uses */
+/* a node needed by the process being pruned for, and the root of a
+.. subtree with nothing needed: set only during tree_mpi_prune (), bits no
+.. other code uses */
 #define TREE_MPI_NEEDED (1 << 30)
+#define TREE_MPI_EMPTY  (1 << 29)
 
 /* ---------------------------------------------------------------------- */
 /* 1. the partition                                                       */
 /* ---------------------------------------------------------------------- */
 
 static TreePartition part;
-static int made = 0, npruned = 0;
+static int made = 0;
 
 void tree_partition_free (void)
 {
@@ -39,12 +42,42 @@ int tree_partition_valid (void)
   return made && part.generation == tree_generation;
 }
 
+/*
+.. the partition recorded from the leaves' pids, set already, and each
+.. process's load (taken)
+*/
+static void partition_record (int npe, double * load)
+{
+  const TreeCaches * tc = tree_caches ();
+  int n = tc->nleaves;
+  int * first = malloc ((size_t) (npe + 1) * sizeof (int));
+  if (!first)
+    abort ();
+  /* the first leaf of each process: pid does not decrease along the curve */
+  for (int r = 0, q = 0; r <= npe; r++)
+  {
+    while (q < n && tc->leaves [q].node->pid < r)
+      q++;
+    first [r] = q;
+  }
+  double total = 0, most = 0;
+  for (int r = 0; r < npe; r++)
+  {
+    total += load [r];
+    most = load [r] > most ? load [r] : most;
+  }
+  tree_partition_free ();
+  part = (TreePartition) {
+    .npe = npe, .nleaves = n, .leaf_first = first, .load = load,
+    .imbalance = n ? most / (total / npe) : 1, .generation = tree_generation,
+  };
+  made = 1;
+}
+
 int tree_partition (int npe, const double * weight)
 {
-  if (npe < 1)
+  if (npe < 1 || tree_pruned ())
     return -1;
-  if (npruned)
-    tree_unprune ();
   const TreeCaches * tc = tree_caches ();
   int n = tc->nleaves;
   double total = 0;
@@ -55,9 +88,8 @@ int tree_partition (int npe, const double * weight)
         return -1;
       total += weight [q];
     }
-  int * first = malloc ((size_t) (npe + 1) * sizeof (int));
   double * load = calloc ((size_t) npe, sizeof (double));
-  if (!first || !load)
+  if (!load)
     abort ();
 
   /*
@@ -81,14 +113,6 @@ int tree_partition (int npe, const double * weight)
     tc->leaves [q].node->pid = pid;
     load [pid] += w;
   }
-  /* the first leaf of each process: pid does not decrease along the curve */
-  for (int r = 0, q = 0; r <= npe; r++)
-  {
-    while (q < n && tc->leaves [q].node->pid < r)
-      q++;
-    first [r] = q;
-  }
-
   /* the parents, finest first: the smallest pid of their children */
   for (int l = tc->depth - 1; l >= 0; l--)
     for (int b = tc->parent_first [l]; b < tc->parent_first [l + 1]; b++)
@@ -103,15 +127,7 @@ int tree_partition (int npe, const double * weight)
       tc->parents_by_level [b].node->pid = pid;
     }
 
-  double mean = (weight ? total : n) / npe, most = 0;
-  for (int r = 0; r < npe; r++)
-    most = load [r] > most ? load [r] : most;
-  tree_partition_free ();
-  part = (TreePartition) {
-    .npe = npe, .nleaves = n, .leaf_first = first, .load = load,
-    .imbalance = n ? most / mean : 1, .generation = tree_generation,
-  };
-  made = 1;
+  partition_record (npe, load);
   return 0;
 }
 
@@ -146,19 +162,6 @@ static Index index_shift (Index p, int a, int d)
   return p;
 }
 
-static Index index_parent (Index p)
-{
-  p.level--;
-  p.i >>= 1;
-  #if dimension > 1
-  p.j >>= 1;
-  #endif
-  #if dimension > 2
-  p.k >>= 1;
-  #endif
-  return p;
-}
-
 /* p + d for direction dir; 0 if outside the domain */
 static int index_dir (Index p, int dir, Index * b)
 {
@@ -176,24 +179,29 @@ static int index_dir (Index p, int dir, Index * b)
 
 TreeNeighbours tree_neighbours (Index p)
 {
-  TreeNeighbours m = { 0, 0, 0 };
+  TreeNeighbours m = { 0, 0, 0, { 0 } };
   for (int dir = 0; dir < TREE_NDIRS; dir++)
   {
     Index b;
+    m.pid [dir] = -1;
     if (dir == TREE_DIR_CENTRE || !index_dir (p, dir, &b))
       continue;
     uint32_t bit = (uint32_t) 1 << dir;
     if (index_is_allocated (b))
     {
-      if (index_node (b)->flags & BAMR_NODE_HAS_CHILDREN)
+      BAMRNode * node = index_node (b);
+      if (node->flags & BAMR_NODE_HAS_CHILDREN)
         m.fine |= bit;
       else
         m.same |= bit;
+      m.pid [dir] = node->pid;
     }
     else
     {
-      assert (p.level > 0 && index_is_allocated (index_parent (b)));
+      Index C = index_parent (b);
+      assert (p.level > 0 && index_is_allocated (C));
       m.coarse |= bit;
+      m.pid [dir] = index_node (C)->pid;
     }
   }
   return m;
@@ -268,7 +276,7 @@ static void need (Needs * v, int rank, int parents, int kind, int level,
 
 TreeMpiPlan * tree_mpi_plan_new (int rank)
 {
-  assert (tree_partition_valid () && !npruned);
+  assert (tree_partition_valid () && !tree_pruned ());
   assert (rank >= 0 && rank < part.npe);
   const TreeCaches * tc = tree_caches ();
   TreeMpiPlan * plan = calloc (1, sizeof (TreeMpiPlan));
@@ -276,6 +284,7 @@ TreeMpiPlan * tree_mpi_plan_new (int rank)
     abort ();
   plan->rank = rank, plan->npe = part.npe;
   plan->depth = tc->depth, plan->depth_min = tree_get_depth_min ();
+  plan->generation = tree_generation;
 
   Needs v = { NULL, 0, 0 };
   for (int parents = 0; parents < 2; parents++)
@@ -380,24 +389,9 @@ void tree_mpi_plan_free (TreeMpiPlan * plan)
 /* 4. pruning                                                             */
 /* ---------------------------------------------------------------------- */
 
-/* the lists made again; the partition, if it was valid, still is */
-static void flags_changed (void)
+int tree_mpi_prune (const TreeMpiPlan * plan)
 {
-  int valid = tree_partition_valid ();
-  tree_caches_changed ();
-  if (valid)
-    part.generation = tree_generation;
-}
-
-int tree_pruned (void)
-{
-  return npruned;
-}
-
-int tree_prune (const TreeMpiPlan * plan)
-{
-  if (npruned)
-    tree_unprune ();
+  assert (plan->generation == tree_generation);
   const TreeCaches * tc = tree_caches ();
   /* needed: the process's nodes and what it receives */
   for (int q = 0; q < tc->nall; q++)
@@ -415,9 +409,10 @@ int tree_prune (const TreeMpiPlan * plan)
   /*
   .. in Morton order a parent comes right after its children's subtrees:
   .. any [l] says whether a node of level l since the last parent of level
-  .. l - 1 has something needed in its subtree
+  .. l - 1 has something needed in its subtree. A parent with nothing
+  .. needed below is EMPTY
   */
-  int any [BAMR_MAX_DEPTH + 2] = { 0 }, n = 0;
+  int any [BAMR_MAX_DEPTH + 2] = { 0 };
   for (int q = 0; q < tc->nall; q++)
   {
     BAMRNode * node = tc->all [q].node;
@@ -427,38 +422,28 @@ int tree_prune (const TreeMpiPlan * plan)
       below = any [l + 1];
       any [l + 1] = 0;
       if (!below)
-        node->flags |= BAMR_NODE_IS_PRUNED, n++;
+        node->flags |= TREE_MPI_EMPTY;
     }
     any [l] |= below || (node->flags & TREE_MPI_NEEDED);
-    node->flags &= ~TREE_MPI_NEEDED;
   }
-  npruned = n;
-  flags_changed ();
-  return n;
-}
-
-/* every node below p, pruned or not, unpruned: how many were */
-static int unprune_below (Index p, BAMRNode * node)
-{
-  int n = (node->flags & BAMR_NODE_IS_PRUNED) != 0;
-  node->flags &= ~BAMR_NODE_IS_PRUNED;
-  if (node->flags & BAMR_NODE_HAS_CHILDREN)
-    for (int c = 0; c < TREE_NCHILDREN; c++)
-    {
-      Index q = index_child (p, c);
-      n += unprune_below (q, index_node (q));
-    }
-  return n;
-}
-
-int tree_unprune (void)
-{
-  if (!npruned)
-    return 0;
-  int n = unprune_below (TREE_ROOT_INDEX, index_node (TREE_ROOT_INDEX));
-  assert (n == npruned);
-  npruned = 0;
-  flags_changed ();
+  /* the largest: EMPTY, its parent not */
+  Index * root = malloc ((size_t) (tc->nall ? tc->nall : 1) * sizeof (Index));
+  if (!root)
+    abort ();
+  int n = 0;
+  for (int q = 0; q < tc->nall; q++)
+  {
+    Index p = tc->all [q].p;
+    if ((tc->all [q].node->flags & TREE_MPI_EMPTY)
+        && (!p.level || !(index_node (index_parent (p))->flags
+                          & TREE_MPI_EMPTY)))
+      root [n++] = p;
+  }
+  for (int q = 0; q < tc->nall; q++)
+    tc->all [q].node->flags &= ~(TREE_MPI_NEEDED | TREE_MPI_EMPTY);
+  for (int k = 0; k < n; k++)
+    tree_prune (root [k]);
+  free (root);
   return n;
 }
 
@@ -477,23 +462,54 @@ const TreeMpiPlan * tree_mpi_plan (void)
 
 void tree_mpi_end (void)
 {
-  if (!applied)
-    return;
-  tree_unprune ();
   tree_mpi_plan_free (applied);
   applied = NULL;
+  tree_partition_free ();
 }
 
 int tree_mpi_partition (const double * weight)
 {
-  int rank, npe;
-  MPI_Comm_rank (MPI_COMM_WORLD, &rank);
-  MPI_Comm_size (MPI_COMM_WORLD, &npe);
+  int rank = tree_rank (), npe = tree_npe ();
   tree_mpi_end ();
-  if (tree_partition (npe, weight))
+  /* rank 0 partitions: whether it did, and its tree's size */
+  int head [2] = { 0, tree_caches ()->nall };
+  if (rank == 0)
+    head [0] = tree_partition (npe, weight);
+  MPI_Bcast (head, 2, MPI_INT, 0, MPI_COMM_WORLD);
+  if (head [0])
     return -1;
+  const TreeCaches * tc = tree_caches ();
+  if (head [1] != tc->nall || tree_pruned ())
+  {
+    fprintf (stderr, "tree_mpi_partition (): rank %d: the tree is not rank "
+             "0's (%d nodes, rank 0 %d; %d pruned)\n", rank, tc->nall,
+             head [1], tree_pruned ());
+    abort ();
+  }
+  /* the others: every node's pid, in Morton order, and the loads */
+  int * pid = malloc ((size_t) (tc->nall ? tc->nall : 1) * sizeof (int));
+  double * load = malloc ((size_t) npe * sizeof (double));
+  if (!pid || !load)
+    abort ();
+  if (rank == 0)
+  {
+    for (int q = 0; q < tc->nall; q++)
+      pid [q] = tc->all [q].node->pid;
+    memcpy (load, part.load, (size_t) npe * sizeof (double));
+  }
+  MPI_Bcast (pid, tc->nall, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Bcast (load, npe, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  if (rank)
+  {
+    for (int q = 0; q < tc->nall; q++)
+      tc->all [q].node->pid = pid [q];
+    partition_record (npe, load);
+  }
+  else
+    free (load);
+  free (pid);
   applied = tree_mpi_plan_new (rank);
-  tree_prune (applied);
+  tree_mpi_prune (applied);
   ghosts_mark_all_dirty ();
   return 0;
 }

@@ -14,7 +14,7 @@
 
 enum { NP_MAX = 16, REQ_MAX = 1024 };
 
-static int me = 0, np = 1, fd [NP_MAX];
+static int me = 0, np = 1, fd [NP_MAX], initialized = 0;
 static pid_t child [NP_MAX];
 
 typedef struct
@@ -73,6 +73,13 @@ int MPI_Init (int * argc, char *** argv)
       }
     }
   fd [me] = -1;
+  initialized = 1;
+  return 0;
+}
+
+int MPI_Initialized (int * flag)
+{
+  *flag = initialized;
   return 0;
 }
 
@@ -198,6 +205,33 @@ int MPI_Waitall (int n, MPI_Request * req, MPI_Status * status)
     if (poll (pf, (nfds_t) npf, 60000) <= 0)
       fail ("no progress in 60 s");
   }
+}
+
+/* root sends to every other rank in turn */
+int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
+               MPI_Comm comm)
+{
+  size_t size = type == MPI_BYTE ? 1 : type == MPI_INT ? sizeof (int)
+              : type == MPI_LONG ? sizeof (long)
+              : type == MPI_DOUBLE ? sizeof (double) : 0;
+  if (!size || count < 0 || root < 0 || root >= np)
+    fail ("Bcast: MPI_BYTE, MPI_INT, MPI_LONG or MPI_DOUBLE from a rank");
+  int bytes = (int) ((size_t) count * size), tag = -2;
+  MPI_Request q;
+  if (me == root)
+    for (int r = 0; r < np; r++)
+    {
+      if (r == root)
+        continue;
+      MPI_Isend (buf, bytes, MPI_BYTE, r, tag, comm, &q);
+      MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
+    }
+  else
+  {
+    MPI_Irecv (buf, bytes, MPI_BYTE, root, tag, comm, &q);
+    MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
+  }
+  return 0;
 }
 
 int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,

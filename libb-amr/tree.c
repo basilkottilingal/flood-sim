@@ -8,6 +8,9 @@
 #include "block-ghosts.h"
 #include "pool.h"
 #include "libutils/bits.h"
+#ifdef _MPI
+# include <mpi.h>
+#endif
 
 #define G(x) grid_info_##x
 
@@ -17,9 +20,9 @@
 #endif
 
 /*
-.. Terminal cells, leaves (or pruned cells, with MPI), per level, and as
-.. bits: bit l of level_bits is set while level l has any. The coarsest
-.. level of a leaf is then the lowest bit, and the depth the highest.
+.. Leaves per level, and as bits: bit l of level_bits is set while level l
+.. has any. The coarsest level of a leaf is then the lowest bit, and the
+.. depth the highest. Pruned nodes are not leaves.
 */
 static double G(x0) = 0.;     /* left corner of domain            */
 static double G(y0) = 0.;     /* bottom corner of domain          */
@@ -31,6 +34,24 @@ static int G(depthmax) = 1;   /* max depth forced by user         */
 static int G(blockdepth) = 1; /* 2^blockdepth cells per block side */
 static int G(nleaves) [BAMR_MAX_DEPTH + 1];
 static uint32_t G(level_bits) = 0;
+static int G(npruned) = 0;    /* pruned nodes: tree_prune ()      */
+
+/* the processes (tree.h): MPI_COMM_WORLD's, read by tree (); or constants */
+#ifdef _MPI
+static int G(npe) = 1, G(rank) = 0;
+#else
+static const int G(npe) = 1, G(rank) = 0;
+#endif
+
+int tree_npe (void)
+{
+  return G(npe);
+}
+
+int tree_rank (void)
+{
+  return G(rank);
+}
 LevelIndex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;       /* the root, which has no siblings */
 
@@ -64,9 +85,8 @@ static Pool * pool_family = NULL;     /* TREE_NCHILDREN nodes at once    */
 #define is_parent()  (node->flags & BAMR_NODE_HAS_CHILDREN)
 
 /*
-.. n terminal cells more (or fewer, n < 0) at level l: every change of the
-.. counts goes through here, so that level_bits follows them. Code that
-.. prunes cells (MPI) counts them here too.
+.. n leaves more (or fewer, n < 0) at level l: every change of the counts
+.. goes through here, so that level_bits follows them.
 */
 static void terminal_add (int l, int n)
 {
@@ -103,6 +123,7 @@ void tree_destroy (void)
   G(nb) = 0;
   G(nlb) = 0;
   G(level_bits) = 0;
+  G(npruned) = 0;
   G(depthmax) = 1;
   G(blockdepth) = 1;
 }
@@ -111,6 +132,7 @@ void tree_destroy (void)
 static BAMRNode * allocate_root (void)
 {
   BAMRNode * node = pool_alloc (pool_node);   /* zeroed: flags 0 */
+  node->pid = G(rank);
   node->s = grid_scalar_table_new ();
   grid_scalar_root_blocks (node->s);
   return node;
@@ -135,7 +157,10 @@ static int add_children (int IJKLargs)
   BAMRNode * family = pool_alloc (pool_family);     /* zeroed: flags 0 */
   void *** t [TREE_NCHILDREN];
   for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
     t [c] = family [c].s = grid_scalar_table_new ();
+    family [c].pid = node->pid;       /* the owner's, until partitioned */
+  }
   grid_scalar_family_new (t, 1);
   int c = 0;
   children_of ((Index) {IJKL})
@@ -218,17 +243,19 @@ static int inside (Index q)
 static Index covering (Index q)
 {
   while (!index_is_allocated (q))
-  {
-    q.level--;
-    q.i >>= 1;
-  #if dimension > 1
-    q.j >>= 1;
-  #endif
-  #if dimension > 2
-    q.k >>= 1;
-  #endif
-  }
+    q = index_parent (q);
   return q;
+}
+
+/* refining and coarsening read the whole tree around a node */
+static void not_pruned (const char * f)
+{
+  if (G(npruned))
+  {
+    fprintf (stderr, "%s (): the tree is pruned (tree_prune ()): it cannot "
+             "be refined or coarsened yet\n", f);
+    abort ();
+  }
 }
 
 /*
@@ -239,6 +266,7 @@ static Index covering (Index q)
 */
 int tree_refine (Index p)
 {
+  not_pruned ("tree_refine");
   if (!index_is_allocated (p) || p.level >= G(depthmax)
       || !(index_node (p)->flags & BAMR_NODE_LEAF))
     return 0;
@@ -273,6 +301,7 @@ static int touches (Index p, Index q)
 
 int tree_coarsen (Index p)
 {
+  not_pruned ("tree_coarsen");
   if (!index_is_allocated (p) || !tree_has_children (index_node (p)))
     return 0;
   children_of (p)
@@ -317,6 +346,16 @@ static int grid_init (int depthmax, int blockdepth)
   }
   G (depthmax)   = depthmax;
   G (level_bits) = 0;
+  G (npruned)    = 0;
+  #ifdef _MPI
+  int on = 0;
+  MPI_Initialized (&on);
+  if (on)
+  {
+    MPI_Comm_size (MPI_COMM_WORLD, &G(npe));
+    MPI_Comm_rank (MPI_COMM_WORLD, &G(rank));
+  }
+  #endif
   G (blockdepth) = blockdepth;
 
   assert (GHOSTS >= 1 && 2 * GHOSTS <= bm);
@@ -358,6 +397,58 @@ int tree (int depthmax, int blockdepth)
     blockdepth > blockdepth_max ? blockdepth_max : blockdepth;
   grid_init (depthmax, blockdepth);
   return 1;
+}
+
+/*
+.. Every family below p freed, nodes and blocks, deepest first: the nodes
+.. freed. The leaves and pruned nodes among them leave the counts.
+*/
+static int free_below (Index p)
+{
+  BAMRNode * family = NULL;
+  void *** t [TREE_NCHILDREN];
+  int n = TREE_NCHILDREN;
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
+    Index q = index_child (p, c);
+    BAMRNode * child = index_node (q);
+    assert (child);
+    if (child->flags & BAMR_NODE_HAS_CHILDREN)
+      n += free_below (q);
+    if (child->flags & BAMR_NODE_LEAF)
+      terminal_add (q.level, -1), G(nlb)--;
+    if (child->flags & BAMR_NODE_IS_PRUNED)
+      G(npruned)--;
+    if (!c)
+      family = child;                 /* child 0 starts the family's object */
+    t [c] = child->s;
+    INDEX_UNPACK (q);
+    lidx_free (& G (layers) [level], IJK, 1 << level, child);
+  }
+  grid_scalar_family_free (t);
+  pool_free (pool_family, family);
+  G(nb) -= TREE_NCHILDREN;
+  return n;
+}
+
+int tree_prune (Index p)
+{
+  if (!index_is_allocated (p))
+    return 0;
+  BAMRNode * node = index_node (p);
+  if (!(node->flags & BAMR_NODE_HAS_CHILDREN))
+    return 0;
+  caches_changed ();
+  int n = free_below (p);
+  node->flags = (node->flags & ~(BAMR_NODE_HAS_CHILDREN | BAMR_NODE_LEAF))
+                | BAMR_NODE_IS_PRUNED;
+  G(npruned)++;
+  return n;
+}
+
+int tree_pruned (void)
+{
+  return G(npruned);
 }
 
 void tree_shift_resize (double x0, double y0, double z0, double h0)

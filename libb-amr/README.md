@@ -235,24 +235,36 @@ change during such a loop: that stops the run. See `traversal-caches.md`.
 
 ## MPI: partition, plans, pruning (tree-mpi.h)
 
-The first step to MPI. Every process still holds the whole tree. What is
-new is who owns each node, what each process exchanges for the ghosts, and
-which subtrees it hides. All of it is computed from the tree in the same
-way on every process, so it runs and is tested in one process for any
-number of processes. With `-D_MPI`, `tree_mpi_partition ()` applies it on
-`MPI_COMM_WORLD`, and `ghosts_update ()` exchanges blocks.
+Every process builds the same whole tree. Then rank 0 partitions it and
+tells the others; each process works out what it exchanges for the ghosts,
+and frees the subtrees it does not need. The partition, the plans and the
+pruning are computed from the tree with no MPI call, so they run and are
+tested in one process for any number of processes. With `-D_MPI`,
+`tree_mpi_partition ()` applies them on `MPI_COMM_WORLD`, and
+`ghosts_update ()` exchanges blocks.
 
+- **Ranks** (`tree.h`). `tree_npe ()` and `tree_rank ()` read two statics
+  of `tree.c`. With `-D_MPI` they are `MPI_COMM_WORLD`'s, read by `tree ()`
+  (after `MPI_Init ()`); without, constants: 1 and 0. Ranks are 0-based,
+  as MPI's.
+- **The owner, `node->pid`.** The root gets `tree_rank ()`, children their
+  parent's pid, so a tree made on a process is that process's until it is
+  partitioned. `ghosts_update_list ()` makes the ghosts of, and restricts,
+  the nodes with `pid == tree_rank ()` only, with or without MPI (on one
+  process, every node).
 - **Partition.** The leaves are cut along the Morton curve into npe
   contiguous pieces by weight. Leaf q goes to `floor (npe (W_q + w_q / 2) /
   W)`, the piece that holds its middle; with unit weights this is computed
   in integers, and the pieces differ by one leaf at most. A parent goes to
-  the process of its first leaf. The owner is `node->pid`. A refinement
-  makes the partition stale (`tree_partition_valid ()`).
+  the process of its first leaf. A refinement, a coarsening or a pruning
+  makes the partition stale (`tree_partition_valid ()`); a pruned tree is
+  refused.
 - **Neighbours as bit maps.** `tree_neighbours (p)` gives three masks of
   3^D - 1 bits, numbered as `block_ghosts ()` numbers its regions: `same`
   (a leaf of p's level), `fine` (a parent of p's level), `coarse` (no node
   there: the leaf one level coarser covers it). A wall is no bit. The 2:1
-  balance makes these the only cases.
+  balance makes these the only cases. `pid [dir]` is the rank of the node
+  read there (that node, or the coarse leaf), -1 outside.
 - **The plan.** A process restricts its own parents and makes its own
   nodes' ghosts, in the order of one process. Before each step it receives
   whole blocks (interior and ghosts, every scalar of the update) from the
@@ -267,21 +279,31 @@ number of processes. With `-D_MPI`, `tree_mpi_partition ()` applies it on
   Each exchange is one list per peer, sorted by level, then k, j, i, on
   both sides. So one message per peer of known length is enough, with no
   size sent first. There is one plan for leaves (`ghosts_update ()`) and
-  one for every node (`ghosts_update_levels ()`).
-- **Pruning.** A process needs its nodes, what it receives, and their
-  ancestors. The root of a subtree with none of those gets
-  `BAMR_NODE_IS_PRUNED`, so `tree_has_children ()` says no, and the tree's
-  lists, `foreach_leaf ()` and `morton ()` skip what is below it. The nodes
-  and blocks stay. Blocks of a scalar are made and freed below pruned roots
-  too (`grid-scalar.c` walks the children a node has, not
-  `tree_has_children ()`), so `tree_unprune ()` gives the tree back as it
-  was. `tree_caches_changed ()` (`tree.h`, new) makes the lists again
-  after flags set by hand.
+  one for every node (`ghosts_update_levels ()`). The plan keeps the
+  whole tree's depth and coarsest leaf level: the levels the update walks
+  and exchanges at, the same on every process after pruning.
+- **Pruning, for real.** A process needs its nodes, what it receives, and
+  their ancestors. `tree_mpi_prune (plan)` finds the largest subtrees with
+  nothing needed below their root, and `tree_prune (p)` (`tree.c`) frees
+  each: the nodes below p, their blocks, their entries in the level index,
+  the counts (`tree_get_nblocks ()`, `tree_get_nleaves ()`, the levels of
+  `tree_get_depth ()` and `tree_get_depth_min ()`). The root p stays, with
+  its blocks and its pid: `BAMR_NODE_IS_PRUNED`, no children, not a leaf;
+  in the lists of every node and by level, in none of leaves and parents.
+  A parent that is received but whose children are not keeps its block
+  only. A family whose one child is needed keeps all its children (they
+  are allocated together). It cannot be undone; refining or coarsening a
+  pruned tree stops the run.
+- **`tree_mpi_partition (weight)`.** Rank 0 partitions, with its weights,
+  and sends every node's pid (in Morton order) and the loads to ranks 1 to
+  npe - 1 by `MPI_Bcast`; the others set the pids and record the same
+  partition. A tree of another size than rank 0's stops the run. Each then
+  makes its plan and prunes. `tree_mpi_end ()` frees the plan and the
+  partition; the tree stays pruned.
 - **In `ghosts_update_list ()`** (`#ifdef _MPI`, with a plan applied): the
-  exchange before each restriction level and each ghost level; only nodes
-  with `pid == rank` processed; the levels those of the tree before
-  pruning, the same on every process. Without `_MPI`, or with no plan
-  applied, nothing changes: `compare.sh` is bit for bit.
+  exchange before each restriction level and each ghost level, at the
+  plan's levels. Without `_MPI`, every node has pid 0 = rank: nothing
+  changes but one comparison per block.
 
 ### Tests
 
@@ -289,52 +311,65 @@ number of processes. With `-D_MPI`, `tree_mpi_partition ()` applies it on
 
 | what | against |
 |---|---|
+| ranks, owners | `tree_npe () == 1`, `tree_rank () == 0`; after `tree ()` every pid 0; a refined leaf's children get its pid |
 | unit-weight cut | the closed form `floor (npe (2 q + 1) / (2 n))`; pieces within one leaf; none empty when n >= npe |
 | weighted cut | loads summed again from the pids; max <= W / npe + w_max, and <= the optimal contiguous cut (bisection with greedy packing) + w_max |
 | parents | the smallest pid of the leaves inside the parent's box, by search |
-| bit maps, every node and direction | the leaves that overlap the neighbour's box on the finest lattice |
+| bit maps and ranks, every node and direction | the leaves that overlap the neighbour's box on the finest lattice; the pid of the node read, by search |
 | plans for npe = 1, 4, 7 | what each process must receive, from that geometry, from the owners; every send list equal, item for item, to the matching receive list |
-| pruning, each process | every needed node listed; a node hidden only below a pruned root; nothing needed below a pruned root; something needed below every open parent; a scalar made and freed while pruned; unprune gives the same lists, `grid_scalar_check ()` passes |
+| pruning, each process of npe = 1, 4, 7 (sphere), 2^D + 3 (uniform: some own nothing) | the tree made again for each; a node kept iff it is the root or its parent has something needed strictly below, by a search of boxes; every kept node at its place with its flags and pid, the pruned ones `IS_PRUNED` without children; every other node gone from the level index; `tree_pruned ()`, the node and leaf counts, the depth and coarsest level (0 with no leaf left), the lists; the partition stale and refused; a pruned node not pruned again; a scalar made and freed, `grid_scalar_check ()` |
 | bad arguments, staleness | npe 0, weight 0 or NaN refused, partition kept; stale after refining |
 
 `tests/test_mpi.c`, with `-D_MPI`: a cell scalar, a face vector and a
-vertex scalar on a tree refined about a sphere. The reference is
-`ghosts_update ()` on one process. Then, on npe processes, every block a
-process does not own is poisoned (NaN), and so are the ghosts of its own
+vertex scalar on a tree refined about a sphere. The references are
+`ghosts_update ()` on the whole tree, before the partition (each process
+owns every node then). Each process also makes the partition itself, to
+compare with what rank 0 sends, and then gives every node back its own
+rank. After `tree_mpi_partition ()`, every node needed is still there, and
+the pids and the partition are those made locally. Then every kept block
+a process does not own is poisoned (NaN), and so are the ghosts of its own
 leaves and its own parents. After `ghosts_update ()`, every cell that the
 update writes in an owned node must equal the reference bit for bit, for
-leaves and for every node. Runs in 1-3D, double and float, on 1, 2, 4 and
-7 processes, ASan and UBSan, all pass. The cells that the update writes
-are found from two references with different prefills.
+leaves and for every node; a block read but pruned would be a crash under
+ASan. Last, `tree_mpi_end ()` leaves the tree pruned, and an update with no
+plan runs. Runs in 1-3D, double and float, ASan and UBSan, on 1, 2, 3, 4,
+7, 10, 13 and 16 processes of `tests/mpi-fork`: all pass (3D in double on
+16 processes needs more than this machine's 11 GB free, each rank holding
+four whole-tree snapshots: one rank is killed; in float it passes).
 
-Deliberate bugs, one line each (failures in `test_partition` /
-`test_mpi` on 3 processes, 2D and 3D):
+Deliberate bugs, one line each (`test_partition` failures, then
+`test_mpi` on 3 processes, in 2D and 3D; "crash": a rank stops, by ASan
+or a missing message):
 
 | bug | partition 2D, 3D | mpi 2D, 3D |
 |---|---|---|
-| reflux children not in the plan | 2, 2 | 7, 7 |
-| coarse leaf sent one level early (stale ghosts) | 3, 3 | 7, 7 |
-| restriction plan one level short | 3, 3 | 4, 4 |
-| restriction plan: first child only | 3, 3 | 4, 7 |
-| `fine` and `same` swapped | 1, 1 | 1, 1 |
-| pruning ignores what is received | 12, 12 | 7, 13 |
-| partition stale after (un)pruning | 25, 25 | 7, 7 |
-| ghosts exchanged after the level, not before | - | 7, 7 |
-| restriction exchange dropped | - | 4, 7 |
-| pruning ignores what is below | 4, 0 | caught in 2D (visibility check), 0 in 3D |
-| a parent owned by its largest child | 28, 28 | 0, 0 (any one owner works: only the documented rule breaks) |
-| remote nodes processed too | - | 0, 0 (wasted work, then overwritten by what is received) |
+| pruning ignores what is received | 66, 66 | crash, crash |
+| nested roots pruned (not the largest only) | 11, 11 | 0, 0 |
+| freed leaves left in the level counts | 3, 3 | 0, 0 |
+| a pruned node keeps `HAS_CHILDREN` | crash, crash | 0, 0 |
+| children not given their parent's pid | 1, 1 | 8, 8 |
+| ranks > 0 do not set the pids received | - | crash, crash |
+| a received parent keeps its children | 26, 24 | 0, 0 (more kept than needed) |
+| pruning leaves the partition valid | 14, 14 | 0, 0 |
+| `pid` of a coarse neighbour -1 | 1, 1 | 0, 0 (the plan reads the node) |
+| every node processed (`BLOCK_MINE` 1) | - | 0, 0 (wasted work, overwritten by what is received) |
+| the local coarsest level for the restriction, not the plan's | - | 0, 0, also on up to 16 processes |
 
-The last two are not wrong results, so the MPI test passes them. In 3D,
-"pruning ignores what is below" changes no flag on the test's tree.
+Before this rewrite, the plans (reflux children, coarse leaf sent early,
+restriction one level short or first child only, `fine` and `same`
+swapped, exchanges after the level or dropped) were caught as in the
+previous commit's table; those checks are unchanged. The last bug changes
+the exchanges only on a process whose kept leaves are all finer than the
+tree's coarsest: none of the test's trees has one.
 
 `tests/run.sh` runs it on `tests/mpi-fork/`, a stand-in `mpi.h`, so it
 needs no MPI installed. The stand-in forks the ranks in `MPI_Init ()` and
 joins each two by a socket pair. Every message carries its tag and length,
-and a receive that does not match them stops the run.
+and a receive that does not match them stops the run. It has
+`MPI_Initialized` and `MPI_Bcast` (bytes, int, long, double) now.
 
 On real ranks, with OpenMPI (`sudo apt install openmpi-bin
-libopenmpi-dev`): 1-3D on 2, 3, 4 and 7 processes, all pass.
+libopenmpi-dev`):
 
     for d in 1 2 3; do
       ../libc-pp/build/cwrap -dimension=$d -D_MPI -D_GNU_SOURCE -std=gnu11 \
@@ -350,6 +385,7 @@ libopenmpi-dev`): 1-3D on 2, 3, 4 and 7 processes, all pass.
       done
     done
 
+Not run on OpenMPI since the rewrite (not installed on this machine).
 Ubuntu's mpich (4.2) does not run more than one rank: it is built for
 PMIx, but its launcher, Hydra, is PMI-1 only, so every rank starts alone
 ("0 of 1"). Use OpenMPI, which installs beside it, through the `.openmpi`
@@ -359,20 +395,22 @@ Measured in 2D, 197 nodes (3 rounds of refinement about the sphere): with
 2 processes, 40 blocks received for leaves (54 for every node); with 3
 processes, 92 (137). The pieces' surface in `test_partition`, as the
 fraction of face pairs between leaves that are cut: 3D, 1576 leaves, 0.061
-with 4 processes, 0.188 with 16. A pruned process lists about half the
-nodes (0.47-0.51 with 4 to 7 processes in 2D and 3D).
+with 4 processes, 0.188 with 16. The nodes a pruned process keeps, of the
+whole tree's: `test_partition`, 0.51 (2D) and 0.51, 0.47 (3D) with 4 and
+7 processes; `test_mpi`, 2D 0.72, 0.69, 0.51, 0.51 with 2, 3, 4, 7
+processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
 ### Not done yet
 
 - `foreach ()` and the other loops still visit every leaf left in the
-  lists: the process's own, those it receives, and those not pruned away.
-  A reduction counts some twice. Next: loops over the owned leaves only.
-- Adapting under MPI: the partition again, then moving the blocks.
-  `tree_refine ()` and `tree_coarsen ()` need the tree unpruned.
+  lists: the process's own, those it receives, and their siblings. A
+  reduction counts some twice. Next: loops over the owned leaves only.
+- Adapting under MPI: refining and coarsening a pruned tree, a new
+  partition, then moving the blocks to their owners.
 - `ghosts_update_level ()` (multigrid) and `block_ghosts ()` called alone
   do not exchange.
-- Memory: pruned blocks are kept. Freeing them comes with a distributed
-  tree.
+- Memory: a process still builds the whole tree before pruning. In the end
+  each should build only its part and a layer around it.
 - Fewer rounds: one exchange per level now. See "MPI" in "Future plans".
 
 ## Tests
@@ -1331,8 +1369,9 @@ that holds it.
 
 ## MPI
 
-Done: the partition, the neighbour bit maps, the plans and pruning, and
-the exchange in `ghosts_update_list ()` ("MPI: partition, plans, pruning"
+Done: the partition (by rank 0, broadcast), the neighbour bit maps, the
+plans, pruning that frees the subtrees, and the exchange in
+`ghosts_update_list ()` ("MPI: partition, plans, pruning"
 above). Next, in order:
 
 1. **Loops over owned leaves.** `foreach ()`, `foreach_face ()`,
@@ -1360,9 +1399,9 @@ above). Next, in order:
    same-level copies, would make it two rounds.
 6. **Periodic boundaries** with it: the wall bits of "Ghost operators and
    adaptation", item 1, become the maps' "none" on a non-periodic axis.
-7. **A distributed tree.** Free the pruned blocks, then the pruned nodes;
-   in the end, each process holds its part and a layer around it (Basilisk,
-   p4est).
+7. **A distributed tree.** The pruned nodes and blocks are freed now
+   (`tree_prune ()`); next, each process builds only its part and a layer
+   around it (Basilisk, p4est), without the whole tree first.
 
 ## Compile-time block size
 

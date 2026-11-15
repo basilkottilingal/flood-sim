@@ -15,8 +15,10 @@
   .. plan whose two sides disagree is caught. Isend and Irecv progress in
   .. MPI_Waitall () (poll), so no send blocks another's receive.
   ..
-  ..   MPI_Init, MPI_Finalize, MPI_Comm_rank, MPI_Comm_size
+  ..   MPI_Init, MPI_Initialized, MPI_Finalize, MPI_Comm_rank, MPI_Comm_size
   ..   MPI_Isend, MPI_Irecv, MPI_Waitall   MPI_BYTE only
+  ..   MPI_Bcast                           MPI_BYTE, MPI_INT, MPI_LONG,
+  ..                                       MPI_DOUBLE
   ..   MPI_Allreduce                       MPI_SUM of MPI_INT, MPI_LONG
   */
 
@@ -30,10 +32,12 @@
   #define MPI_BYTE            1
   #define MPI_INT             2
   #define MPI_LONG            3
+  #define MPI_DOUBLE          4
   #define MPI_SUM             1
   #define MPI_STATUSES_IGNORE ((MPI_Status *) 0)
 
   int MPI_Init (int * argc, char *** argv);
+  int MPI_Initialized (int * flag);
   int MPI_Finalize (void);
   int MPI_Comm_rank (MPI_Comm comm, int * rank);
   int MPI_Comm_size (MPI_Comm comm, int * size);
@@ -42,6 +46,8 @@
   int MPI_Irecv (void * buf, int count, MPI_Datatype type, int source,
                  int tag, MPI_Comm comm, MPI_Request * req);
   int MPI_Waitall (int n, MPI_Request * req, MPI_Status * status);
+  int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
+                 MPI_Comm comm);
   int MPI_Allreduce (const void * in, void * out, int count,
                      MPI_Datatype type, MPI_Op op, MPI_Comm comm);
 

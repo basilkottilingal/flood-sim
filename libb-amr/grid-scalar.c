@@ -148,9 +148,8 @@ void grid_scalar_family_free (void *** t [])
 
 /*
 .. Every family below p, given p's node, made (alloc) or freed: by the
-.. children a node has, not by tree_has_children (), so that the subtrees
-.. pruned for a partition (tree-mpi.h), hidden from the tree's lists, get
-.. the blocks of a scalar too, and give them back.
+.. children a node has (BAMR_NODE_HAS_CHILDREN). A pruned node has none:
+.. its subtree is gone (tree_prune ()).
 */
 static void families_below (Index p, BAMRNode * n, scalar s, int alloc)
 {

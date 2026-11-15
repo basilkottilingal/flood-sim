@@ -7,12 +7,16 @@
   /*
   .. The tree shared among npe processes: a balanced partition, what each
   .. process sends and receives for the ghosts, and the subtrees a process
-  .. does without. The first step to MPI (README, "MPI"): every process
-  .. holds the whole tree, as now; the partition, the plans and the pruning
-  .. are computed from it in the same way everywhere, with no MPI call, so
-  .. they run and are tested in one process for any npe. With -D_MPI,
-  .. tree_mpi_partition () applies them on MPI_COMM_WORLD, and
+  .. does without, pruned away. Every process builds the same whole tree
+  .. first. The partition, the plans and the pruning are computed from it
+  .. with no MPI call, so they run and are tested in one process for any
+  .. npe. With -D_MPI, tree_mpi_partition () applies them on
+  .. MPI_COMM_WORLD: rank 0 partitions and sends the result to ranks 1 to
+  .. npe - 1, each process makes its plan and prunes its tree, and
   .. ghosts_update () exchanges blocks between the processes.
+  ..
+  .. The processes are tree_npe () and tree_rank () (tree.h), the owner of a
+  .. node its node->pid.
   ..
   ..
   .. 1. The partition
@@ -34,20 +38,19 @@
   .. n >= npe.
   ..
   .. A parent goes to the process of its first leaf (in Morton order), the
-  .. smallest pid below it. A node's process is its node->pid.
+  .. smallest pid below it.
   ..
-  .. The partition is the tree's at the time: a refinement or a coarsening
-  .. makes it stale (tree_generation), and new nodes have pid 0. Make it
-  .. again after adapting; tree_partition_valid () tells. It is made on the
-  .. whole tree: a pruned tree is unpruned first.
+  .. The partition is the tree's at the time: a refinement, a coarsening or
+  .. a pruning makes it stale (tree_generation); tree_partition_valid ()
+  .. tells. It needs the whole tree, not pruned.
   ..
-  ..   tree_partition (npe, weight)  partitions; weight [q] for leaf q of
-  ..                                 tree_caches ()->leaves, each > 0, or
-  ..                                 NULL: 1 each. Returns 0, -1 for npe < 1
-  ..                                 or a weight not > 0 (nothing changed)
+  ..   tree_partition (npe, weight)  partitions: sets every node's pid;
+  ..                                 weight [q] for leaf q of tree_caches
+  ..                                 ()->leaves, each > 0, or NULL: 1 each.
+  ..                                 Returns 0, -1 for npe < 1, a weight not
+  ..                                 > 0 or a pruned tree (nothing changed)
   ..   tree_get_partition ()         the last one made, NULL if none
   ..   tree_partition_valid ()       1 if made since the tree last changed
-  ..                                 (pruning and unpruning keep it valid)
   ..   tree_partition_free ()        frees it (tree_destroy () does not)
   ..
   ..
@@ -57,7 +60,7 @@
   .. The 3^dimension - 1 directions around a node p of level l, numbered as
   .. block_ghosts () visits the regions of its ghosts: d = (d0, d1, d2), each
   .. -1, 0 or 1, is bit (d0 + 1) + 3 (d1 + 1) + 9 (d2 + 1), the centre's bit
-  .. (1, 3, 13 in 1, 2, 3 dimensions) never set. Under 2:1 balance, the
+  .. (1, 4, 13 in 1, 2, 3 dimensions) never set. Under 2:1 balance, the
   .. index p + d is one of four, a bit in one of three maps or in none:
   ..
   ..   same     a leaf of level l: p's ghosts there copy its cells
@@ -68,8 +71,10 @@
   ..            from which the ghosts there are prolonged
   ..   none     outside the domain: p's boundary conditions
   ..
-  .. Made from the tree's structure (the children a node has, pruned or
-  .. not); the walls are those of no bit, ~(same | fine | coarse).
+  .. and pid [dir] the rank of the node read there (p + d, or the coarse
+  .. leaf covering it): its node->pid, -1 outside. Made from the tree's
+  .. structure: on a pruned tree a pruned node is "same", having no
+  .. children; the walls are those of no bit, ~(same | fine | coarse).
   ..
   ..   tree_neighbours (p)   the maps of the node at p
   ..
@@ -107,7 +112,7 @@
   .. for every node too (ghosts_update_levels ()): parents [0] and [1].
   ..
   ..   tree_mpi_plan_new (rank)   the plan of process rank, from the
-  ..                              partition (valid, the tree unpruned)
+  ..                              partition (valid: the tree whole)
   ..   tree_mpi_plan_free (plan)
   ..
   ..
@@ -115,27 +120,33 @@
   .. ----------
   ..
   .. A process needs its own nodes, the nodes it receives, and their
-  .. ancestors. A subtree with none of them is pruned: its root gets
-  .. BAMR_NODE_IS_PRUNED, so that tree_has_children () says no, and the
-  .. tree's lists (tree_caches ()), foreach_node (), foreach_leaf () and
-  .. morton () skip what is below. The nodes and their blocks stay (the
-  .. tree is still whole on each process): a scalar made while the tree is
-  .. pruned gets blocks below too (grid-scalar.c), so unpruning restores the
-  .. tree as it was. Refining and coarsening need the tree unpruned.
+  .. ancestors. Every subtree with none of them below its root is pruned:
+  .. tree_prune () (tree.h) frees its nodes and their blocks. The root
+  .. stays, with its blocks and its pid, as a pruned node: no children, not
+  .. a leaf. Only the largest such subtrees are pruned, so no pruned node is
+  .. below another; a family whose one child is needed keeps the others,
+  .. families being allocated together. It cannot be undone, and the tree
+  .. cannot be refined or coarsened after.
   ..
-  ..   tree_prune (plan)     prunes for plan's process; the roots pruned
-  ..   tree_unprune ()       every node back; how many were pruned
-  ..   tree_pruned ()        the roots pruned now
+  ..   tree_mpi_prune (plan)   prunes for plan's process, right after the
+  ..                           plan was made (the tree unchanged since):
+  ..                           the subtrees pruned
   ..
   ..
   .. 5. With MPI (-D_MPI)
   .. --------------------
   ..
-  ..   tree_mpi_partition (weight)  on MPI_COMM_WORLD: the partition (the
-  ..                                weights the same on every process),
-  ..                                this process's plan, pruned, and the
-  ..                                exchanges on: every scalar marked stale
-  ..   tree_mpi_end ()              exchanges off, unpruned, plan freed
+  ..   tree_mpi_partition (weight)  on MPI_COMM_WORLD, every process with
+  ..                                the same whole tree: rank 0 partitions
+  ..                                (its weights; the others' are not read)
+  ..                                and sends every node's pid and the
+  ..                                loads to ranks 1 to npe - 1 (MPI_Bcast);
+  ..                                each makes its plan and prunes; the
+  ..                                exchanges on, every scalar marked stale.
+  ..                                Returns 0, -1 if rank 0's tree_partition
+  ..                                () refused (nothing changed)
+  ..   tree_mpi_end ()              exchanges off, the plan and partition
+  ..                                freed; the tree stays pruned
   ..   tree_mpi_plan ()             the plan applied, NULL if none
   ..   tree_mpi_exchange (parents, kind, level, n, s)
   ..                                one exchange of the plan, the blocks of
@@ -143,8 +154,8 @@
   ..                                () calls
   ..
   .. Not yet: foreach () and the other loops still visit every leaf left in
-  .. the lists (the process's, the ones it receives, and those not pruned
-  .. away), so a reduction counts some twice; adapting under MPI;
+  .. the lists (the process's, the ones it receives, and their siblings),
+  .. so a reduction counts some twice; adapting under MPI;
   .. ghosts_update_level () (multigrid), block_ghosts () alone.
   */
 
@@ -155,7 +166,7 @@
     int nleaves;            /* the leaves partitioned                    */
     int * leaf_first;       /* process r holds leaves leaf_first [r] ..
                                leaf_first [r + 1] - 1 of tree_caches ()->
-                               leaves, of the tree unpruned; npe + 1     */
+                               leaves, of the whole tree; npe + 1        */
     double * load;          /* the weight of each process's leaves       */
     double imbalance;       /* the largest load over the mean, >= 1      */
     unsigned generation;    /* tree_generation when made                 */
@@ -172,6 +183,7 @@
   typedef struct
   {
     uint32_t same, fine, coarse;
+    int pid [TREE_NDIRS];   /* the rank of the node read; -1 outside     */
   } TreeNeighbours;
 
   TreeNeighbours tree_neighbours (Index p);
@@ -195,8 +207,9 @@
   typedef struct
   {
     int rank, npe;
-    int depth;              /* the deepest level of the tree unpruned    */
+    int depth;              /* the deepest level of the whole tree       */
     int depth_min;          /* its coarsest leaf's                       */
+    unsigned generation;    /* tree_generation when made                 */
     TreeMpiExchange ex [2][TREE_MPI_KINDS][BAMR_MAX_DEPTH + 2];
                             /* [parents][kind][level]                    */
   } TreeMpiPlan;
@@ -205,9 +218,7 @@
   void          tree_mpi_plan_free (TreeMpiPlan * plan);
 
   /* 4. pruning */
-  int tree_prune (const TreeMpiPlan * plan);
-  int tree_unprune (void);
-  int tree_pruned (void);
+  int tree_mpi_prune (const TreeMpiPlan * plan);
 
   /* 5. MPI */
   #ifdef _MPI

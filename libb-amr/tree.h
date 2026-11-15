@@ -67,18 +67,36 @@
   typedef enum
   {
     BAMR_NODE_LEAF   = 1,
-    BAMR_NODE_IS_PRUNED = 2,
+    BAMR_NODE_IS_PRUNED = 2,      /* its subtree freed: tree_prune () */
     BAMR_NODE_HAS_CHILDREN = 4,
     BAMR_NODE_REFINE = 8,         /* needs refining: adapt.h          */
     BAMR_NODE_COARSEN = 16,       /* may be coarsened, with its family */
   } BAMRNodeFlags;
 
+  /*
+  .. A node's pid is the rank of the process that owns it, 0 to
+  .. tree_npe () - 1. The root gets tree_rank (), and children their
+  .. parent's pid, so that a tree made on one process is that process's;
+  .. a partition (tree-mpi.h) sets it again. ghosts_update () makes the
+  .. ghosts of the nodes with pid == tree_rank () only.
+  */
   typedef struct BAMRNode_
   {
     int flags;
-    int pid;
+    int pid;        /* the owner's rank                                */
     void *** s;     /* s [id/w][id%w]: the block of scalar id, or NULL */
   } BAMRNode;
+
+  /*
+  .. The processes: kept in tree.c. With -D_MPI, those of MPI_COMM_WORLD,
+  .. read by tree () (after MPI_Init ()); without, constants: 1 process,
+  .. of rank 0.
+  ..
+  ..   tree_npe ()    the number of processes
+  ..   tree_rank ()   this process's, 0 to tree_npe () - 1
+  */
+  int tree_npe (void);
+  int tree_rank (void);
 
   /*
   .. The tree's nodes in lists, made again only after the tree changes
@@ -123,7 +141,7 @@
   extern unsigned tree_generation;
   void tree_changed_under (const char * loop);
   /* the lists to be made again, after flags that change them were set by
-  .. hand: BAMR_NODE_IS_PRUNED (tree-mpi.h). tree_generation changes too */
+  .. hand. tree_generation changes too */
   void tree_caches_changed (void);
 
   /*
@@ -171,6 +189,7 @@
   .. Index helpers, the same in every dimension.
   ..   index_child (p, c)    child c (0 to TREE_NCHILDREN - 1) of p; bit 0 of
   ..                         c steps in i, bit 1 in j, bit 2 in k
+  ..   index_parent (p)      the parent of p (p.level > 0)
   ..   index_is_allocated (p), index_node (p)
   ..   INDEX_UNPACK (p);     declares IJKL from p, for BAMR_NODE_ENV ()
   */
@@ -207,6 +226,19 @@
     q.k = 2 * p.k + ((c >> 2) & 1);
     #endif
     return q;
+  }
+
+  static inline Index index_parent (Index p)
+  {
+    p.level--;
+    p.i >>= 1;
+    #if dimension > 1
+    p.j >>= 1;
+    #endif
+    #if dimension > 2
+    p.k >>= 1;
+    #endif
+    return p;
   }
 
   /*
@@ -333,5 +365,23 @@
   */
   int  tree_refine (Index p);
   int  tree_coarsen (Index p);
+
+  /*
+  .. Pruning: a subtree gone from this process (tree-mpi.h decides which).
+  ..
+  ..   tree_prune (p)   frees every node below p, a node with children,
+  ..                    and their blocks; p stays, with its blocks and its
+  ..                    pid, flagged BAMR_NODE_IS_PRUNED and with no
+  ..                    children: neither a leaf nor a parent, in the
+  ..                    tree's lists (tree_caches ()->all, by_level) but in
+  ..                    none of leaves and parents. Returns the nodes freed,
+  ..                    0 if p is not a node with children
+  ..   tree_pruned ()   the pruned nodes now (the roots of what is gone)
+  ..
+  .. It cannot be undone. A pruned tree cannot be refined or coarsened yet:
+  .. tree_refine () and tree_coarsen () stop the run.
+  */
+  int  tree_prune (Index p);
+  int  tree_pruned (void);
 
 #endif

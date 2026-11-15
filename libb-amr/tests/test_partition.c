@@ -2,7 +2,8 @@
  * one refined about a sphere, against references computed apart: the
  * closed form of the unit-weight cut, the loads summed again from the pids,
  * the optimal contiguous cut (bisection with a greedy packing), and each
- * parent's pid from the leaves inside its box. */
+ * parent's pid from the leaves inside its box. Then the neighbours' maps
+ * and ranks, the plans, and pruning, against the geometry of the leaves. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -300,6 +301,7 @@ static int classify (Index p, int dir, Index * X)
 /* the maps of every node against classify () */
 static void check_neighbours (void)
 {
+  sort_nodes ();
   const TreeCaches * tc = tree_caches ();
   int ok = 1;
   for (int q = 0; q < tc->nall; q++) {
@@ -313,6 +315,9 @@ static void check_neighbours (void)
                 + (m.coarse & bit ? 3 : 0);
       ok &= got == c && !((m.same & m.fine) | (m.same & m.coarse)
                          | (m.fine & m.coarse));
+      /* the rank of what is read there: the owner of X, by search */
+      BAMRNode * o = c ? find (X) : NULL;
+      ok &= c ? o && m.pid [dir] == o->pid : m.pid [dir] == -1;
     }
   }
   CHECK (ok && geometry_ok);
@@ -440,8 +445,7 @@ static int below (Index x, Index p)
   return in;
 }
 
-/* the plans of every process, against each other and the geometry; then
- * pruning for each */
+/* the plans of every process, against each other and the geometry */
 static void check_plans (int npe)
 {
   CHECK (tree_partition (npe, NULL) == 0);
@@ -491,83 +495,146 @@ static void check_plans (int npe)
         }
   CHECK (sym && sends == recvs);
 
-  /* pruning for each process */
-  const TreeCaches * tc = tree_caches ();
-  int nall = tc->nall;
-  BAMRNode ** before = malloc ((size_t) nall * sizeof (BAMRNode *));
-  for (int q = 0; q < nall; q++)
-    before [q] = tc->all [q].node;
-  long visible = 0;
+  printf ("  %d processes: %ld nodes received\n", npe, nrecv);
+  for (int r = 0; r < npe; r++)
+    tree_mpi_plan_free (plan [r]);
+  free (plan);
+}
+
+/* the tree of the tests: level 1, then refined about the sphere */
+static void build (int rounds)
+{
+  tree (5, 4);
+  if (rounds)
+    refine_sphere (rounds);
+}
+
+/*
+.. pruning for each process r, on a tree made again for each, against the
+.. geometry: needed, r's nodes and those its plan receives; a node kept if
+.. it is the root or its parent has something needed strictly below it
+.. (found by a search of the boxes); a kept node with children and nothing
+.. needed below pruned (a parent received keeps its block, not its
+.. children). Every node kept, at its place, with its flags and pid; the
+.. rest freed; the counts, the lists, the scalars' blocks
+*/
+static void check_pruning (int npe, int rounds)
+{
+  long kept_all = 0, all = 0;
   for (int r = 0; r < npe; r++) {
-    /* needed: r's nodes and what it receives */
-    Entries got = entries (plan [r], 0);
-    int npr = tree_prune (plan [r]);
-    CHECK (npr == tree_pruned () && tree_partition_valid ());
-    tc = tree_caches ();
-    visible += tc->nall;
-    /* every node needed is in the lists, and no node is lost but below a
-     * pruned root, which has nothing needed below it */
-    int kept = 1, minimal = 1, roots = 0;
-    for (int q = 0; q < nsorted; q++) {
-      BAMRNode * X = sorted [q].node;
-      Index x = sorted [q].p;
-      int needed = X->pid == r;
-      for (int k = 0; k < got.n && !needed; k++)
-        needed = !item_cmp (&(TreeItem) { got.a [k].p, NULL },
-                            &(TreeItem) { x, NULL });
-      int listed = 0;
-      for (int k = 0; k < tc->nall && !listed; k++)
-        listed = tc->all [k].node == X;
-      /* hidden: some strict ancestor is pruned */
-      int hidden = 0;
-      for (int k = 0; k < nsorted && !hidden; k++)
-        hidden = (sorted [k].node->flags & BAMR_NODE_IS_PRUNED)
-                 && sorted [k].p.level < x.level && below (x, sorted [k].p);
-      kept &= listed == !hidden && (!needed || listed);
-      if (X->flags & BAMR_NODE_IS_PRUNED) {
-        roots++;
-        for (int k = 0; k < nsorted; k++)
-          if (sorted [k].p.level > x.level && below (sorted [k].p, x)) {
-            int nk = sorted [k].node->pid == r;
-            for (int j = 0; j < got.n && !nk; j++)
-              nk = !item_cmp (&(TreeItem) { got.a [j].p, NULL }, &sorted [k]);
-            minimal &= !nk;
-          }
+    tree_destroy ();
+    build (rounds);
+    CHECK (tree_partition (npe, NULL) == 0);
+    sort_nodes ();
+    TreeMpiPlan * plan = tree_mpi_plan_new (r);
+    Entries got = entries (plan, 0);
+    int n = nsorted;
+    TreeItem * node = malloc ((size_t) n * sizeof (TreeItem));
+    int * flags = malloc ((size_t) n * sizeof (int));
+    int * pid = malloc ((size_t) n * sizeof (int));
+    char * needed = calloc ((size_t) n, 1), * some = calloc ((size_t) n, 1);
+    for (int q = 0; q < n; q++) {
+      node [q] = sorted [q];
+      flags [q] = sorted [q].node->flags, pid [q] = sorted [q].node->pid;
+      needed [q] = pid [q] == r;
+    }
+    for (int k = 0; k < got.n; k++) {
+      TreeItem key = { got.a [k].p, NULL }, * f = bsearch (&key, sorted,
+        (size_t) n, sizeof (TreeItem), item_cmp);
+      geometry_ok &= f != NULL;
+      if (f)
+        needed [f - sorted] = 1;
+    }
+    for (int q = 0; q < n; q++)
+      for (int k = 0; k < n && !some [q]; k++)
+        some [q] = needed [k] && node [k].p.level > node [q].p.level
+                   && below (node [k].p, node [q].p);
+    int nkept = 0, nleaves = 0, nstubs = 0, lmin = BAMR_MAX_DEPTH, lmax = 0;
+    char * kept = calloc ((size_t) n, 1), * stub = calloc ((size_t) n, 1);
+    for (int q = 0; q < n; q++) {
+      Index p = node [q].p;
+      int up = -1;
+      if (p.level) {
+        TreeItem key = { index_parent (p), NULL }, * f = bsearch (&key,
+          sorted, (size_t) n, sizeof (TreeItem), item_cmp);
+        geometry_ok &= f != NULL;
+        up = f ? (int) (f - sorted) : -1;
       }
-      else if (listed && tree_has_children (X)) {
-        /* a parent left open has something needed below */
-        int some = 0;
-        for (int k = 0; k < nsorted && !some; k++)
-          if (sorted [k].p.level > x.level && below (sorted [k].p, x)) {
-            some = sorted [k].node->pid == r;
-            for (int j = 0; j < got.n && !some; j++)
-              some = !item_cmp (&(TreeItem) { got.a [j].p, NULL }, &sorted [k]);
-          }
-        minimal &= some;
+      kept [q] = !p.level || (up >= 0 && some [up]);
+      stub [q] = kept [q] && (flags [q] & BAMR_NODE_HAS_CHILDREN) && !some [q];
+      nkept += kept [q], nstubs += stub [q];
+      if (kept [q] && (flags [q] & BAMR_NODE_LEAF)) {
+        nleaves++;
+        lmin = p.level < lmin ? p.level : lmin;
+        lmax = p.level > lmax ? p.level : lmax;
       }
     }
-    CHECK (kept && minimal && roots == npr);
-    /* a scalar made and freed while pruned: blocks everywhere, then none */
+
+    int nroots = tree_mpi_prune (plan);
+    int place = 1, freed = 1, marks = 1;
+    for (int q = 0; q < n; q++) {
+      Index p = node [q].p;
+      int there = index_is_allocated (p);
+      if (!kept [q]) {
+        freed &= !there;
+        continue;
+      }
+      BAMRNode * X = there ? index_node (p) : NULL;
+      place &= X == node [q].node;
+      if (X != node [q].node)
+        continue;
+      marks &= X->pid == pid [q];
+      if (stub [q])
+        marks &= X->flags == ((flags [q] & ~(BAMR_NODE_HAS_CHILDREN
+                                             | BAMR_NODE_LEAF))
+                              | BAMR_NODE_IS_PRUNED);
+      else
+        marks &= X->flags == flags [q];
+    }
+    CHECK (place && freed && marks && geometry_ok);
+    CHECK (nroots == nstubs && tree_pruned () == nstubs);
+    CHECK (tree_get_nblocks () == nkept && tree_get_nleaves () == nleaves);
+    /* the levels with leaves: none left, as for a process owning nothing,
+     * gives 0 */
+    CHECK (nleaves ? tree_get_depth_min () == lmin && tree_get_depth () == lmax
+                   : tree_get_depth_min () == 0 && tree_get_depth () == 0);
+    const TreeCaches * tc = tree_caches ();
+    CHECK (tc->nall == nkept && tc->nleaves == nleaves);
+    /* the pruned nodes: in the lists of every node, in none other */
+    int lists = 1, listed = 0;
+    for (int q = 0; q < tc->nall; q++)
+      listed += (tc->all [q].node->flags & BAMR_NODE_IS_PRUNED) != 0;
+    lists &= listed == nstubs;
+    for (int q = 0; q < tc->nleaves; q++)
+      lists &= !(tc->leaves [q].node->flags & BAMR_NODE_IS_PRUNED);
+    for (int q = 0; q < tc->parent_first [tc->depth]; q++)
+      lists &= !(tc->parents_by_level [q].node->flags & BAMR_NODE_IS_PRUNED);
+    CHECK (lists);
+    /* the partition stale and refused on a pruned tree; a pruned node,
+     * having no children, is not pruned again */
+    CHECK (nstubs ? !tree_partition_valid () && tree_partition (npe, NULL) == -1
+                  : tree_partition_valid ());
+    int again = 0;
+    for (int q = 0; q < n; q++)
+      if (stub [q])
+        again += tree_prune (node [q].p);
+    CHECK (!again && tree_pruned () == nstubs);
+    /* a scalar made and freed on the pruned tree; the blocks of every node */
+    CHECK (grid_scalar_check ());
     {
       scalar t;
       (void) t;
     }
-    CHECK (tree_unprune () == npr && !tree_pruned ()
-           && tree_partition_valid ());
-    tc = tree_caches ();
-    int back = tc->nall == nall;
-    for (int q = 0; q < nall && back; q++)
-      back = tc->all [q].node == before [q];
-    CHECK (back && grid_scalar_check ());
-    free (got.a);
+    CHECK (grid_scalar_check ());
+    kept_all += nkept, all += n;
+    free (got.a), free (node), free (flags), free (pid), free (needed);
+    free (some), free (kept), free (stub);
+    tree_mpi_plan_free (plan);
   }
-  printf ("  %d processes: %ld nodes received, %.2f of the nodes in the "
-          "lists of a pruned process\n", npe, nrecv,
-          (double) visible / npe / nall);
-  free (before);
-  for (int r = 0; r < npe; r++)
-    tree_mpi_plan_free (plan [r]);
-  free (plan);
+  printf ("  %d processes, %d rounds: %.2f of the nodes kept by a pruned "
+          "process\n", npe, rounds, (double) kept_all / all);
+  tree_destroy ();
+  build (rounds);
 }
 
 int main (void)
@@ -575,8 +642,18 @@ int main (void)
   int sizes [] = { 1, 2, 3, 5, 7, 16, 64 };
   int nsizes = sizeof (sizes) / sizeof (sizes [0]);
 
-  /* bad arguments: refused, the partition left as it was */
+  /* one process, of rank 0: every node its own */
+  CHECK (tree_npe () == 1 && tree_rank () == 0);
   tree (5, 4);
+  {
+    const TreeCaches * tc = tree_caches ();
+    int own = 1;
+    for (int q = 0; q < tc->nall; q++)
+      own &= tc->all [q].node->pid == tree_rank ();
+    CHECK (own && !tree_pruned ());
+  }
+
+  /* bad arguments: refused, the partition left as it was */
   CHECK (!tree_get_partition () && !tree_partition_valid ());
   CHECK (tree_partition (0, NULL) == -1 && !tree_get_partition ());
   CHECK (tree_partition (3, NULL) == 0);
@@ -617,8 +694,15 @@ int main (void)
 
   /* the bit maps, the plans, pruning */
   check_neighbours ();
-  for (int npe = 1; npe <= 7; npe += 3)
+  for (int npe = 1; npe <= 7; npe += 3) {
     check_plans (npe);
+    check_pruning (npe, 3);
+  }
+  /* the uniform tree on more processes than leaves: some own nothing and
+   * keep the root only */
+  check_pruning (TREE_NCHILDREN + 3, 0);
+  tree_destroy ();
+  build (3);
 
   /* the surface of the pieces, measured (not checked) */
   int pairs = 0;
@@ -630,8 +714,16 @@ int main (void)
             f, pairs, tree_get_partition ()->imbalance);
   }
 
-  /* a change of the tree makes it stale; made again, valid */
-  CHECK (tree_refine (tree_caches ()->leaves [0].p) > 0);
+  /* a change of the tree makes it stale; made again, valid. The children
+   * of a leaf get its pid */
+  {
+    TreeItem last = tree_caches ()->leaves [tree_caches ()->nleaves - 1];
+    CHECK (last.node->pid > 0 && tree_refine (last.p) > 0);
+    int inherit = 1;
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+      inherit &= index_node (index_child (last.p, c))->pid == last.node->pid;
+    CHECK (inherit);
+  }
   CHECK (!tree_partition_valid () && tree_get_partition ());
   CHECK (tree_partition (5, NULL) == 0);
   check (5, NULL);

@@ -1,10 +1,13 @@
 /* tree-mpi.h with MPI: the ghosts of a cell scalar, a face vector and a
  * vertex scalar, and the restriction of the parents, made on npe processes
- * by the plan's exchanges, against the same made by one process, bit for
- * bit. Every block a process does not own is poisoned (NaN) first, and its
- * own leaves' ghosts too: a block missing from the plan, or sent too early,
- * leaves a NaN or a different value. Leaves and every node (parents too).
- * Build with -D_MPI, run with mpiexec -n 1, 2, 3, 4 ... */
+ * by the plan's exchanges on the pruned trees, against the same made by
+ * one process on the whole tree, bit for bit. Every block a process keeps
+ * but does not own is poisoned (NaN) first, and its own leaves' ghosts
+ * too: a block missing from the plan, or sent too early, leaves a NaN or a
+ * different value; one pruned that is read, a crash (ASan). Leaves and
+ * every node (parents too). The partition, made by rank 0 and broadcast,
+ * against the same made by each process. Build with -D_MPI, run with
+ * mpiexec -n 1, 2, 3, 4 ... */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,14 +60,16 @@ static void refine_sphere (int rounds)
 }
 
 static int list [1 + 3 + 1], nlist;
-static TreeItem * nodes;         /* every node, the tree unpruned */
+static TreeItem * nodes;         /* every node of the whole tree */
 static int nnodes;
+static char * alive;             /* still there: not pruned away */
 static long cells;
 
 /* every cell of every block of the scalars, set to value */
 static void prefill (Real value)
 {
   for (int q = 0; q < nnodes; q++)
+    if (alive [q])
     for (int k = 0; k < nlist; k++) {
       Real * b = block_data (nodes [q].node->s, list [k]);
       for (long c = 0; c < cells; c++)
@@ -88,6 +93,7 @@ static Real * snapshot (void)
 {
   Real * s = malloc ((size_t) nnodes * nlist * cells * sizeof (Real));
   for (int q = 0; q < nnodes; q++)
+    if (alive [q])
     for (int k = 0; k < nlist; k++)
       memcpy (s + ((size_t) q * nlist + k) * cells,
               block_data (nodes [q].node->s, list [k]), cells * sizeof (Real));
@@ -121,46 +127,45 @@ static int owned (BlockShape sh, int loc, long c)
   return in;
 }
 
+/* the references, on the whole tree, one process's work (every node is
+ * this process's before the partition): which cells the update writes
+ * (two prefills), and what */
+static Real * r1 [2], * r2 [2];
+
+static void reference (int parents)
+{
+  prefill (R (1e30)), fill (), ghosts_update_list (nlist, list, parents);
+  r1 [parents] = snapshot ();
+  prefill (R (-1e30)), fill (), ghosts_update_list (nlist, list, parents);
+  r2 [parents] = snapshot ();
+}
+
+/* is a node of owner pid needed by this process: its own, or received
+ * (by its address only: it may be freed) */
+static int needed (const TreeMpiPlan * plan, BAMRNode * node, int pid)
+{
+  int need = pid == rank;
+  for (int pa = 0; pa < 2 && !need; pa++)
+    for (int kind = 0; kind < TREE_MPI_KINDS && !need; kind++)
+      for (int l = 0; l < BAMR_MAX_DEPTH + 2 && !need; l++) {
+        const TreeMpiExchange * ex = &plan->ex [pa][kind][l];
+        for (int k = 0; k < ex->nrecv && !need; k++)
+          for (int j = 0; j < ex->recv [k].n && !need; j++)
+            need = ex->recv [k].item [j].node == node;
+      }
+  return need;
+}
+
 /* one update on npe processes against the same on one: parents 0 or 1 */
 static void compare (int parents)
 {
   BlockShape sh = tree_block_shape ();
-  /* the reference: which cells the update writes (two prefills), and what */
-  tree_mpi_end ();
-  prefill (R (1e30)), fill (), ghosts_update_list (nlist, list, parents);
-  Real * r1 = snapshot ();
-  prefill (R (-1e30)), fill (), ghosts_update_list (nlist, list, parents);
-  Real * r2 = snapshot ();
-
-  /* on npe processes: every block not owned poisoned, and the ghosts of
-   * owned leaves; owned parents wholly (their restriction) */
-  CHECK (tree_mpi_partition (NULL) == 0);
-  CHECK (tree_partition_valid () && (npe > 1 || !tree_pruned ()));
-  {
-    /* pruned: every owned node and every node received still listed */
-    const TreeCaches * tc = tree_caches ();
-    const TreeMpiPlan * plan = tree_mpi_plan ();
-    int listed = 1;
-    for (int q = 0; q < nnodes; q++) {
-      BAMRNode * node = nodes [q].node;
-      int needed = node->pid == rank;
-      for (int pa = 0; pa < 2 && !needed; pa++)
-        for (int kind = 0; kind < TREE_MPI_KINDS && !needed; kind++)
-          for (int l = 0; l < BAMR_MAX_DEPTH + 2 && !needed; l++) {
-            const TreeMpiExchange * ex = &plan->ex [pa][kind][l];
-            for (int k = 0; k < ex->nrecv && !needed; k++)
-              for (int j = 0; j < ex->recv [k].n && !needed; j++)
-                needed = ex->recv [k].item [j].node == node;
-          }
-      int found = !needed;
-      for (int j = 0; j < tc->nall && !found; j++)
-        found = tc->all [j].node == node;
-      listed &= found;
-    }
-    CHECK (listed);
-  }
+  /* every block kept but not owned poisoned, and the ghosts of owned
+   * leaves; owned parents wholly (their restriction) */
   prefill (R (-1e30)), fill ();
   for (int q = 0; q < nnodes; q++) {
+    if (!alive [q])
+      continue;
     BAMRNode * node = nodes [q].node;
     int mine = node->pid == rank, leaf = node->flags & BAMR_NODE_LEAF;
     for (int k = 0; k < nlist; k++) {
@@ -177,17 +182,17 @@ static void compare (int parents)
   long compared = 0, wrong = 0, nmine = 0;
   for (int q = 0; q < nnodes; q++) {
     BAMRNode * node = nodes [q].node;
-    if (node->pid != rank)
+    if (!alive [q] || node->pid != rank)
       continue;
     nmine++;
     for (int k = 0; k < nlist; k++) {
       const Real * b = block_data (node->s, list [k]);
       size_t o = ((size_t) q * nlist + k) * cells;
       for (long c = 0; c < cells; c++) {
-        if (memcmp (&r1 [o + c], &r2 [o + c], sizeof (Real)))
+        if (memcmp (&r1 [parents][o + c], &r2 [parents][o + c], sizeof (Real)))
           continue;                 /* not written by the update */
         compared++;
-        wrong += memcmp (&b [c], &r1 [o + c], sizeof (Real)) != 0;
+        wrong += memcmp (&b [c], &r1 [parents][o + c], sizeof (Real)) != 0;
       }
     }
   }
@@ -207,7 +212,7 @@ static void compare (int parents)
     printf ("  parents %d: %ld cells compared, %ld differ; %ld blocks "
             "received (of %d nodes)\n", parents, sum [0], sum [1], total,
             nnodes);
-  free (r1), free (r2);
+  free (r1 [parents]), free (r2 [parents]);
 }
 
 int main (int argc, char ** argv)
@@ -232,20 +237,70 @@ int main (int argc, char ** argv)
   memcpy (nodes, tc->all, (size_t) nnodes * sizeof (TreeItem));
   cells = tree_block_shape ().cells;
 
+  alive = malloc ((size_t) nnodes);
+  memset (alive, 1, (size_t) nnodes);
+  CHECK (tree_npe () == npe && tree_rank () == rank);
+  int own = 1;
+  for (int q = 0; q < nnodes; q++)
+    own &= nodes [q].node->pid == rank;
+  CHECK (own);
+  reference (0);
+  reference (1);
+
+  /* the partition each process would make, to compare with rank 0's */
+  int * pid = malloc ((size_t) nnodes * sizeof (int));
+  int * first = malloc ((size_t) (npe + 1) * sizeof (int));
+  CHECK (tree_partition (npe, NULL) == 0);
+  for (int q = 0; q < nnodes; q++)
+    pid [q] = nodes [q].node->pid;
+  memcpy (first, tree_get_partition ()->leaf_first,
+          (size_t) (npe + 1) * sizeof (int));
+  double imbalance = tree_get_partition ()->imbalance;
+  tree_partition_free ();
+  for (int q = 0; q < nnodes; q++)
+    nodes [q].node->pid = rank;   /* this process's again: rank 0 tells */
+
+  CHECK (tree_mpi_partition (NULL) == 0);
+  const TreeMpiPlan * plan = tree_mpi_plan ();
+  CHECK (plan && plan->rank == rank && plan->npe == npe);
+  CHECK (npe > 1 ? tree_pruned () > 0 : !tree_pruned ());
+  {
+    /* pruned: every node needed still there, the same node; the pids and
+     * the partition rank 0's, as made here */
+    const TreePartition * tp = tree_get_partition ();
+    int there = 1, same = 1, nalive = 0;
+    for (int q = 0; q < nnodes; q++) {
+      alive [q] = index_is_allocated (nodes [q].p)
+                  && index_node (nodes [q].p) == nodes [q].node;
+      int need = needed (plan, nodes [q].node, pid [q]);
+      there &= !need || alive [q];
+      same &= !alive [q] || nodes [q].node->pid == pid [q];
+      nalive += alive [q];
+    }
+    CHECK (there && same);
+    CHECK (tp && tp->npe == npe && tp->imbalance == imbalance
+           && !memcmp (tp->leaf_first, first, (size_t) (npe + 1)
+                                                * sizeof (int)));
+    CHECK (tree_caches ()->nall == nalive && tree_get_nblocks () == nalive);
+    long kept = nalive, sum;
+    MPI_Allreduce (&kept, &sum, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+    if (rank == 0)
+      printf ("  %.2f of the %d nodes kept by a process\n",
+              (double) sum / npe / nnodes, nnodes);
+  }
+  free (pid), free (first);
+
   compare (0);
   compare (1);
 
-  /* off again: the tree whole, as it was */
+  /* off: the tree stays pruned; an update makes its own nodes, no crash */
+  int npruned = tree_pruned ();
   tree_mpi_end ();
-  CHECK (!tree_mpi_plan () && !tree_pruned ());
-  tc = tree_caches ();
-  int back = tc->nall == nnodes;
-  for (int q = 0; q < nnodes && back; q++)
-    back = tc->all [q].node == nodes [q].node;
-  CHECK (back);
+  CHECK (!tree_mpi_plan () && !tree_get_partition ()
+         && tree_pruned () == npruned);
+  ghosts_update_list (nlist, list, 1);
 
-  free (nodes);
-  tree_partition_free ();
+  free (nodes), free (alive);
   tree_destroy ();
   int f = fails, ftot;
   MPI_Allreduce (&f, &ftot, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);

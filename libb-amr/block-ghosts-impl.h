@@ -980,20 +980,19 @@ void ghosts_update_list (int n, const int * given, int parents)
   for (int q = 0; q < n; q++)
     o [q] = scalar_get_ops (s [q]);
   /*
-  .. With MPI and a partition applied (tree-mpi.h): this process's nodes
-  .. only, and before each step the blocks it reads from others, by the
-  .. plan; the levels those of the tree unpruned, the same everywhere
+  .. This process's nodes only (pid == tree_rank (): every node on one
+  .. process). With MPI and a partition applied (tree-mpi.h), before each
+  .. step the blocks it reads from others, by the plan; the levels those of
+  .. the whole tree, the same everywhere
   */
-  int depth = tc->depth;
+  int depth = tc->depth, lowest = parents ? 0 : tree_get_depth_min ();
+  int me = tree_rank ();
   #ifdef _MPI
   const TreeMpiPlan * mp = tree_mpi_plan ();
-  int me = mp ? mp->rank : -1;
   if (mp)
-    depth = mp->depth;
-  #define BLOCK_MINE(node) (!mp || (node)->pid == me)
-  #else
-  #define BLOCK_MINE(node) 1
+    depth = mp->depth, lowest = parents ? 0 : mp->depth_min;
   #endif
+  #define BLOCK_MINE(node) ((node)->pid == me)
 
   /* 1. restriction, finest first; within a level, at once: the scalars
    * whose restriction does something (restriction_none: no parent visited),
@@ -1007,7 +1006,6 @@ void ghosts_update_list (int n, const int * given, int parents)
       r [nr++] = q;
   const TreeItem * par = tc->parents_by_level;
   const int * pfirst = tc->parent_first;
-  int lowest = parents ? 0 : tree_get_depth_min ();
   for (int l = depth - 1; l >= lowest && nr; l--)
   {
     #ifdef _MPI
