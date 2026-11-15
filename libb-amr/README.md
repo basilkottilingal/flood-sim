@@ -355,6 +355,116 @@ host `malloc` memory here (the open kernel module's HMM) as `test_blocks.c`
 maps nothing; without it, `block_table ()` and `target data map` are needed
 (`block-loops.h`, 3. Which one).
 
+### Profiling: the CPU against the GPU
+
+    sh tests/run2.sh             # 2D and 3D, double and float
+    GPU=0 sh tests/run2.sh       # the CPU only
+
+Not a test: `tests/bench_gpu.c` times a ghost update piece by piece, on
+the CPU and on the GPU, each as fast as it goes. No bit identity: `-O3
+-march=native`, fma allowed, the PTX JIT at its default.
+
+- **CPU:** the library's functions on every thread: `block_restrict ()`,
+  `block_ghosts ()`, `block_prolong ()`, level by level, as
+  `ghosts_update ()` runs them. The fill is timed with the walls off (a
+  boundary condition that does nothing) and the jumps off
+  (`prolong_none`), then with the jumps, then with everything. The jumps
+  and walls are the differences, so they are noisy where small (even
+  negative).
+- **GPU:** every node's block in one device array, put there once, with
+  kernels of the benchmark's own.
+  - Restriction: the mean of the children.
+  - Prolongation: every parent's children, as a refinement fills them.
+  - The stencil: `v = u + k lap (u)`.
+  - The ghosts: one table entry per ghost cell of every leaf, built on
+    the host from the tree as `block_ghosts ()` would fill it: a copy, a
+    linear prolongation at a level jump, or a wall, followed back to the
+    copy or prolongation it ends in. That makes two launches a level,
+    with no pass for the walls.
+  - Upload and download of every block: what a ghost update on the host
+    would cost the GPU.
+- **Checked before any timing:** device against host, to `64 REAL_EPSILON`:
+  - the leaves' ghosts, after the device's are spoilt first;
+  - the restricted parents;
+  - the stencil;
+  - one prolongation.
+
+  Each of seven one-line breaks fails it, in 2D and in 3D:
+  - a copy's source shifted;
+  - a jump's sign inverted;
+  - a wall's mirror off by one;
+  - the wrong child restricted;
+  - a prolongation's half inverted;
+  - the stencil without its Laplacian;
+  - the jumps left out.
+
+Measured on 2026-11-15: Intel i9-11950H (8 cores, 16 threads), RTX A3000
+Laptop GPU (sm_86, 6 GiB), gcc 13.3, CUDA 13.5. Times are in ms, the
+median of 7 or more calls.
+
+The trees, uniform at a base level and refined on a shell of radius 0.3:
+- **2D:** levels 4 to 8, m = 32: 3016 leaves, 42 MB a scalar in double.
+- **3D:** levels 3 to 5, m = 16: 4880 leaves, 357 MB a scalar in double.
+
+The columns:
+- **CPU:** 16 threads.
+- **GPU:** the benchmark's kernels.
+- **`gpu_cells`:** the same kernels built on the library's `gpu_cells ()`
+  (`-DBENCH_GPU_CELLS`). This changes only restriction, prolongation and
+  the stencil.
+
+| 3D | double CPU | double GPU | CPU / GPU | `gpu_cells` | float CPU | float GPU | CPU / GPU | `gpu_cells` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| restriction | 11.2 | 1.41 | 7.9 | 7.55 | 5.60 | 1.06 | 5.3 | 2.57 |
+| ghosts: copies (15.5 M) | 27.7 | 3.22 | 8.6 | | 19.0 | 2.66 | 7.1 | |
+| ghosts: jumps (3.2 M) | 4.13 | 1.19 | 3.5 | | 1.99 | 1.05 | 1.9 | |
+| ghosts: walls (0.3 M) | ~0 | 0.29 | | | ~0 | 0.28 | | |
+| ghosts, the whole fill | 31.8 | 4.45 | 7.1 | | 19.5 | 3.75 | 5.2 | |
+| `ghosts_update` (restriction + fill) | 43.9 | 5.88 | 7.5 | 12.0 | 28.0 | 4.81 | 5.8 | 6.27 |
+| prolongation (20.4 M cells) | 24.6 | 2.34 | 10.5 | 47.7 | 15.4 | 1.48 | 10.4 | 14.0 |
+| stencil (20.0 M cells) | 36.3 | 3.52 | 10.3 | 47.3 | 19.2 | 1.80 | 10.7 | 12.4 |
+| step (`ghosts_update` + stencil) | 80.4 | 9.40 | 8.6 | 59.3 | 48.4 | 6.61 | 7.3 | 18.3 |
+| upload, every block | | 62.8 | | | | 32.0 | | |
+| download, every block | | 63.4 | | | | 33.5 | | |
+
+| 2D | double CPU | double GPU | CPU / GPU | float CPU | float GPU | CPU / GPU |
+|---|--:|--:|--:|--:|--:|--:|
+| restriction | 0.63 | 1.10 | 0.6 | 0.12 | 1.03 | 0.1 |
+| ghosts, the whole fill | 0.88 | 2.25 | 0.4 | 0.34 | 2.22 | 0.2 |
+| prolongation | 2.07 | 1.23 | 1.7 | 1.07 | 1.11 | 1.0 |
+| stencil | 3.94 | 0.52 | 7.6 | 0.73 | 0.41 | 1.8 |
+| step | 7.23 | 3.88 | 1.9 | 2.10 | 3.66 | 0.6 |
+
+Reading it:
+
+- **3D:** the GPU takes a step 8.6 times faster than 16 threads in double,
+  7.3 in float. Every phase is faster on it.
+  - The ghosts are the largest share on both, about half the step. The
+    copies make most of the fill: 15.5 M copied ghost cells against 3.2 M
+    from jumps.
+  - The stencil and prolongation reach about 130 GB/s on the device.
+- **The blocks must live on the device.** Moving every block once (63 ms
+  in double, PCIe, pageable memory) costs 7 GPU steps. A ghost update on
+  the host, the blocks moved there and back, would cost 126 ms a step in
+  moves alone: more than the CPU's whole step (80 ms).
+- **2D, on these small trees (42 MB), the GPU is launch-bound.**
+  - Restriction and the ghosts launch once per level and kind: about
+    0.2 ms a launch whatever its size, so they lose to the CPU.
+  - Only the stencil, one launch, wins.
+  - In float the CPU takes the step.
+  - Larger 2D trees, or fewer launches (the levels fused, which the
+    order of jumps across levels allows only partly), would change that.
+- **`gpu_cells ()` as it is wastes the GPU.** gcc's nvptx back end makes an
+  OpenMP thread a warp, and its 32 lanes work only in a simd loop. Without
+  simd, one lane in 32 does the work.
+  - With `simd` added to `gpu_cells`' four collapsed loops, it was 2.8
+    times slower still.
+  - One flat loop over block x cell with `simd`, the cell split by
+    shifts (m is a power of 2), is what the benchmark uses: 13 times
+    `gpu_cells` on the 3D stencil and 20 times on prolongation, in
+    double.
+  - `block-loops.h` is unchanged.
+
 ### Benchmark: the level indices
 
     sh tests/bench_memindex.sh [RAW]
