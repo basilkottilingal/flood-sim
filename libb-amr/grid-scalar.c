@@ -146,12 +146,29 @@ void grid_scalar_family_free (void *** t [])
   }
 }
 
-/* the tables of the children of the node at p */
-static void children_tables (Index p, void *** t [TREE_NCHILDREN])
+/*
+.. Every family below p, given p's node, made (alloc) or freed: by the
+.. children a node has, not by tree_has_children (), so that the subtrees
+.. pruned for a partition (tree-mpi.h), hidden from the tree's lists, get
+.. the blocks of a scalar too, and give them back.
+*/
+static void families_below (Index p, BAMRNode * n, scalar s, int alloc)
 {
-  int c = 0;
-  children_of (p)
-    t [c++] = node->s;
+  if (!(n->flags & BAMR_NODE_HAS_CHILDREN))
+    return;
+  BAMRNode * child [TREE_NCHILDREN];
+  void *** t [TREE_NCHILDREN];
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
+    child [c] = index_node (index_child (p, c));
+    t [c] = child [c]->s;
+  }
+  if (alloc)
+    family_block (t, s, 0);
+  else
+    family_block_free (t, s);
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+    families_below (index_child (p, c), child [c], s, alloc);
 }
 
 void grid_scalar_alloc_blocks (scalar s)
@@ -159,12 +176,7 @@ void grid_scalar_alloc_blocks (scalar s)
   if (!pool_block)        /* no tree yet: tree () allocates them */
     return;
   root_block (index_node (TREE_ROOT_INDEX)->s, s);
-  foreach_node ()
-    if (tree_has_children (node)) {
-      void *** t [TREE_NCHILDREN];
-      children_tables ((Index) {IJKL}, t);
-      family_block (t, s, 0);
-    }
+  families_below (TREE_ROOT_INDEX, index_node (TREE_ROOT_INDEX), s, 1);
 }
 
 void grid_scalar_free_blocks (scalar s)
@@ -181,12 +193,7 @@ void grid_scalar_free_blocks (scalar s)
     pool_free (pool_block, root [s/w][s%w]);
     root [s/w][s%w] = NULL;
   }
-  foreach_node ()
-    if (tree_has_children (node)) {
-      void *** t [TREE_NCHILDREN];
-      children_tables ((Index) {IJKL}, t);
-      family_block_free (t, s);
-    }
+  families_below (TREE_ROOT_INDEX, index_node (TREE_ROOT_INDEX), s, 0);
 }
 
 /*

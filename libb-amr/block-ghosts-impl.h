@@ -10,6 +10,9 @@
 #include <string.h>
 
 #include "block-ghosts.h"
+#ifdef _MPI
+# include "tree-mpi.h"
+#endif
 
 /* ---------------------------------------------------------------------- */
 /* the operations of each scalar                                          */
@@ -976,6 +979,21 @@ void ghosts_update_list (int n, const int * given, int parents)
     abort ();
   for (int q = 0; q < n; q++)
     o [q] = scalar_get_ops (s [q]);
+  /*
+  .. With MPI and a partition applied (tree-mpi.h): this process's nodes
+  .. only, and before each step the blocks it reads from others, by the
+  .. plan; the levels those of the tree unpruned, the same everywhere
+  */
+  int depth = tc->depth;
+  #ifdef _MPI
+  const TreeMpiPlan * mp = tree_mpi_plan ();
+  int me = mp ? mp->rank : -1;
+  if (mp)
+    depth = mp->depth;
+  #define BLOCK_MINE(node) (!mp || (node)->pid == me)
+  #else
+  #define BLOCK_MINE(node) 1
+  #endif
 
   /* 1. restriction, finest first; within a level, at once: the scalars
    * whose restriction does something (restriction_none: no parent visited),
@@ -990,21 +1008,40 @@ void ghosts_update_list (int n, const int * given, int parents)
   const TreeItem * par = tc->parents_by_level;
   const int * pfirst = tc->parent_first;
   int lowest = parents ? 0 : tree_get_depth_min ();
-  for (int l = tc->depth - 1; l >= lowest && nr; l--)
+  for (int l = depth - 1; l >= lowest && nr; l--)
   {
+    #ifdef _MPI
+    if (mp)
+      tree_mpi_exchange (parents, TREE_MPI_RESTRICT, l, n, s);
+    #endif
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
     for (int b = pfirst [l]; b < pfirst [l + 1]; b++)
-      for (int k = 0; k < nr; k++)
-        @restriction (o [r [k]].restriction, o [r [k]].restriction_uses)
-          (par [b].p, s [r [k]]);
+      if (BLOCK_MINE (par [b].node))
+        for (int k = 0; k < nr; k++)
+          @restriction (o [r [k]].restriction, o [r [k]].restriction_uses)
+            (par [b].p, s [r [k]]);
   }
 
   /* 2. the ghosts, coarsest first; within a level, at once */
-  for (int l = 0; l <= tc->depth; l++)
+  #ifdef _MPI
+  int faces [NSCALAR_MAX], nf = 0;
+  for (int q = 0; q < n; q++)
+    if (scalar_location (s [q]) >= CWRAP_FACE_X
+        && scalar_location (s [q]) <= CWRAP_FACE_Z)
+      faces [nf++] = s [q];
+  #endif
+  for (int l = 0; l <= depth; l++)
   {
+    #ifdef _MPI
+    if (mp) {
+      tree_mpi_exchange (parents, TREE_MPI_GHOSTS, l, n, s);
+      tree_mpi_exchange (parents, TREE_MPI_FACES, l, nf, faces);
+    }
+    #endif
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
     for (int b = first [l]; b < first [l + 1]; b++)
-      if (parents || (at [b].node->flags & BAMR_NODE_LEAF))
+      if ((parents || (at [b].node->flags & BAMR_NODE_LEAF))
+          && BLOCK_MINE (at [b].node))
         for (int q = 0; q < n; q++)
           block_ghosts_first (at [b].p, s [q]);
     /* faces and vertices: their second phase, once the level's first is
@@ -1016,7 +1053,8 @@ void ghosts_update_list (int n, const int * given, int parents)
     {
       BLOCK_PRAGMA (omp parallel for schedule (dynamic))
       for (int b = first [l]; b < first [l + 1]; b++)
-        if (parents || (at [b].node->flags & BAMR_NODE_LEAF))
+        if ((parents || (at [b].node->flags & BAMR_NODE_LEAF))
+            && BLOCK_MINE (at [b].node))
           for (int q = 0; q < n; q++)
             if (block_ghosts_located (s [q]))
               block_ghosts_second (at [b].p, s [q]);
@@ -1025,6 +1063,7 @@ void ghosts_update_list (int n, const int * given, int parents)
   for (int q = 0; q < n; q++)
     ghosts_dirty [s [q] / 64] &= ~(1ull << (s [q] % 64));
   free (o);
+  #undef BLOCK_MINE
 }
 
 void ghosts_update_dirty_located (int n, const int * s)

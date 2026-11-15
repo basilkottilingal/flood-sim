@@ -122,6 +122,9 @@
   const TreeCaches * tree_caches (void);
   extern unsigned tree_generation;
   void tree_changed_under (const char * loop);
+  /* the lists to be made again, after flags that change them were set by
+  .. hand: BAMR_NODE_IS_PRUNED (tree-mpi.h). tree_generation changes too */
+  void tree_caches_changed (void);
 
   /*
   .. tree_node (IJKL): the node there, or NULL. tree_is_allocated (IJKL):

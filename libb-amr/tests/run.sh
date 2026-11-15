@@ -4,7 +4,8 @@
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap).
 # JOBS: the tests built and run at once (default: the processors).
 # QUICK=1: the pool, then tree, blocks, ghosts, adapt, stencil, faces,
-# vertices in 1, 2
+# vertices, partition (tree-mpi.h) and mpi (-D_MPI, on 1 and 3 processes
+# forked by tests/mpi-fork) in 1, 2
 # and 3 dimensions, double and float, only: no OpenMP, alignment, other
 # level indices or MADV_FREE. After each change; the whole before a commit,
 # with tests/bit/compare.sh (every cell bit for bit against HEAD).
@@ -30,6 +31,7 @@ gsrc=$(echo "$src" | sed "s| $lib/block-ghosts.c||")
 # printed in order as they come.
 jobs=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 n=0 printed=0 pids=
+runenv=          # the environment of a test run: MPI_FORK_NP=3
 
 build_key () {   # dimension, extra flags: a directory per build
   echo "$1 $flags $2" | cksum | cut -d' ' -f1
@@ -66,13 +68,13 @@ run () {   # name, dimension, extra flags, the test, library sources...
     objs="$objs $b.o" logs="$logs $b.log"
   done
   n=$((n + 1))
-  r=$dir/r$n label="$name, ${d}D ${extra:-double}"
+  r=$dir/r$n label="$name, ${d}D ${extra:-double}${runenv:+ $runenv}"
   (
     cat $logs > "$r.log"
     out=
     if "$cwrap" -dimension=$d $flags $extra "$test" $objs -lm -o "$r.t" 2>> "$r.log" &&
        ! grep -v 'mem_destroy\|^In file\|^ *[0-9]* |\|^ *|' "$r.log" | grep -q 'warning\|error' &&
-       out=$("$r.t" 2>&1); then
+       out=$(env $runenv "$r.t" 2>&1); then
       echo "ok   $label: $(echo "$out" | tail -1)" > "$r.tmp"
     else
       { echo "FAIL $label"; cat "$r.log"; echo "$out" | tail -5; } > "$r.tmp"
@@ -148,6 +150,14 @@ for prec in "" "-DBAMR_SINGLE"; do
     run stencil $d "$prec" tests/test_stencil.c "$lib/tree.c" $src
     run faces $d "$prec" tests/test_faces.c "$lib/tree.c" $src
     run vertices $d "$prec" tests/test_vertices.c "$lib/tree.c" $src
+    run partition $d "$prec" tests/test_partition.c "$lib/tree.c" "$lib/tree-mpi.c" $src
+    # with -D_MPI, on processes forked by the stand-in tests/mpi-fork
+    for np in 1 3; do
+      runenv=MPI_FORK_NP=$np
+      run mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_mpi.c "$lib/tree.c" \
+        "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
+      runenv=
+    done
   done
 done
 if [ -n "$QUICK" ]; then

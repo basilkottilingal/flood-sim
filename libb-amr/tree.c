@@ -431,6 +431,11 @@ const TreeCaches * tree_caches (void)
   return &caches;
 }
 
+void tree_caches_changed (void)
+{
+  caches_changed ();
+}
+
 void tree_changed_under (const char * loop)
 {
   fprintf (stderr, "%s (): the tree changed during the loop: refine or "
