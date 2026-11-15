@@ -167,9 +167,12 @@ if [ -n "$QUICK" ]; then
 fi
 # with OpenMP: threads, simd and the offload pragmas (run on the host here:
 # -foffload=disable, as a gcc built with --enable-offload-defaulted
-# offloads to every offload compiler installed; GPU=1 for the device)
+# offloads to every offload compiler installed; GPU=1 for the device).
+# OMP_TARGET_OFFLOAD=DISABLED: libgomp still loads its CUDA plugin at the
+# first target region, and with a GPU present cuInit fails under ASan
+# ("libgomp: cuInit error: out of memory": test_blocks' gpu_cells)
 flags="$flags -fopenmp -foffload=disable"
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=4 OMP_TARGET_OFFLOAD=DISABLED
 for d in 2 3; do
   run blocks $d "-fopenmp" tests/test_blocks.c "$lib/tree.c" $src
   run ghosts $d "-fopenmp" tests/test_ghosts.c "$lib/tree.c" $gsrc
