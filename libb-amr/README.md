@@ -328,15 +328,32 @@ Deliberate bugs, one line each (failures in `test_partition` /
 The last two are not wrong results, so the MPI test passes them. In 3D,
 "pruning ignores what is below" changes no flag on the test's tree.
 
-The MPI here (mpich 4.2, Ubuntu) is built for PMIx, but only Hydra, a
-PMI-1 launcher, is installed, so every rank starts alone ("0 of 1"). The
-tests therefore run on `tests/mpi-fork/`, a stand-in `mpi.h`: ranks
-forked by `MPI_Init ()`, a socket pair between each two, every message
-framed with its tag and length, and a receive that does not match them
-stops the run. `tree-mpi.c` and `block-ghosts.c` also build against
-mpich's own `mpi.h` (1-3D, `-Werror`), and `test_mpi` runs linked to
-mpich on one process. A PMIx launcher (PRRTE's `prterun`), or an MPI built
-for Hydra, is needed to run it on real ranks.
+`tests/run.sh` runs it on `tests/mpi-fork/`, a stand-in `mpi.h`, so it
+needs no MPI installed. The stand-in forks the ranks in `MPI_Init ()` and
+joins each two by a socket pair. Every message carries its tag and length,
+and a receive that does not match them stops the run.
+
+On real ranks, with OpenMPI (`sudo apt install openmpi-bin
+libopenmpi-dev`): 1-3D on 2, 3, 4 and 7 processes, all pass.
+
+    for d in 1 2 3; do
+      ../libc-pp/build/cwrap -dimension=$d -D_MPI -D_GNU_SOURCE -std=gnu11 \
+        -O1 -g -Wall -Wextra -Wno-unused-parameter \
+        -fsanitize=address,undefined $(mpicc.openmpi -showme:compile) \
+        -I. -I.. tests/test_mpi.c tree.c tree-mpi.c grid-scalar.c \
+        memindex.c voxel-memindex.c nano-vdb.c pool.c block-ghosts.c \
+        adapt.c ../libutils/bits.c $(mpicc.openmpi -showme:link) -lm \
+        -o /tmp/test_mpi_$d
+      for np in 2 3 4 7; do
+        ASAN_OPTIONS=detect_leaks=0 mpirun.openmpi --oversubscribe \
+          -n $np /tmp/test_mpi_$d | tail -1
+      done
+    done
+
+Ubuntu's mpich (4.2) does not run more than one rank: it is built for
+PMIx, but its launcher, Hydra, is PMI-1 only, so every rank starts alone
+("0 of 1"). Use OpenMPI, which installs beside it, through the `.openmpi`
+names.
 
 Measured in 2D, 197 nodes (3 rounds of refinement about the sphere): with
 2 processes, 40 blocks received for leaves (54 for every node); with 3
