@@ -54,7 +54,8 @@
   ..                                 (key_first): a leaf's, its pid; a
   ..                                 node's, its first leaf's, so its pid
   ..                                 too. p need not be in this process's
-  ..                                 tree
+  ..                                 tree. With no partition made,
+  ..                                 tree_rank (): the tree is its maker's
   ..   tree_get_partition ()         the last one made, NULL if none
   ..   tree_partition_valid ()       1 if made since the tree last changed
   ..   tree_partition_free ()        frees it (tree_destroy () does not)

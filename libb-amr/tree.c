@@ -11,6 +11,7 @@
 #include "libutils/bits.h"
 #ifdef _MPI
 # include <mpi.h>
+# include "tree-mpi.h"
 #endif
 
 #define G(x) grid_info_##x
@@ -131,6 +132,9 @@ static void terminal_add (int l, int n)
 
 void tree_destroy (void)
 {
+  #ifdef _MPI
+  tree_mpi_end ();                    /* its plan points into the tree */
+  #endif
   caches_changed ();
   free (c_all), free (c_leaves), free (c_by_level), free (c_leaves_by_level);
   free (c_parents_by_level), free (c_owned);
@@ -425,6 +429,38 @@ static int grid_init (int depthmax, int blockdepth)
 
 int tree (int depthmax, int blockdepth)
 {
+  tree_replicated (depthmax, blockdepth);
+  #ifdef _MPI
+  /*
+  .. on several processes: refined to the first level with 4 npe leaves at
+  .. least (below depth max), then distributed
+  */
+  if (G(npe) > 1)
+  {
+    int L = 1;
+    while (L < G(depthmax) && (1L << (dimension * L)) < 4L * G(npe))
+      L++;
+    for (int l = 1; l < L; l++)
+    {
+      const TreeCaches * tc = tree_caches ();
+      int n = tc->nleaves;
+      Index * leaves = malloc ((size_t) n * sizeof (Index));
+      if (!leaves)
+        abort ();
+      for (int q = 0; q < n; q++)
+        leaves [q] = tc->leaves [q].p;
+      for (int q = 0; q < n; q++)
+        tree_refine (leaves [q]);
+      free (leaves);
+    }
+    tree_mpi_partition (NULL);
+  }
+  #endif
+  return 1;
+}
+
+int tree_replicated (int depthmax, int blockdepth)
+{
   depthmax = depthmax > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH :
     depthmax <= 0 ? 1 : depthmax;
   /*
@@ -495,6 +531,55 @@ int tree_prune (Index p)
 int tree_pruned (void)
 {
   return G(npruned);
+}
+
+int tree_insert (Index p, int leaf)
+{
+  int made = 0;
+  if (!index_is_allocated (p))
+  {
+    /* the parent first, then its family, every child pruned (unknown) */
+    assert (p.level > 0);
+    Index up = index_parent (p);
+    made += tree_insert (up, 0);
+    BAMRNode * parent = index_node (up);
+    assert (!(parent->flags & (BAMR_NODE_LEAF | BAMR_NODE_HAS_CHILDREN)));
+    caches_changed ();
+    if (parent->flags & BAMR_NODE_IS_PRUNED)
+      G(npruned)--;
+    parent->flags = (parent->flags & ~BAMR_NODE_IS_PRUNED)
+                    | BAMR_NODE_HAS_CHILDREN;
+    BAMRNode * family = pool_alloc (pool_family);     /* zeroed */
+    void *** t [TREE_NCHILDREN];
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+    {
+      t [c] = family [c].s = grid_scalar_table_new ();
+      family [c].flags = BAMR_NODE_IS_PRUNED;
+      family [c].pid = -1;
+    }
+    grid_scalar_family_new (t, 1);
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+    {
+      Index q = index_child (up, c);
+      INDEX_UNPACK (q);
+      assert (!index_is_allocated (q));
+      lidx_assign (& G (layers) [level], IJK, 1 << level, &family [c]);
+    }
+    G(nb) += TREE_NCHILDREN;
+    G(npruned) += TREE_NCHILDREN;
+    made += TREE_NCHILDREN;
+  }
+  BAMRNode * node = index_node (p);
+  if (leaf && (node->flags & BAMR_NODE_IS_PRUNED))
+  {
+    assert (!(node->flags & BAMR_NODE_HAS_CHILDREN));
+    caches_changed ();
+    node->flags = (node->flags & ~BAMR_NODE_IS_PRUNED) | BAMR_NODE_LEAF;
+    G(npruned)--;
+    G(nlb)++;
+    terminal_add (p.level, 1);
+  }
+  return made;
 }
 
 void tree_shift_resize (double x0, double y0, double z0, double h0)

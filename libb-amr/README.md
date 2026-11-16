@@ -262,9 +262,10 @@ tested in one process for any number of processes. With `-D_MPI`,
 - **Reductions** (cwrap's `reduction (op:v)`, libc-pp README): after the
   loop, `tree_reduce (&v, type, op)` combines v over the processes
   (`MPI_Allreduce`, `+ * min max` of int, long, long long, their unsigned,
-  float, double), rank 0's starting value counted once. Before a partition
-  every process owns the whole tree, so a sum counts it npe times: the
-  partition is to come first (milestone 2 makes `tree ()` do it).
+  float, double), rank 0's starting value counted once. `tree ()`
+  distributes at once, so a sum counts the tree once; with
+  `tree_replicated ()`, before the partition every process owns the whole
+  tree, and a sum counts it npe times.
 - **Partition.** The leaves are cut along the Morton curve into npe
   contiguous pieces by weight. Leaf q goes to `floor (npe (W_q + w_q / 2) /
   W)`, the piece that holds its middle; with unit weights this is computed
@@ -314,12 +315,38 @@ tested in one process for any number of processes. With `-D_MPI`,
   only. A family whose one child is needed keeps all its children (they
   are allocated together). It cannot be undone; refining or coarsening a
   pruned tree stops the run.
+- **`tree ()` distributes at once** (milestone 2). On several processes it
+  refines to the first level with 4 npe leaves at least (below depth max)
+  and calls `tree_mpi_partition (NULL)`; on one process it is as before.
+  `tree_replicated ()` builds the tree without distributing: the whole
+  tree on every process, to refine as wanted before `tree_mpi_partition
+  ()` (the tests, an initial mesh), since a distributed tree cannot be
+  refined yet.
 - **`tree_mpi_partition (weight)`.** Rank 0 partitions, with its weights,
   and sends every node's pid (in Morton order) and the loads to ranks 1 to
   npe - 1 by `MPI_Bcast`; the others set the pids and record the same
-  partition. A tree of another size than rank 0's stops the run. Each then
-  makes its plan and prunes. `tree_mpi_end ()` frees the plan and the
-  partition; the tree stays pruned.
+  partition. A tree of another size than rank 0's stops the run. From
+  there no process uses the whole tree:
+  1. **its own nodes only:** each keeps its nodes and their ancestors
+     (with their families), and prunes the rest;
+  2. **the halo, by queries:** every index beside one of its nodes is
+     asked of its owner, `tree_partition_owner ()` from the first keys,
+     which answers what it holds there: nothing (a coarser leaf covers
+     it), a leaf, or a node with children. The owner of an index's first
+     leaf holds that index and its ancestors whole, so it knows. Then the
+     process makes, with `tree_insert ()` (`tree.h`), the leaf or the node
+     beside it, or the coarser leaf, and for a leaf the upper children of a
+     node with children below it (the reflux), each with its ancestors and
+     their families; the nodes made get their owners from the keys, and
+     are pruned (their structure unknown) unless known leaves;
+  3. **the plan from what it holds:** what it receives, from its own nodes
+     and the tree here; what it sends, as the others ask it (each sends
+     each owner its receive lists, 7 ints a node, after an `MPI_Alltoall`
+     of the counts). The levels are the whole tree's (`MPI_Allreduce`).
+
+  Three rounds of messages in all, each between the processes that share
+  a boundary. `tree_mpi_end ()` frees the plan and the partition; the tree
+  stays pruned.
 - **In `ghosts_update_list ()`** (`#ifdef _MPI`, with a plan applied): the
   exchange before each restriction level and each ghost level, at the
   plan's levels. Without `_MPI`, every node has pid 0 = rank: nothing
@@ -422,6 +449,46 @@ Milestone 1 (owned leaves, reductions, MPI in `tree ()`, first keys):
 The min/max swap passed until the test reduced the rank itself: every
 piece touches the coarsest and finest levels and both ends of x.
 
+Milestone 2 (`tree ()` distributing, the halo by queries, the plan from
+the local tree). `test_mpi` builds its tree with `tree_replicated ()` and,
+before distributing, takes an oracle from the whole tree: the plan of
+`tree_mpi_plan_new ()`, what is needed, and so what a process keeps.
+After `tree_mpi_partition ()`, the plan made from the queries must equal
+it entry for entry (both sides, every exchange, peer and index), and its
+levels too; the nodes kept, by index, the oracle's; each needed node a
+leaf, a parent or pruned as there; the pids; `tree_pruned ()` and the leaf
+count against the flags. The nodes freed and made again are other
+objects: the test finds them again by index, and poisons the new ones too
+before the bit-for-bit ghost comparison. Passes in 1-3D, float, on 1, 2,
+3, 4, 7, 10, 13, 16 ranks. `tests/test_tree_mpi.c`: `tree (5, 4)` itself,
+1-3D, double and float, 1 to 16 ranks: every leaf of a process at the
+first level with 4 npe leaves, the level's leaves once over the processes
+and within one of the mean, owned as the keys say; an integer of the
+global cell index exact in every ghost inside the domain after
+`ghosts_update ()`; a reduction over the cells the level once.
+
+| bug (one line) | mpi np 3, 2D, 3D | tree_mpi np 3, 5, 2D, 3D |
+|---|---|---|
+| queries for the own leaves only (not the parents) | crash | crash |
+| nothing there: the index made, not the coarser leaf | crash | 0 |
+| no reflux children made | 1, 1 | 0 (uniform: no reflux) |
+| a leaf made pruned | 3, 3 | 0 |
+| the owners of the nodes made not set | crash | crash |
+| siblings made leaves | crash | crash at np 5 (2D) |
+| the pruned count kept when a stub has children again | 3, 3 (np 7: 7, np 16: 16) | 3, 5 |
+| sends not taken from the requests | crash | crash |
+| the plan's levels local, not the whole tree's | 0; crash at np 16 (3D) | 0 |
+| `tree ()` a level short (2 npe) | - | 15 (np 5, 2D), 9 (np 3, 3D) |
+| no pruning to the own nodes first | 9, 9 | 0 |
+| a parent answered as a leaf | crash (2D), 3 (3D) | 0 |
+| the owner from the asking node, not the index | crash | crash |
+
+"crash": a rank stops (an assertion, ASan, a node asked of a process that
+does not own it, or a message the stand-in did not expect). The pruned
+count was caught by nothing until the test counted the flags. The local
+levels differ only where a process lacks the finest or coarsest leaves:
+none of the test's trees but 3D on 16 ranks has one.
+
 On real ranks, with OpenMPI (`sudo apt install openmpi-bin
 libopenmpi-dev`):
 
@@ -456,10 +523,12 @@ processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
 ### Not done yet
 
-- The tree is still whole on every process until `tree_mpi_partition ()`,
-  and a reduction before it counts the tree npe times. Next (milestone
-  2): `tree ()` partitions a coarse uniform level at once, and each
-  process finds its halo by asking the owners (`tree_partition_owner ()`).
+- `tree_mpi_partition ()` still starts from a whole tree on every process
+  (`tree ()`'s coarse uniform one, or `tree_replicated ()`'s), and rank 0
+  partitions it. Moving blocks to new owners (milestone 3) and adapting
+  (milestone 4) will start from the distributed tree instead.
+- With `tree_replicated ()`, a reduction before the partition counts the
+  tree npe times: every process owns all of it then.
 - Writes through a pointer, a member or a subscript in a stencil loop
   (`*e = ...`, `same [k] += ...`) are not reductions: serial only.
 - Adapting under MPI: refining and coarsening a pruned tree, a new
@@ -1427,38 +1496,44 @@ that holds it.
 ## MPI
 
 Done: the partition (by rank 0, broadcast), the neighbour bit maps, the
-plans, pruning that frees the subtrees, and the exchange in
-`ghosts_update_list ()` ("MPI: partition, plans, pruning"
-above). Next, in order:
+plans, pruning that frees the subtrees, the exchange in
+`ghosts_update_list ()`, loops over owned leaves with reductions
+(milestone 1), and `tree ()` distributing at once, each process finding
+its halo by queries to the owners and making its plan from what it holds
+(milestone 2) ("MPI: partition, plans, pruning" above). The distributed
+tree (plan B, milestones 3-5) next:
 
-1. **Loops over owned leaves.** `foreach ()`, `foreach_face ()`,
-   `foreach_vertex ()` and `foreach_leaf ()` should visit `pid == rank`
-   only. Then reductions, and an `MPI_Allreduce` in the solvers.
-2. **The bit maps in `block_ghosts_cells ()`.** Today it looks up the
+1. **Migration (milestone 3).** A new partition computed on the
+   distributed tree (prefix sums of the weights, `MPI_Exscan`), each
+   leaf's new owner from it; the blocks sent to their new owners, which
+   make the nodes (`tree_insert ()`); the old copies pruned; the halo and
+   the plan made again (milestone 2's code).
+2. **Adapting (milestone 4).** `adapt_wavelet ()` on each process's leaves;
+   2:1 balance across processes by rounds of requests until none is left;
+   coarsening local (families of leaves never split by the partition);
+   the halo's structure sent to those who hold it; then milestone 3.
+3. **Multigrid and the rest (milestone 5).** Level exchanges for
+   `ghosts_update_level ()`, libvof under MPI, real OpenMPI runs, a first
+   scaling measure.
+4. **The bit maps in `block_ghosts_cells ()`.** Today it looks up the
    level index on every update, for each of the 3^D - 1 regions. The maps,
    with the neighbours' node pointers, cached per node at each tree change,
    would remove those lookups on one process too, and give the GPU a table.
    The face and vertex rules read from them: `same | fine` at +a keeps face
    m, `fine` at -a refluxes face 0.
-3. **Adapting.** `adapt_wavelet ()` on each process's leaves, the refined
-   and coarsened nodes agreed on all processes (the tree is whole on
-   each), then a new partition and the blocks moved to their new owners.
-4. **Dummy children for the halo** (discussed, not started). The owner of
+5. **Dummy children for the halo** (discussed, not started). The owner of
    a coarse leaf next to a finer region would fill dummy children with its
    prolongation, then send them like any block of the same level. Every
    halo would then be a copy, and a prolongation's dependencies (`zb`,
    `n`, `alpha`) would stay with their owner. Only the GHOSTS-thick strip
    that fine neighbours read needs filling. Keep the dummies in a table
    sorted by `Index`, out of the level index (no API change).
-5. **Fewer rounds.** There is one exchange per level, as a fine halo needs
+6. **Fewer rounds.** There is one exchange per level, as a fine halo needs
    the coarse leaf's ghosts. A coarse buffer per fine block (Parthenon),
    filled from the coarse neighbours' interiors in the same round as the
    same-level copies, would make it two rounds.
-6. **Periodic boundaries** with it: the wall bits of "Ghost operators and
+7. **Periodic boundaries** with it: the wall bits of "Ghost operators and
    adaptation", item 1, become the maps' "none" on a non-periodic axis.
-7. **A distributed tree.** The pruned nodes and blocks are freed now
-   (`tree_prune ()`); next, each process builds only its part and a layer
-   around it (Basilisk, p4est), without the whole tree first.
 
 ## Compile-time block size
 

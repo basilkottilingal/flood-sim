@@ -156,6 +156,8 @@ for prec in "" "-DBAMR_SINGLE"; do
       runenv=MPI_FORK_NP=$np
       run mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_mpi.c "$lib/tree.c" \
         "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
+      run tree_mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_tree_mpi.c \
+        "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
       runenv=
     done
   done

@@ -348,7 +348,18 @@
   /*
   .. API (s)
   */
+  /*
+  .. tree (depthmax, blockdepth): the tree, from level 1 (2^dimension
+  .. leaves). On several processes (-D_MPI), refined at once to the first
+  .. level with 4 npe leaves at least, and distributed (tree_mpi_partition
+  .. (), tree-mpi.h): each process its own leaves and a layer around them.
+  .. Such a tree cannot be refined or coarsened yet.
+  .. tree_replicated (depthmax, blockdepth): the same, not distributed: the
+  .. whole tree on every process, as on one, to refine as wanted before
+  .. tree_mpi_partition () (an initial mesh, the tests).
+  */
   int  tree (int depthmax, int blockdepth);
+  int  tree_replicated (int depthmax, int blockdepth);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
   double tree_get_origin (int axis); /* x0, y0, z0: the domain's corner  */
   double tree_get_size (void);       /* h0: its side                     */
@@ -412,5 +423,16 @@
   */
   int  tree_prune (Index p);
   int  tree_pruned (void);
+
+  /*
+  .. tree_insert (p, leaf): p made a node of this process's tree, with any
+  .. ancestor it lacks, each ancestor given its family: what a process
+  .. does with the nodes of others it learns of (tree-mpi.h, the halo). A
+  .. node made is pruned (its structure unknown here), pid -1 for the
+  .. caller to set, its blocks not filled; a pruned node an ancestor is
+  .. made has children again. With leaf, p is a leaf (if pruned before).
+  .. Returns the nodes made.
+  */
+  int  tree_insert (Index p, int leaf);
 
 #endif

@@ -275,6 +275,30 @@ int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
   return 0;
 }
 
+/* block r of sbuf to rank r, block r of rbuf from it; one's own copied */
+int MPI_Alltoall (const void * sbuf, int scount, MPI_Datatype stype,
+                  void * rbuf, int rcount, MPI_Datatype rtype, MPI_Comm comm)
+{
+  size_t size = type_size (stype);
+  if (!size || stype != rtype || scount != rcount || scount < 0)
+    fail ("Alltoall: the same type and count both ways");
+  int bytes = (int) ((size_t) scount * size), tag = -3, nr = 0;
+  MPI_Request q [2 * NP_MAX];
+  for (int r = 0; r < np; r++)
+    if (r == me)
+      memcpy ((char *) rbuf + (size_t) r * bytes,
+              (const char *) sbuf + (size_t) r * bytes, (size_t) bytes);
+    else
+    {
+      MPI_Irecv ((char *) rbuf + (size_t) r * bytes, bytes, MPI_BYTE, r, tag,
+                 comm, &q [nr++]);
+      MPI_Isend ((const char *) sbuf + (size_t) r * bytes, bytes, MPI_BYTE,
+                 r, tag, comm, &q [nr++]);
+    }
+  MPI_Waitall (nr, q, MPI_STATUSES_IGNORE);
+  return 0;
+}
+
 /* out [k] = out [k] op in [k], k < count, for items of type T */
 #define COMBINE(T)                                                      \
   for (int k = 0; k < count; k++)                                       \

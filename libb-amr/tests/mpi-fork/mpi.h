@@ -18,7 +18,7 @@
   ..   MPI_Init, MPI_Init_thread, MPI_Initialized, MPI_Finalize,
   ..   MPI_Finalized, MPI_Comm_rank, MPI_Comm_size
   ..   MPI_Isend, MPI_Irecv, MPI_Waitall   MPI_BYTE only
-  ..   MPI_Bcast                           any type below
+  ..   MPI_Bcast, MPI_Alltoall             any type below
   ..   MPI_Allreduce                       MPI_SUM, MPI_PROD, MPI_MIN, MPI_MAX
   ..                                       of MPI_INT, MPI_LONG, MPI_LONG_LONG,
   ..                                       MPI_UNSIGNED, MPI_UNSIGNED_LONG,
@@ -65,6 +65,9 @@
   int MPI_Waitall (int n, MPI_Request * req, MPI_Status * status);
   int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
                  MPI_Comm comm);
+  int MPI_Alltoall (const void * sbuf, int scount, MPI_Datatype stype,
+                    void * rbuf, int rcount, MPI_Datatype rtype,
+                    MPI_Comm comm);
   int MPI_Allreduce (const void * in, void * out, int count,
                      MPI_Datatype type, MPI_Op op, MPI_Comm comm);
 

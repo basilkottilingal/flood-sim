@@ -143,20 +143,52 @@ static void reference (int parents)
   r2 [parents] = snapshot ();
 }
 
-/* is a node of owner pid needed by this process: its own, or received
- * (by its address only: it may be freed) */
-static int needed (const TreeMpiPlan * plan, BAMRNode * node, int pid)
+/* a plan's lists as entries, in its order: send, then receive, by
+ * parents, kind, level, peer */
+typedef struct { int parents, kind, level, send, peer; Index p; } Entry;
+
+static int entries_of (const TreeMpiPlan * plan, Entry ** e)
 {
-  int need = pid == rank;
-  for (int pa = 0; pa < 2 && !need; pa++)
-    for (int kind = 0; kind < TREE_MPI_KINDS && !need; kind++)
-      for (int l = 0; l < BAMR_MAX_DEPTH + 2 && !need; l++) {
-        const TreeMpiExchange * ex = &plan->ex [pa][kind][l];
-        for (int k = 0; k < ex->nrecv && !need; k++)
-          for (int j = 0; j < ex->recv [k].n && !need; j++)
-            need = ex->recv [k].item [j].node == node;
-      }
-  return need;
+  int n = 0, cap = 0;
+  *e = NULL;
+  for (int pa = 0; pa < 2; pa++)
+    for (int kind = 0; kind < TREE_MPI_KINDS; kind++)
+      for (int l = 0; l < BAMR_MAX_DEPTH + 2; l++)
+        for (int send = 0; send < 2; send++) {
+          const TreeMpiExchange * ex = &plan->ex [pa][kind][l];
+          int nl = send ? ex->nsend : ex->nrecv;
+          const TreeMpiList * list = send ? ex->send : ex->recv;
+          for (int k = 0; k < nl; k++)
+            for (int j = 0; j < list [k].n; j++) {
+              if (n == cap)
+                cap = cap ? 2 * cap : 256,
+                *e = realloc (*e, (size_t) cap * sizeof (Entry));
+              (*e) [n++] = (Entry) { pa, kind, l, send, list [k].peer,
+                                     list [k].item [j].p };
+            }
+        }
+  return n;
+}
+
+static int same_index (Index a, Index b)
+{
+  int same = a.level == b.level && a.i == b.i;
+#if dimension > 1
+  same &= a.j == b.j;
+#endif
+#if dimension > 2
+  same &= a.k == b.k;
+#endif
+  return same;
+}
+
+/* the node q of nodes [] at p, by a search; -1 if none */
+static int position (Index p)
+{
+  for (int q = 0; q < nnodes; q++)
+    if (same_index (nodes [q].p, p))
+      return q;
+  return -1;
 }
 
 /* one update on npe processes against the same on one: parents 0 or 1 */
@@ -257,10 +289,11 @@ static struct sums reduced (void)
 
 int main (void)
 {
-  /* MPI started by tree (), and finalised at exit */
+  /* MPI started by tree_replicated () (as by tree ()), and finalised at
+   * exit; the whole tree on every process, refined, then distributed */
   int on = 0;
   MPI_Initialized (&on);
-  tree (5, 4);
+  tree_replicated (5, 4);
   int now = 0;
   MPI_Initialized (&now);
   MPI_Comm_rank (MPI_COMM_WORLD, &rank);
@@ -306,6 +339,38 @@ int main (void)
   uint64_t * keys = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
   memcpy (keys, tree_get_partition ()->key_first,
           (size_t) (npe + 1) * sizeof (uint64_t));
+
+  /*
+  .. the oracle, from the whole tree: the plan (tree_mpi_plan_new ()),
+  .. what is needed (its own and what it receives), and so what a process
+  .. keeps: the root, and every node whose parent has something needed
+  .. strictly below; a needed node has children iff something needed is
+  .. below it
+  */
+  TreeMpiPlan * oracle = tree_mpi_plan_new (rank);
+  int oracle_depth [2] = { oracle->depth, oracle->depth_min };
+  Entry * want;
+  int nwant = entries_of (oracle, &want);
+  char * need = calloc ((size_t) nnodes, 1);
+  char * below = calloc ((size_t) nnodes, 1);
+  char * keep = calloc ((size_t) nnodes, 1);
+  int * oflags = malloc ((size_t) nnodes * sizeof (int)), nkeep = 0;
+  for (int q = 0; q < nnodes; q++)
+    need [q] = pid [q] == rank, oflags [q] = nodes [q].node->flags;
+  for (int k = 0; k < nwant; k++)
+    if (!want [k].send)
+      need [position (want [k].p)] = 1;
+  for (int q = 0; q < nnodes; q++)
+    for (Index p = nodes [q].p; need [q] && p.level > 0; ) {
+      p = index_parent (p);
+      below [position (p)] = 1;
+    }
+  for (int q = 0; q < nnodes; q++) {
+    keep [q] = !nodes [q].p.level
+              || below [position (index_parent (nodes [q].p))];
+    nkeep += keep [q];
+  }
+  tree_mpi_plan_free (oracle);
   tree_partition_free ();
   for (int q = 0; q < nnodes; q++)
     nodes [q].node->pid = rank;   /* this process's again: rank 0 tells */
@@ -316,23 +381,54 @@ int main (void)
   CHECK (plan && plan->rank == rank && plan->npe == npe);
   CHECK (npe > 1 ? tree_pruned () > 0 : !tree_pruned ());
   {
-    /* pruned: every node needed still there, the same node; the pids and
-     * the partition rank 0's, as made here */
+    /*
+    .. made from the queries, not the whole tree: the plan the oracle's,
+    .. entry for entry; the nodes kept, by index, the oracle's; their
+    .. pids; a needed node a leaf, a parent or pruned as there. The nodes
+    .. are found again by index: those freed and made again are others
+    */
+    Entry * got;
+    int ngot = entries_of (plan, &got), equal = ngot == nwant;
+    for (int k = 0; k < ngot && equal; k++)
+      equal = got [k].parents == want [k].parents && got [k].kind == want [k].kind
+              && got [k].level == want [k].level && got [k].send == want [k].send
+              && got [k].peer == want [k].peer
+              && same_index (got [k].p, want [k].p);
+    CHECK (equal && plan->depth == oracle_depth [0]
+           && plan->depth_min == oracle_depth [1]);
     const TreePartition * tp = tree_get_partition ();
-    int there = 1, same = 1, nalive = 0;
+    int kept = 1, pids = 1, flags = 1, nalive = 0;
     for (int q = 0; q < nnodes; q++) {
-      alive [q] = index_is_allocated (nodes [q].p)
-                  && index_node (nodes [q].p) == nodes [q].node;
-      int need = needed (plan, nodes [q].node, pid [q]);
-      there &= !need || alive [q];
-      same &= !alive [q] || nodes [q].node->pid == pid [q];
+      BAMRNode * here = index_is_allocated (nodes [q].p)
+                        ? index_node (nodes [q].p) : NULL;
+      kept &= (here != NULL) == keep [q];
+      pids &= !here || here->pid == pid [q];
+      if (here && need [q]) {
+        int f = here->flags & (BAMR_NODE_LEAF | BAMR_NODE_HAS_CHILDREN
+                               | BAMR_NODE_IS_PRUNED);
+        int w = (oflags [q] & BAMR_NODE_LEAF) ? BAMR_NODE_LEAF
+                : below [q] ? BAMR_NODE_HAS_CHILDREN : BAMR_NODE_IS_PRUNED;
+        flags &= f == w;
+      }
+      nodes [q].node = here;
+      alive [q] = here != NULL;
       nalive += alive [q];
     }
-    CHECK (there && same);
+    CHECK (kept && pids && flags);
+    /* the counts the tree keeps, against its flags */
+    const TreeCaches * tcc = tree_caches ();
+    int npr = 0, nlf = 0;
+    for (int q = 0; q < tcc->nall; q++) {
+      npr += (tcc->all [q].node->flags & BAMR_NODE_IS_PRUNED) != 0;
+      nlf += (tcc->all [q].node->flags & BAMR_NODE_LEAF) != 0;
+    }
+    CHECK (npr == tree_pruned () && nlf == tree_get_nleaves ()
+           && nlf == tcc->nleaves);
     CHECK (tp && tp->npe == npe && tp->imbalance == imbalance
            && !memcmp (tp->leaf_first, first, (size_t) (npe + 1)
                                                 * sizeof (int)));
-    CHECK (tree_caches ()->nall == nalive && tree_get_nblocks () == nalive);
+    CHECK (tree_caches ()->nall == nkeep && tree_get_nblocks () == nkeep);
+    free (got);
     /* the owner of every node of the whole tree, freed here or not, from
      * the first keys alone; the keys rank 0's, as made here */
     int owners = !memcmp (tp->key_first, keys, (size_t) (npe + 1)
@@ -359,6 +455,7 @@ int main (void)
               (double) sums [1] / npe / nnodes, nnodes);
   }
   free (pid), free (first), free (keys);
+  free (want), free (need), free (below), free (keep), free (oflags);
 
   /* reductions over the processes, each its own leaves now: the whole
    * tree once. Before the partition each process owned all of it: npe
