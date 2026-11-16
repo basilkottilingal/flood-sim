@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -54,6 +55,14 @@ static int dimension;
 void translate_set_dimension (int d)
 {
   dimension = d;
+}
+
+/* Cells run at once: see translate.h */
+static int parallel;
+
+void translate_set_parallel (int p)
+{
+  parallel = p;
 }
 
 /* The scalars in a tensor, at most */
@@ -1788,6 +1797,8 @@ struct ast *stencil_by_axis (struct stencil_loop *loop,
     argss[r] = args ? ast_copy (args) : NULL;
     if (argss[r])
       each_leaf (argss[r], flatten_leaf, (void *)at);
+    loops[r]->reductions = loop->reductions;   /* the same names each axis */
+    loops[r]->has_reduce = loop->has_reduce;
   }
   for (int r = 0; r < dimension; r++) {
     struct ast *name = r ? new_token (T_IDENTIFIER, defs[r]->name, at)
@@ -2320,6 +2331,190 @@ static int loops_give_position (const struct loop_def *leaf,
   return 1;
 }
 
+/* Reductions of a stencil loop: see translate.h */
+
+#define MAX_REDUCTIONS 64
+
+struct reduction {
+  int op;                       /* 0 +, 1 *, 2 min, 3 max: tree_reduce ()'s */
+  struct ast *name;             /* the variable's token */
+  const struct var *var;
+};
+
+static const char *const reduce_ops[] = { "+", "*", "min", "max" };
+
+/* The reductions of loop, checked, into red: how many. */
+static int reductions_of (const struct stencil_loop *loop,
+                          const struct ast *body, struct reduction *red,
+                          int *rejected)
+{
+  int n = 0;
+
+  if (!loop->reductions)
+    return 0;
+  for (struct ast *cl = loop->reductions->child; cl; cl = cl->next) {
+    struct ast *op = cl->child->next->next, *names = op->next->next;
+    const char *text = expression_text (op);
+    int k;
+
+    for (k = 0; k < 4 && strcmp (text, reduce_ops[k]) != 0; k++)
+      ;
+    if (k == 4) {
+      stencil_error (rejected, op, "reduction (%s:...) in %s (): the "
+                     "operator is +, *, min or max", text, loop->name);
+      continue;
+    }
+    for (struct ast *nm = names->child; nm; nm = nm->next) {
+      const struct token *t = ast_token (nm);
+      const struct var *v = t->binding;
+      int twice = 0;
+
+      if (strcmp (t->text, ",") == 0)
+        continue;
+      if (!v || v->kind != SCOPE_VARIABLE || !v->decl
+          || is_under (v->decl, body)) {
+        stencil_error (rejected, nm, "'%s' in reduction () of %s (): not a "
+                       "variable declared before the loop", t->text,
+                       loop->name);
+        continue;
+      }
+      for (int r = 0; r < n; r++)
+        twice |= red[r].var == v;
+      if (twice) {
+        stencil_error (rejected, nm, "'%s' is reduced twice in %s ()",
+                       t->text, loop->name);
+        continue;
+      }
+      if (n == MAX_REDUCTIONS) {
+        stencil_error (rejected, nm, "more than %d reductions in %s ()",
+                       MAX_REDUCTIONS, loop->name);
+        return n;
+      }
+      red[n++] = (struct reduction) { k, nm, v };
+    }
+  }
+  return n;
+}
+
+/* A variable declared before the loop and written in it, not reduced: a
+ * warning, an error when cells run at once (translate_set_parallel ()).
+ * Once a variable. Writes through a member, a subscript or & are not
+ * seen. */
+static void unreduced_writes (const struct ast *n, const struct ast *body,
+                              const struct reduction *red, int nred,
+                              const struct var **seen, int *nseen,
+                              const char *loop_name, int *rejected)
+{
+  const struct ast *target;
+
+  if (n->kind == AST_TOKEN)
+    return;
+  if (n->kind != AST_UNARY_OP && (target = changed_operand (n))) {
+    while (target->kind == AST_PAREN_EXPRESSION)
+      target = target->child->next;
+    if (target->kind == AST_TOKEN) {
+      const struct token *t = ast_token (target);
+      const struct var *v = t->binding;
+      int known = 0;
+
+      for (int r = 0; r < nred; r++)
+        known |= red[r].var == v;
+      for (int s = 0; s < *nseen; s++)
+        known |= seen[s] == v;
+      if (v && !known && v->kind == SCOPE_VARIABLE && v->decl
+          && !is_under (v->decl, body) && *nseen < MAX_REDUCTIONS) {
+        seen[(*nseen)++] = v;
+        diag (t->file, t->line, parallel ? DIAG_ERROR : DIAG_WARNING,
+              "'%s' is declared before %s () and written in it, where cells "
+              "run at once (and on each process with MPI): reduce it, as in "
+              "%s (reduction (+:%s)), or with *, min or max", t->text,
+              loop_name, loop_name, t->text);
+        if (parallel)
+          (*rejected)++;
+      }
+    }
+  }
+  for (const struct ast *k = n->child; k; k = k->next)
+    unreduced_writes (k, body, red, nred, seen, nseen, loop_name, rejected);
+}
+
+/* Is the line at p, a directive, an OpenMP loop directive? *target: it is
+ * a target one too. */
+static int omp_loop_line (const char *p, const char *end, int *target)
+{
+  static const char *const loops[] = { "for", "simd", "distribute", "loop",
+                                       "taskloop" };
+  int loop = 0;
+
+  *target = 0;
+  p += 1 + strspn (p + 1, " \t");
+  if (end - p < 6 || strncmp (p, "pragma", 6) != 0)
+    return 0;
+  p += 6;
+  p += strspn (p, " \t");
+  if (end - p < 3 || strncmp (p, "omp", 3) != 0
+      || (p + 3 < end && (isalnum ((unsigned char)p[3]) || p[3] == '_')))
+    return 0;
+  for (p += 3; p < end; ) {
+    const char *w;
+
+    while (p < end && !(isalnum ((unsigned char)*p) || *p == '_'))
+      p++;
+    for (w = p; p < end && (isalnum ((unsigned char)*p) || *p == '_'); p++)
+      ;
+    for (int k = 0; k < 5; k++)
+      loop |= (size_t)(p - w) == strlen (loops[k])
+              && strncmp (w, loops[k], (size_t)(p - w)) == 0;
+    *target |= p - w == 6 && strncmp (w, "target", 6) == 0;
+  }
+  return loop;
+}
+
+/* trivia, its OpenMP loop directives given the clauses */
+static const char *pragma_clauses (const char *tr, const char *clause,
+                                   const char *map)
+{
+  const char *p = tr;
+
+  if (!strstr (tr, "omp"))
+    return tr;
+  MEMSTREAM (out);
+  if (!out)
+    abort ();
+  while (*p) {
+    const char *eol = strchr (p, '\n'), *q = p + strspn (p, " \t");
+    const char *end = eol ? eol : p + strlen (p);
+    int target;
+
+    if (*q == '#' && omp_loop_line (q, end, &target)) {
+      fwrite (p, 1, (size_t)(end - p), out);
+      fprintf (out, "%s%s", clause, target ? map : "");
+    }
+    else
+      fwrite (p, 1, (size_t)(end - p), out);
+    if (eol)
+      fputc ('\n', out);
+    p = eol ? eol + 1 : end;
+  }
+  return MEMSTREAM_TEXT (out);
+}
+
+/* The clauses on every OpenMP loop directive under n but under skip */
+static void reduce_pragmas (struct ast *n, const struct ast *skip,
+                            const char *clause, const char *map)
+{
+  if (n == skip)
+    return;
+  if (n->kind == AST_TOKEN) {
+    struct token *t = &((struct ast_leaf *)n)->tok;
+
+    t->trivia = pragma_clauses (t->trivia, clause, map);
+    return;
+  }
+  for (struct ast *k = n->child; k; k = k->next)
+    reduce_pragmas (k, skip, clause, map);
+}
+
 struct ast *stencil_loop_end (struct stencil_loop *loop,
                               const struct stencil_def *def, struct ast *args,
                               int has_ghosts, int has_located, int has_reach,
@@ -2478,6 +2673,42 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   }
   if (*rejected > errors)
     return body;
+
+  /* The reductions, and the variables written but not reduced */
+  struct reduction red[MAX_REDUCTIONS];
+  int nred = reductions_of (loop, body, red, rejected);
+  const char *clause = "", *map = "";
+  if (*rejected > errors)
+    return body;                          /* its clauses first */
+  {
+    const struct var *seen[MAX_REDUCTIONS];
+    int nseen = 0;
+
+    unreduced_writes (body, body, red, nred, seen, &nseen, def->name,
+                      rejected);
+  }
+  if (*rejected > errors)
+    return body;
+  for (int op = 0; op < 4; op++) {
+    const char *names = "";
+
+    for (int r = 0; r < nred; r++)
+      if (red[r].op == op)
+        names = arena_printf ("%s%s%s", names, *names ? ", " : "",
+                              ast_token (red[r].name)->text);
+    if (*names) {
+      clause = arena_printf ("%s reduction (%s:%s)", clause, reduce_ops[op],
+                             names);
+    }
+  }
+  if (nred) {
+    const char *all = "";
+
+    for (int r = 0; r < nred; r++)
+      all = arena_printf ("%s%s%s", all, r ? ", " : "",
+                          ast_token (red[r].name)->text);
+    map = arena_printf (" map (tofrom: %s)", all);
+  }
 
   /* Ghosts: the scalars written, whose ghosts go stale, and those read at an
    * offset, whose ghosts must be up to date first. A cell writes only its
@@ -2878,6 +3109,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
       each_leaf (cell_args, rename_given, &g);
     cells = expand_loop (cell, new_token (T_IDENTIFIER, "foreach", at),
                          cell_args, body, NULL, 1, rejected);
+    if (nred)
+      reduce_pragmas (cells, body, clause, map);
   }
 
   /* { the blocks; foreach_cell ... }, the block of foreach_leaf () */
@@ -2928,10 +3161,16 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
   kids[2] = close;
   struct ast *leaf_args = stencil_arguments (def->leaf_args, ps, params, nparams);
 
-  if (!nwritten && !nneeded && !nlocated && !nparams)
-    return stencil_mark (expand_loop (leaf, kw, leaf_args,
-                                      ast_node (AST_COMPOUND_STATEMENT, kids, 3),
-                                      NULL, 1, rejected));
+  if (!nwritten && !nneeded && !nlocated && !nparams
+      && !(nred && loop->has_reduce)) {
+    struct ast *e = expand_loop (leaf, kw, leaf_args,
+                                 ast_node (AST_COMPOUND_STATEMENT, kids, 3),
+                                 NULL, 1, rejected);
+
+    if (nred)
+      reduce_pragmas (e, cells, clause, map);
+    return stencil_mark (e);
+  }
 
   /* { the parameters, bound; the stale ghosts it reads, updated; the loop;
    *   those it writes, marked } */
@@ -2939,6 +3178,8 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                                     leaf_args,
                                     ast_node (AST_COMPOUND_STATEMENT, kids, 3),
                                     NULL, 1, rejected);
+  if (nred)
+    reduce_pragmas (leaves, cells, clause, map);
   struct ast *around = ast_new (AST_BLOCK_ITEMS), *es[2 * MAX_GHOST_SCALARS];
   const struct token *end = last_token (leaves);
   int all = 0, nes = 0;
@@ -3001,7 +3242,27 @@ struct ast *stencil_loop_end (struct stencil_loop *loop,
                          serial, serial);
     add_stencil_items (around, text, es, nes, at);
   }
+  /* reduced over the processes: the value before the loop counts once,
+   * rank 0's (translate.h) */
+  if (nred && loop->has_reduce)
+    for (int r = 0; r < nred; r++)
+      if (red[r].op < 2) {
+        struct ast *re[1] = { red[r].name };
+
+        add_stencil_items (around, red[r].op ? "if (tree_rank () != 0) "
+                           "(__cwrap_e0) = 1;" : "if (tree_rank () != 0) "
+                           "(__cwrap_e0) = 0;", re, 1, at);
+      }
   ast_add (around, leaves);
+  if (nred && loop->has_reduce)
+    for (int r = 0; r < nred; r++) {
+      struct ast *re[2] = { red[r].name, red[r].name };
+
+      add_stencil_items (around, arena_printf (
+        "tree_reduce (&(__cwrap_e0), _Generic ((__cwrap_e1), int: 0, long: 1, "
+        "long long: 2, unsigned: 3, unsigned long: 4, unsigned long long: 5, "
+        "float: 6, double: 7), %d);", red[r].op), re, 2, end);
+    }
 
   all = 0;
   for (int w = 0; w < nwritten; w++)

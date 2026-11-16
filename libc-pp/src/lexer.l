@@ -301,6 +301,12 @@ PFX     (u8|u|U|L)
   /* foreach (): the stencil loop. The parentheses are read again after it. */
 "foreach"/[ \t\r\f\v\n]*"("[ \t\r\f\v\n]*")"  { yyextra->word = WORD_STENCIL;
                                                  AST (stencil_word (yyextra)); }
+  /* foreach (reduction (...)): the stencil loop with its reductions */
+"foreach"/[ \t\r\f\v\n]*"("[ \t\r\f\v\n]*"reduction"[ \t\r\f\v\n]*"("  {
+                          yyextra->word = WORD_STENCIL;
+                          AST (stencil_word (yyextra)); }
+  /* reduction (op:names), in a stencil loop's parentheses */
+"reduction"/[ \t\r\f\v\n]*"("  { MOVER (T_REDUCTION); }
 "foreach_neighbor"      { MOVER (T_FOREACH_NEIGHBOR); }
 "foreach_child"         { MOVER (T_FOREACH_CHILD); }
 "foreach_dimension"     { MOVER (T_FOREACH_DIMENSION); }

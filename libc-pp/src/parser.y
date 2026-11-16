@@ -300,9 +300,14 @@ static struct stencil_loop *stencil_begin (struct parse_status *status,
 /* The end of a stencil loop's body: the loop, expanded. */
 static struct ast *stencil_use (struct scope_table *scopes,
                                 struct parse_status *status, struct ast *name,
-                                struct ast *args, struct ast *body)
+                                struct ast *args, struct ast *reductions,
+                                struct ast *body)
 {
   struct stencil_loop *loop = status->stencil;
+
+  loop->reductions = reductions;
+  loop->has_reduce = scope_find (scopes, "tree_reduce")
+                     && scope_find (scopes, "tree_rank");
   const char *text = ast_token (name)->text;
   const struct stencil_def *def = find_stencil (status, text);
   int has_ghosts = scope_find (scopes, "ghosts_mark_dirty")
@@ -380,6 +385,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token AT_FOREACH "@foreach" STENCIL_NAME
 %token FOREACH_NEIGHBOR "foreach_neighbor"
 %token FOREACH_CHILD "foreach_child"
+%token REDUCTION "reduction"
 %token FOREACH_DIMENSION "foreach_dimension"
 %token AT_OPERATOR "@prolongation, @restriction or @boundary"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
@@ -1120,8 +1126,13 @@ iteration_statement:
    * gathered as they reduce, then the loop is expanded with them. */
   | FOREACH_CELLS '(' ')'         { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
-    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
+  | FOREACH_CELLS '(' reduction_list ')'
+                                  { status->stencil = stencil_begin (status, $1);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $3, $6);
+                                    (void) $2; (void) $4; (void) $5; }
   /* @prolongation (id) (args);: the operator with that id, called */
   | AT_OPERATOR '(' expression ')' '(' opt_arguments ')' ';'
                                   { $$ = operator_dispatch ($1, $2, $3, $4, $5, $6, $7, $8,
@@ -1149,13 +1160,23 @@ iteration_statement:
   /* a loop declared with @foreach, with arguments or not */
   | STENCIL_NAME '(' ')'          { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
-    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $5);
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, NULL, $5);
                                     (void) $2; (void) $3; (void) $4; }
   | STENCIL_NAME '(' argument_list ')'
                                   { status->stencil = stencil_begin (status, $1);
                                     $$ = NULL; }
-    statement                     { $$ = stencil_use (scopes, status, $1, $3, $6);
+    statement                     { $$ = stencil_use (scopes, status, $1, $3, NULL, $6);
                                     (void) $2; (void) $4; (void) $5; }
+  | STENCIL_NAME '(' reduction_list ')'
+                                  { status->stencil = stencil_begin (status, $1);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_use (scopes, status, $1, NULL, $3, $6);
+                                    (void) $2; (void) $4; (void) $5; }
+  | STENCIL_NAME '(' argument_list ',' reduction_list ')'
+                                  { status->stencil = stencil_begin (status, $1);
+                                    $$ = NULL; }
+    statement                     { $$ = stencil_use (scopes, status, $1, $3, $5, $8);
+                                    (void) $2; (void) $4; (void) $6; (void) $7; }
   /* A use of a block macro. Its statement, the block, is parsed in a scope
    * with the names the loop gives it. */
   | LOOP_NAME '(' ')' open_scope  { loop_open (scopes, status, $1); $$ = NULL; }
@@ -1165,6 +1186,38 @@ iteration_statement:
                                   { loop_open (scopes, status, $1); $$ = NULL; }
     statement                     { $$ = loop_use (scopes, status, $1, $3, $7); (void) $6; }
     close_scope                   { $$ = $8; (void) $5; (void) $9; }
+  ;
+
+/* A stencil loop's reductions, as OpenMP's: reduction (+:a, b) reduction
+ * (max:m). Checked, and lowered, with the loop (translate.h). */
+reduction_list:
+    reduction_clause              { $$ = N (REDUCTION_LIST, $1); }
+  | reduction_list reduction_clause
+                                  { $$ = ast_add ($1, $2); }
+  ;
+
+reduction_clause:
+    REDUCTION '(' reduction_operator ':' reduction_names ')'
+                                  { $$ = N (REDUCTION_CLAUSE, $1, $2, $3, $4, $5, $6); }
+  ;
+
+/* any of OpenMP's, so that those cwrap does not take are reported as such */
+reduction_operator:
+    '+'
+  | '*'
+  | '-'
+  | '&'
+  | '|'
+  | '^'
+  | LOGICAL_AND
+  | LOGICAL_OR
+  | any_identifier
+  ;
+
+reduction_names:
+    IDENTIFIER                    { $$ = N (ARGUMENT_LIST, $1); }
+  | reduction_names ',' IDENTIFIER
+                                  { $$ = ast_add (ast_add ($1, $2), $3); }
   ;
 
 /* in is not a token, so that it stays an ordinary name. */

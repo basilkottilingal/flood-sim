@@ -6,7 +6,7 @@ scalar s, t, r, q;
 static double sum_of (scalar a)
 {
   double sum = 0;
-  foreach ()
+  foreach (reduction (+:sum))
     sum += a[];
   return sum;
 }

@@ -25,7 +25,7 @@ int main (void)
   foreach_in_leaf (1 + 0 * calls++)     /* the argument, evaluated once */
     s[] = x;
   double sum = 0;
-  foreach ()
+  foreach (reduction (+:sum))
     sum += s[];
   printf ("%g %d\n", sum, calls);       /* x of the leaf i = 1 only */
   return 0;

@@ -495,6 +495,46 @@ check "ghosts_by_caller keeps the rules: a write at an offset an error, a neighb
   [ "$(./stencil_colour)" = "red 24 black 24 other 0" ] && [ ! -s stencil_colour.log ]
 check "a loop over one colour (checkerboard): a scalar it writes read at odd offsets, enum ones too, with no warning; each colour once" $?
 
+"$cwrap" -dimension=2 -Wall -Wextra stencil_reduce.c -o stencil_reduce 2> stencil_reduce.log &&
+  [ "$(./stencil_reduce | sed -n 1p)" = "rank 0: 23 48 48 0.03125 0.71875 96 96; 7:0=23 1:0=48 0:1=48 7:2=0.03125 7:3=0.71875 0:0=96 0:0=48 0:0=96" ] &&
+  [ "$(./stencil_reduce | sed -n 2p)" = "rank 1: 18 48 16 0.03125 0.71875 96 48; 7:0=18 1:0=48 0:1=16 7:2=0.03125 7:3=0.71875 0:0=96 0:0=48 0:0=48" ] &&
+  [ ! -s stencil_reduce.log ]
+check "reduction (): + * min max exact, the value before counted on rank 0 only, tree_reduce () by type and op, a loop's parameter, a loop by axis" $?
+
+"$cwrap" -dimension=2 -fopenmp -Wall -Wextra stencil_reduce_omp.c -o stencil_reduce_omp 2> stencil_reduce_omp.log &&
+  [ "$(OMP_NUM_THREADS=1 ./stencil_reduce_omp)" = "6592 12" ] &&
+  [ "$(OMP_NUM_THREADS=4 ./stencil_reduce_omp)" = "6592 12" ] &&
+  [ "$(OMP_NUM_THREADS=16 ./stencil_reduce_omp)" = "6592 12" ] &&
+  [ ! -s stencil_reduce_omp.log ] &&
+  "$cwrap" -dimension=2 -fopenmp -DTARGET_CHECK -translate stencil_reduce_omp.c -o stencil_reduce_omp.out &&
+  [ "$(grep -c '^#pragma omp parallel for schedule (dynamic) reduction (+:n) reduction (max:hi)$' stencil_reduce_omp.out)" = 1 ] &&
+  [ "$(grep -c '^#pragma omp simd reduction (+:n) reduction (max:hi)$' stencil_reduce_omp.out)" = 1 ] &&
+  [ "$(grep -c '^#pragma omp simd$' stencil_reduce_omp.out)" -ge 1 ] &&
+  grep -q '^#pragma omp target teams distribute parallel for reduction (+:m) map (tofrom: m)$' stencil_reduce_omp.out
+check "reduction () with OpenMP: the clauses on the loops' directives, not the body's; a target one mapped; exact on 1, 4, 16 threads" $?
+
+"$cwrap" -dimension=2 -Wall -c stencil_reduce_bad.c -o stencil_reduce_bad.o 2> stencil_reduce_bad.log
+[ $? -ne 0 ] && [ ! -e stencil_reduce_bad.o ] &&
+  [ "$(grep -o '^stencil_reduce_bad.c:[0-9]*: error' stencil_reduce_bad.log | cut -d: -f2 | tr '\n' ' ')" = "12 13 14 15 " ] &&
+  [ "$(grep -o '^stencil_reduce_bad.c:[0-9]*: warning' stencil_reduce_bad.log | cut -d: -f2 | tr '\n' ' ')" = "17 18 19 " ] &&
+  grep -q "^stencil_reduce_bad.c:12: error: reduction (-:...) in foreach (): the operator is +, \*, min or max" stencil_reduce_bad.log &&
+  grep -q "^stencil_reduce_bad.c:13: error: 'k' is reduced twice in foreach ()" stencil_reduce_bad.log &&
+  grep -q "^stencil_reduce_bad.c:14: error: 'nosuch' in reduction () of foreach (): not a variable declared before the loop" stencil_reduce_bad.log &&
+  grep -q "^stencil_reduce_bad.c:17: warning: 'b' is declared before foreach () and written in it" stencil_reduce_bad.log
+check "reduction (): a wrong operator, a name twice, not a variable; written but not reduced a warning, once a variable, not for the body's own" $?
+
+sed -n '1,11p;16,22p' stencil_reduce_bad.c > stencil_reduce_strict.c
+strict=0
+for flag in -fopenmp -D_MPI; do
+  rm -f stencil_reduce_strict.o
+  "$cwrap" -dimension=2 $flag -Wall -c stencil_reduce_strict.c -o stencil_reduce_strict.o 2> stencil_reduce_strict.log
+  [ $? -ne 0 ] && [ ! -e stencil_reduce_strict.o ] &&
+    [ "$(grep -c "error: '[bgk]' is declared before foreach () and written in it" stencil_reduce_strict.log)" = 3 ] &&
+    strict=$((strict + 1))
+done
+[ "$strict" = 2 ]
+check "reduction (): written but not reduced an error with -fopenmp or -D_MPI" $?
+
 "$cwrap" -dimension=2 -Wall -c stencil_colour_bad.c -o stencil_colour_bad.o 2> stencil_colour_bad.log
 [ $? -ne 0 ] && [ ! -e stencil_colour_bad.o ] &&
   [ "$(grep -o '^stencil_colour_bad.c:[0-9]*:[0-9]*: error' stencil_colour_bad.log | cut -d: -f2 | tr '\n' ' ')" = "7 9 " ] &&

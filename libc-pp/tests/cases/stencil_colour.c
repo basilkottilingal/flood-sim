@@ -15,7 +15,7 @@ int main (void)
   foreach_mock_colour (1)
     p[] = p[2,1] + p[ONE,0] + 2;
   int red = 0, black = 0, other = 0;
-  foreach () {
+  foreach (reduction (+:red, black, other)) {
     if (p[] == 1)
       red++;
     else if (p[] >= 2)

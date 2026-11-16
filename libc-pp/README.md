@@ -795,9 +795,48 @@ With `-dimension=N` and libb-amr's `<block-loops.h>`, as in Basilisk:
 - **The body sees none of the loops' names.** `c`, `shape`, `sblocks`, `node`,
   `level`, `i`, `j`, `k`, ... are renamed in the expansion, so the body's
   own, or those around the loop, keep their meaning.
-- **The loop is serial over the leaves,** and `foreach_cell` vectorises each
-  row as `BLOCK_BACKEND` says (see `block-loops.h`): a sum into a variable
-  is fine; a cell must not be read along i in the row that writes it.
+- **The cells run at once:** `foreach_cell` vectorises each row as
+  `BLOCK_BACKEND` says (see `block-loops.h`), or shares the rows among
+  threads, and with MPI each process runs its own leaves. A cell must not
+  be read along i in the row that writes it. A variable declared before
+  the loop and written in it is a reduction, and must say so (below).
+- **Reductions: `reduction (op:names)`,** as OpenMP's, in the loop's
+  parentheses, after its own arguments:
+
+      double sum = 0, top = -HUGE_VAL;
+      long n = 0;
+      foreach (reduction (+:sum, n) reduction (max:top)) {
+        sum += a[] * sq (Delta);
+        n++;
+        top = fmax (top, a[]);
+      }
+      foreach_level (l, reduction (+:res))
+        res += sq (r[]);
+
+  - **The operators are `+`, `*`, `min` and `max`;** each name a variable
+    declared before the loop, once in the loop's clauses. Anything else is
+    an error, at the clause.
+  - **OpenMP:** every OpenMP loop directive of the loop's two `@loop`s
+    (`for`, `simd`, `distribute`, `loop`, `taskloop`) gets the clauses, as
+    `#pragma omp simd reduction (+:sum, n) reduction (max:top)`; a `target`
+    one also `map (tofrom: sum, n, top)`. Directives in the body are its
+    own and keep theirs.
+  - **MPI:** with `tree_reduce ()` and `tree_rank ()` declared (libb-amr's
+    `tree.h`), the value is combined over the processes after the loop, by
+    `tree_reduce (&(v), type, op)`, the type from `_Generic` on v (int,
+    long, long long, their unsigned, float, double; another type is gcc's
+    error). For `+` and `*`, every process but rank 0 starts from 0 or 1,
+    so that the value before the loop counts once. On one process
+    `tree_reduce ()` does nothing.
+  - **A loop by axis** (`foreach_face ()`) reduces after each of its axis
+    loops, with the same names.
+  - **Written but not reduced:** a variable declared before the loop and
+    written in it (`=`, `op=`, `++`, `--`) without a clause is a warning,
+    and an error with `-fopenmp` (or `-fopenmp-simd`) or `-D_MPI`, once a
+    variable. Writes through a member, a subscript or a pointer (`*e =`,
+    `a[k] +=`) are not seen, and stay serial-only.
+  - **Floating sums** depend on the order: the last bits differ between
+    thread counts, back ends and numbers of processes.
 - **No `break`:** it leaves only the row of cells.
 - **Ghosts are kept up to date lazily,** as in Basilisk. After the loop,
   each scalar it writes is marked stale (`ghosts_mark_dirty ()`, a bit).
@@ -1198,7 +1237,12 @@ on it. The tests cover:
 - `foreach ()` on a small grid of its own (`stencil.h`): offsets, a vector,
   the body's own names, `x`, `y` and `Delta`, the ghosts updated only when
   stale, the dependency warning, `foreach_neighbor ()` and its checks,
-  `@foreach` with parameters, nesting through calls, loops over two levels
+  `@foreach` with parameters, reductions (`stencil_reduce.c`: every
+  operator exact, rank 0's starting value, `tree_reduce ()`'s type and
+  operator, a loop by axis; `stencil_reduce_omp.c`: the clauses on the
+  loops' directives and not the body's, `map` on a `target` one, exact on
+  1, 4 and 16 threads; `stencil_reduce_bad.c`: the errors, the warning, the
+  error under `-fopenmp` or `-D_MPI`), nesting through calls, loops over two levels
   (`coarse ()`, `child.x`, `foreach_child ()`) and their errors, ghost
   operators (`ops_run.c`, `ops_bad.c`) and coupled ones (`ops_coupled.c`,
   `ops_coupled_bad.c`), a global scalar never freed, a block per scalar

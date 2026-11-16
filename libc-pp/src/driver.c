@@ -263,7 +263,7 @@ int main (int argc, char **argv)
   int want_deps = 0, have_dep_target = 0;
   int other_sources = 0, nobj = 0, ninputs = 0;
   const char *color = NULL;
-  int dimension = 0;
+  int dimension = 0, parallel = 0;
 
   if (!items)
     die ("out of memory");
@@ -290,6 +290,13 @@ int main (int argc, char **argv)
       dimension = a[11] - '0';
       continue;
     }
+    /* cells at once: reductions are checked strictly (translate.h) */
+    if (strncmp (a, "-fopenmp", 8) == 0 || strcmp (a, "-D_MPI") == 0
+        || strncmp (a, "-D_MPI=", 7) == 0
+        || (strcmp (a, "-D") == 0 && i + 1 < argc
+            && (strcmp (argv[i + 1], "_MPI") == 0
+                || strncmp (argv[i + 1], "_MPI=", 5) == 0)))
+      parallel = 1;
 
     if (a[0] != '-' || a[1] == '\0') {
       const char *ext = extension (a);
@@ -400,6 +407,7 @@ int main (int argc, char **argv)
     passthrough = compile_only = assemble_only = 0;
   }
   translate_set_dimension (dimension);
+  translate_set_parallel (parallel);
   if (passthrough || nsrc == 0) {
     struct vec all = { 0 };
 

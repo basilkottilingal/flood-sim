@@ -22,6 +22,11 @@ void check_scalar_assignment (const struct scope_table *scopes,
 /* The euclidean dimension, 1 to 3, from -dimension=; 0 turns scalars off. */
 void translate_set_dimension (int dimension);
 
+/* Whether the program is built to run cells at once: -fopenmp (or
+ * -fopenmp-simd) or -D_MPI. A variable declared before a stencil loop and
+ * written in it without a reduction () is then an error, not a warning. */
+void translate_set_parallel (int parallel);
+
 /* Rewrites the scalars that decl, a declaration in function, declares:
  *
  *   scalar x;          becomes  scalar x __attribute__ ((cleanup (...)))
@@ -225,6 +230,8 @@ struct stencil_loop {
   int nmover, mcap;
   int in_mover;                 /* in one now */
   const char *mover_name;       /* its name */
+  struct ast *reductions;       /* REDUCTION_LIST, or NULL */
+  int has_reduce;               /* tree_reduce () and tree_rank () declared */
 };
 
 /* foreach_neighbor (r) statement, in a stencil loop: the statement runs for
@@ -361,6 +368,28 @@ struct ast *foreach_dimension (struct stencil_loop *loop, struct ast *kw,
 struct ast *stencil_access (struct stencil_loop *loop, struct ast *base,
                             struct ast *open, struct ast *offsets,
                             struct ast *close, int *rejected);
+
+/* Reductions: foreach (reduction (+:s) reduction (max:m)), and any stencil
+ * loop, after its own arguments: foreach_level (l, reduction (+:r)). The
+ * operators are +, *, min and max; each name a variable declared before
+ * the loop, once. Lowered as OpenMP's: every OpenMP loop directive of the
+ * loop's two @loops (for, simd, distribute, loop, taskloop; not the body's)
+ * gets the clauses, and a target one map (tofrom: ...) too. With
+ * tree_reduce () and tree_rank () declared (libb-amr's tree.h), the value
+ * is also combined over the processes:
+ *
+ *   if (tree_rank () != 0) s = 0;          + and *: the identity (1 for *)
+ *   <the loop>                             on every process but rank 0
+ *   tree_reduce (&(s), _Generic ((s), int: 0, long: 1, long long: 2,
+ *                unsigned: 3, unsigned long: 4, unsigned long long: 5,
+ *                float: 6, double: 7), op);    op 0 +, 1 *, 2 min, 3 max
+ *
+ * so that the value before the loop counts once. A variable of another
+ * type is gcc's error, in the _Generic. A variable declared before the
+ * loop and written in it (=, op=, ++, --) but not reduced is a warning, an
+ * error if translate_set_parallel (): cells run at once, and on several
+ * processes. Writes through a member, a subscript or a pointer are not
+ * seen. */
 
 /* The loop with its body: the expansion described above. def is the
  * loop's @foreach, NULL if not declared: an error; args its arguments, an

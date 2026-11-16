@@ -7,7 +7,7 @@ vector u;
 static double sum_of (scalar a)
 {
   double sum = 0;
-  foreach ()
+  foreach (reduction (+:sum))
     sum += a[];
   return sum;
 }
@@ -21,7 +21,7 @@ int main (void)
       a [k] = k + 100 * i;
   }
   int n = 0;
-  foreach () {
+  foreach (reduction (+:n)) {
     s[] = t[1] - t[-1] + t[0,1] - t[0,-1];  /* 2 + 16 */
     n++;
   }
