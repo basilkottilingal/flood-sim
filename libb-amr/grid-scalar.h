@@ -34,6 +34,14 @@
   */
   void    grid_scalar_family_new (void *** t [], int uninit);
   void    grid_scalar_family_free (void *** t []);
+  /*
+  .. A family (or the root) with no active member (BAMR_NODE_IS_INACTIVE,
+  .. tree.h) has no blocks: its nodes keep their tables, flags and pid. on:
+  .. the blocks every scalar in use lacks, given (not zeroed); off: all
+  .. taken back. What tree-mpi.c calls as nodes become active or not.
+  */
+  void    grid_scalar_family_blocks (void *** t [], int on);
+  void    grid_scalar_root_free (void *** t);
   void    grid_scalar_alloc_blocks (scalar s);  /* in every node */
   void    grid_scalar_free_blocks (scalar s);   /* in every node */
 
@@ -41,7 +49,9 @@
   .. Debug: counts what the tree's nodes hold and compares it with what the
   .. pools have handed out and not had back (pool_used ()):
   ..   blocks of scalars in use      == the root's, plus TREE_NCHILDREN per
-  ..                                    family out of the family pool
+  ..                                    family out of the family pool; in
+  ..                                    every family with an active member,
+  ..                                    in none other
   ..   blocks in every slot          == the same (none left by a freed scalar)
   ..   groups, tables                == out of their pools
   .. Prints each mismatch to stderr, then returns 0; returns 1 if all agree.

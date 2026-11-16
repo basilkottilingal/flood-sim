@@ -140,16 +140,31 @@
   ..                           the subtrees pruned
   ..
   ..
-  .. 5. With MPI (-D_MPI)
-  .. --------------------
+  .. 5. With MPI (-D_MPI): the skeleton
+  .. ----------------------------------
+  ..
+  .. A distributed process holds its skeleton: its own nodes, their
+  .. ancestors, and N (p) of each own node p: p's same-level neighbours,
+  .. the coarser leaf covering an absent one, for a leaf the children of a
+  .. neighbour with children that touch it, p's parent and children. That
+  .. is every node the plans read, both ways: N (x) holds p when N (p)
+  .. holds x (2:1 balance), so the ranks of N () of its nodes, its peers,
+  .. name it too, and every exchange is point to point with them, sizes
+  .. first: no message to all. A node of the skeleton it neither owns nor
+  .. receives is inactive (BAMR_NODE_IS_INACTIVE, tree.h): flags and pid,
+  .. no blocks when its whole family is (blocks go by family). The
+  .. owners of the neighbours are their pids, known here.
   ..
   ..   tree_mpi_partition (weight)  on MPI_COMM_WORLD, every process with
   ..                                the same whole tree: rank 0 partitions
   ..                                (its weights; the others' are not read)
   ..                                and sends every node's pid and the
   ..                                loads to ranks 1 to npe - 1 (MPI_Bcast);
-  ..                                each makes its plan and prunes; the
-  ..                                exchanges on, every scalar marked stale.
+  ..                                each prunes to its skeleton, makes its
+  ..                                plan (receives from the tree here,
+  ..                                sends as its peers ask) and its nodes
+  ..                                active or not; the exchanges on, every
+  ..                                scalar marked stale.
   ..                                Returns 0, -1 if rank 0's tree_partition
   ..                                () refused (nothing changed)
   ..   tree_mpi_repartition (weight)
@@ -161,8 +176,12 @@
   ..                                the whole tree would put it; every
   ..                                node that changes hands sent to its
   ..                                new owner with its blocks (every
-  ..                                scalar), made there (tree_insert ());
-  ..                                then the halo and the plan again.
+  ..                                scalar) and N () of it (structure),
+  ..                                made there (tree_insert ()), between
+  ..                                the old and new owners of each piece
+  ..                                of the curve (from the first keys of
+  ..                                the two partitions); pids by the new
+  ..                                keys; then the skeleton and plan again.
   ..                                Returns the nodes this process sent,
   ..                                -1 if a weight is not > 0 anywhere or
   ..                                no partition was made (nothing done).
@@ -177,10 +196,8 @@
   ..                                scalars s [0..n): what ghosts_update_list
   ..                                () calls
   ..
-  .. Not yet: foreach () and the other loops still visit every leaf left in
-  .. the lists (the process's, the ones it receives, and their siblings),
-  .. so a reduction counts some twice; adapting under MPI;
-  .. ghosts_update_level () (multigrid), block_ghosts () alone.
+  .. Not yet: adapting under MPI; ghosts_update_level () (multigrid),
+  .. block_ghosts () alone.
   */
 
   /* 1. the partition */
@@ -239,6 +256,10 @@
     int depth;              /* the deepest level of the whole tree       */
     int depth_min;          /* its coarsest leaf's                       */
     unsigned generation;    /* tree_generation when made                 */
+    int npeers, * peers;    /* the ranks exchanged with, sorted: those
+                               of N () of this process's nodes (the
+                               distributed plan's; none in a whole-tree
+                               plan of tree_mpi_plan_new ())             */
     TreeMpiExchange ex [2][TREE_MPI_KINDS][BAMR_MAX_DEPTH + 2];
                             /* [parents][kind][level]                    */
   } TreeMpiPlan;

@@ -101,6 +101,16 @@ void grid_scalar_root_blocks (void *** t)
     root_block (t, s);
 }
 
+void grid_scalar_root_free (void *** t)
+{
+  foreach_scalar (s)
+    if (t [s/w] && t [s/w][s%w])
+    {
+      pool_free (pool_block, t [s/w][s%w]);
+      t [s/w][s%w] = NULL;
+    }
+}
+
 /*
 .. The blocks of scalar s for a family of children, tables t [0..], as one
 .. object of the family pool: child c's block is the c-th of it. uninit:
@@ -118,6 +128,17 @@ void grid_scalar_family_new (void *** t [], int uninit)
 {
   foreach_scalar (s)
     family_block (t, s, uninit);
+}
+
+static void family_block_free (void *** t [TREE_NCHILDREN], int s);
+
+void grid_scalar_family_blocks (void *** t [], int on)
+{
+  foreach_scalar (s)
+    if (!on)
+      family_block_free (t, s);
+    else if (!t [0][s/w] || !t [0][s/w][s%w])
+      family_block (t, s, 1);
 }
 
 /* the family's block of scalar s, back to the pool, and its slots emptied */
@@ -149,7 +170,9 @@ void grid_scalar_family_free (void *** t [])
 /*
 .. Every family below p, given p's node, made (alloc) or freed: by the
 .. children a node has (BAMR_NODE_HAS_CHILDREN). A pruned node has none:
-.. its subtree is gone (tree_prune ()).
+.. its subtree is gone (tree_prune ()). A family whose every member is
+.. inactive (BAMR_NODE_IS_INACTIVE) has no blocks: none made; its
+.. descendants may have some.
 */
 static void families_below (Index p, BAMRNode * n, scalar s, int alloc)
 {
@@ -157,14 +180,16 @@ static void families_below (Index p, BAMRNode * n, scalar s, int alloc)
     return;
   BAMRNode * child [TREE_NCHILDREN];
   void *** t [TREE_NCHILDREN];
+  int active = 0;
   for (int c = 0; c < TREE_NCHILDREN; c++)
   {
     child [c] = index_node (index_child (p, c));
     t [c] = child [c]->s;
+    active |= !(child [c]->flags & BAMR_NODE_IS_INACTIVE);
   }
-  if (alloc)
+  if (alloc && active)
     family_block (t, s, 0);
-  else
+  else if (!alloc)
     family_block_free (t, s);
   for (int c = 0; c < TREE_NCHILDREN; c++)
     families_below (index_child (p, c), child [c], s, alloc);
@@ -174,7 +199,9 @@ void grid_scalar_alloc_blocks (scalar s)
 {
   if (!pool_block)        /* no tree yet: tree () allocates them */
     return;
-  root_block (index_node (TREE_ROOT_INDEX)->s, s);
+  BAMRNode * root = index_node (TREE_ROOT_INDEX);
+  if (!(root->flags & BAMR_NODE_IS_INACTIVE))
+    root_block (root->s, s);
   families_below (TREE_ROOT_INDEX, index_node (TREE_ROOT_INDEX), s, 1);
 }
 
@@ -221,13 +248,24 @@ int grid_scalar_check (void)
   if (!pool_block)
     return 1;
   long attached = 0, slots = 0, groups = 0, tables = 0, missing = 0;
+  long extra = 0;
   foreach_node () {
     tables++;
+    /* a node keeps blocks if its family has an active member (the root,
+     * if it is active) */
+    Index p = {IJKL};
+    int keeps = 0;
+    if (!level)
+      keeps = !(node->flags & BAMR_NODE_IS_INACTIVE);
+    else
+      for (int c = 0; c < TREE_NCHILDREN; c++)
+        keeps |= !(index_node (index_child (index_parent (p), c))->flags
+                   & BAMR_NODE_IS_INACTIVE);
     foreach_scalar (s)
       if (sblocks [s/w] && sblocks [s/w][s%w])
-        attached++;
+        attached++, extra += !keeps;
       else
-        missing++;
+        missing += keeps;
     for (int g = 0; g < NGROUPS; g++)
       if (sblocks [g])
       {
@@ -261,6 +299,12 @@ int grid_scalar_check (void)
   {
     fprintf (stderr, "grid_scalar_check: %ld blocks of scalars in use are "
              "missing\n", missing);
+    ok = 0;
+  }
+  if (extra)
+  {
+    fprintf (stderr, "grid_scalar_check: %ld blocks in families wholly "
+             "inactive\n", extra);
     ok = 0;
   }
   return ok;

@@ -18,6 +18,7 @@
 #include <mpi.h>
 #include "tree-mpi.h"
 #include "block-ghosts.h"
+#include "grid-scalar.h"
 
 scalar a;
 face_vector F;
@@ -69,11 +70,18 @@ static int nnodes;
 static char * alive;             /* still there: not pruned away */
 static long cells;
 
+/* the block of scalar s in node n, NULL if none: an inactive family's */
+static Real * blk (BAMRNode * n, int s)
+{
+  void ** g = n->s ? n->s [s / SCALAR_ARRAY_WIDTH] : NULL;
+  return g ? g [s % SCALAR_ARRAY_WIDTH] : NULL;
+}
+
 /* every cell of every block of the scalars, set to value */
 static void prefill (Real value)
 {
   for (int q = 0; q < nnodes; q++)
-    if (alive [q])
+    if (alive [q] && blk (nodes [q].node, list [0]))
     for (int k = 0; k < nlist; k++) {
       Real * b = block_data (nodes [q].node->s, list [k]);
       for (long c = 0; c < cells; c++)
@@ -200,8 +208,8 @@ static void compare (int parents)
    * leaves; owned parents wholly (their restriction) */
   prefill (R (-1e30)), fill ();
   for (int q = 0; q < nnodes; q++) {
-    if (!alive [q])
-      continue;
+    if (!alive [q] || !blk (nodes [q].node, list [0]))
+      continue;                     /* no blocks: inactive */
     BAMRNode * node = nodes [q].node;
     int mine = node->pid == rank, leaf = node->flags & BAMR_NODE_LEAF;
     for (int k = 0; k < nlist; k++) {
@@ -301,17 +309,68 @@ static double weight_of (Index p)
 .. an oracle, from the whole tree, for weights w (of the whole tree's
 .. leaves, NULL: 1 each): the pids, the partition (tree_partition ()),
 .. the plan (tree_mpi_plan_new ()), what is needed (its own and what it
-.. receives), and so what a process keeps: the root, and every node whose
-.. parent has something needed strictly below; a needed node has children
-.. iff something needed is below it
+.. receives: active), the skeleton (its own and N () of them: the
+.. neighbours, the coarse leaf covering an absent one, a leaf's touching
+.. children of a neighbour with children, the parent, the children), and
+.. so what a process keeps: the root, and every node whose parent has
+.. something of the skeleton strictly below; a node has children iff
+.. something of the skeleton is below it
 */
 typedef struct {
   int * pid, * first, * oflags, nwant, nkeep, depth [2];
   uint64_t * keys;
   double imbalance, * load;
   Entry * want;
-  char * need, * below, * keep;
+  char * need, * below, * keep, * sk;
 } Oracle;
+
+static int geometry = 1;           /* the skeleton holds what is read */
+
+/* N (p) on the whole tree, marked in sk */
+static void skeleton_of (Index p, char * sk)
+{
+  BAMRNode * node = index_node (p);
+  int nb = 1 << p.level;
+  for (int dir = 0; dir < TREE_NDIRS; dir++) {
+    Index b = p;
+    int in = 1, t = dir;
+    for (int a = 0; a < dimension; a++, t /= 3) {
+      int d = t % 3 - 1;
+      if (a == 0) b.i += d;
+#if dimension > 1
+      if (a == 1) b.j += d;
+#endif
+#if dimension > 2
+      if (a == 2) b.k += d;
+#endif
+      int x = index_coord (b, a);
+      in &= x >= 0 && x < nb;
+    }
+    if (dir == TREE_DIR_CENTRE || !in)
+      continue;
+    if (!index_is_allocated (b)) {
+      sk [position (index_parent (b))] = 1;
+      continue;
+    }
+    sk [position (b)] = 1;
+    if ((node->flags & BAMR_NODE_LEAF)
+        && (index_node (b)->flags & BAMR_NODE_HAS_CHILDREN))
+      for (int c = 0; c < TREE_NCHILDREN; c++) {
+        int touch = 1, u = dir;
+        for (int a = 0; a < dimension; a++, u /= 3) {
+          int d = u % 3 - 1;
+          touch &= !d || ((c >> a) & 1) == (d < 0);
+        }
+        if (touch)
+          sk [position (index_child (b, c))] = 1;
+      }
+  }
+  if (p.level > 0)
+    sk [position (index_parent (p))] = 1;
+  if (node->flags & BAMR_NODE_HAS_CHILDREN)
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+      sk [position (index_child (p, c))] = 1;
+}
 
 static Oracle oracle_of (const double * w)
 {
@@ -342,11 +401,20 @@ static Oracle oracle_of (const double * w)
   for (int k = 0; k < o.nwant; k++)
     if (!o.want [k].send)
       o.need [position (o.want [k].p)] = 1;
+  char * sk = o.sk = calloc ((size_t) nnodes, 1);
   for (int q = 0; q < nnodes; q++)
-    for (Index p = nodes [q].p; o.need [q] && p.level > 0; ) {
+    if (o.pid [q] == rank) {
+      sk [q] = 1;
+      skeleton_of (nodes [q].p, sk);
+    }
+  for (int q = 0; q < nnodes; q++) {
+    geometry &= !o.need [q] || sk [q];   /* what is read is in the skeleton */
+    for (Index p = nodes [q].p; sk [q] && p.level > 0; ) {
       p = index_parent (p);
       o.below [position (p)] = 1;
     }
+  }
+
   for (int q = 0; q < nnodes; q++) {
     o.keep [q] = !nodes [q].p.level
                  || o.below [position (index_parent (nodes [q].p))];
@@ -360,7 +428,7 @@ static void oracle_free (Oracle * o)
 {
   free (o->pid), free (o->first), free (o->keys), free (o->load);
   free (o->want), free (o->need), free (o->below), free (o->keep);
-  free (o->oflags);
+  free (o->oflags), free (o->sk);
 }
 
 /*
@@ -388,26 +456,60 @@ static void check_oracle (const Oracle * o, const char * what)
             && same_index (got [k].p, o->want [k].p);
   CHECK (equal && plan->depth == o->depth [0]
          && plan->depth_min == o->depth [1]);
-  free (got);
   const TreePartition * tp = tree_get_partition ();
-  int kept = 1, pids = 1, flags = 1, nalive = 0;
+  int kept = 1, pids = 1, flags = 1, blocks = 1, nalive = 0;
   for (int q = 0; q < nnodes; q++) {
     BAMRNode * here = index_is_allocated (nodes [q].p)
                       ? index_node (nodes [q].p) : NULL;
     kept &= (here != NULL) == o->keep [q];
     pids &= !here || here->pid == o->pid [q];
-    if (here && o->need [q]) {
+    if (here) {
       int f = here->flags & (BAMR_NODE_LEAF | BAMR_NODE_HAS_CHILDREN
                              | BAMR_NODE_IS_PRUNED);
       int w = (o->oflags [q] & BAMR_NODE_LEAF) ? BAMR_NODE_LEAF
               : o->below [q] ? BAMR_NODE_HAS_CHILDREN : BAMR_NODE_IS_PRUNED;
-      flags &= f == w;
+      /* every node of the skeleton as on the whole tree (a leaf, a
+       * parent, or pruned); active iff needed; blocks iff its family
+       * has an active member */
+      /* a node of the skeleton as on the whole tree; another (a sibling
+       * a family brings) may be of a structure unknown here: pruned */
+      flags &= f == w || (!o->sk [q] && f == BAMR_NODE_IS_PRUNED);
+      flags &= (!(here->flags & BAMR_NODE_IS_INACTIVE)) == o->need [q];
+      int fam = 0;
+      if (!nodes [q].p.level)
+        fam = o->need [q];
+      else
+        for (int c = 0; c < TREE_NCHILDREN; c++)
+          fam |= o->need [position (index_child (index_parent (nodes [q].p), c))];
+      blocks &= (blk (here, list [0]) != NULL) == fam;
     }
     nodes [q].node = here;
     alive [q] = here != NULL;
     nalive += alive [q];
   }
-  CHECK (kept && pids && flags);
+  CHECK (kept && pids && flags && blocks && geometry);
+  CHECK (grid_scalar_check ());
+  {
+    /* a scalar made now: blocks in the active families only */
+    scalar t;
+    (void) t;
+    CHECK (grid_scalar_check ());
+  }
+  CHECK (grid_scalar_check ());
+  /* the peers both ways: a 0/1 row of npe sent to all (a test only) */
+  int * row = calloc ((size_t) npe, sizeof (int));
+  int * col = calloc ((size_t) npe, sizeof (int));
+  for (int k = 0; k < plan->npeers; k++)
+    row [plan->peers [k]] = 1;
+  MPI_Alltoall (row, 1, MPI_INT, col, 1, MPI_INT, MPI_COMM_WORLD);
+  int symmetric = !row [rank];
+  for (int r = 0; r < npe; r++)
+    symmetric &= row [r] == col [r];
+  /* and every rank of the plan's lists a peer */
+  for (int k = 0; k < ngot; k++)
+    symmetric &= row [got [k].peer];
+  CHECK (symmetric);
+  free (row), free (col), free (got);
   /* the counts the tree keeps, against its flags */
   const TreeCaches * tc = tree_caches ();
   int npr = 0, nlf = 0;
@@ -444,12 +546,16 @@ static void check_oracle (const Oracle * o, const char * what)
       k++;
     }
   listed &= k == tc->nowned;
-  long counts [2] = { tc->nowned, nalive }, sums [2];
-  MPI_Allreduce (counts, sums, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  long nblk = 0;
+  for (int q = 0; q < nnodes; q++)
+    nblk += alive [q] && blk (nodes [q].node, list [0]) != NULL;
+  long counts [3] = { tc->nowned, nalive, nblk }, sums [3];
+  MPI_Allreduce (counts, sums, 3, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
   CHECK (listed && sums [0] == whole_leaves);
   if (rank == 0)
-    printf ("  %s: %.2f of the %d nodes kept by a process, imbalance %.3f\n",
-            what, (double) sums [1] / npe / nnodes, nnodes, tp->imbalance);
+    printf ("  %s: a process keeps %.2f of the %d nodes, %.2f with blocks; "
+            "imbalance %.3f\n", what, (double) sums [1] / npe / nnodes,
+            nnodes, (double) sums [2] / npe / nnodes, tp->imbalance);
 }
 
 int main (void)
@@ -552,7 +658,7 @@ int main (void)
     foreach_level (l)
       d[] = sin (5 * x + 0.3) + cos (3 * y) * z;
   for (int q = 0; q < nnodes; q++)
-    if (alive [q]) {
+    if (alive [q] && blk (nodes [q].node, d)) {
       BAMRNode * node = nodes [q].node;
       int mine = node->pid == rank;
       Real * b = block_data (node->s, d);

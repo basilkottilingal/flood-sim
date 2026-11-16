@@ -72,7 +72,24 @@
     BAMR_NODE_HAS_CHILDREN = 4,
     BAMR_NODE_REFINE = 8,         /* needs refining: adapt.h          */
     BAMR_NODE_COARSEN = 16,       /* may be coarsened, with its family */
+    BAMR_NODE_IS_INACTIVE = 32,   /* structure only: flags, pid, no data
+                                     of this process's (tree-mpi.h) */
   } BAMRNodeFlags;
+
+  /*
+  .. Pruned and inactive mean two things, in any combination:
+  ..   BAMR_NODE_IS_PRUNED    no children here, and not known as a leaf:
+  ..                          the node has children this process does not
+  ..                          hold, or its structure is not known here (a
+  ..                          sibling a family brings, out of the
+  ..                          skeleton)
+  ..   BAMR_NODE_IS_INACTIVE  this process neither owns the node nor reads
+  ..                          its data: a node of its skeleton, the
+  ..                          structure around its own nodes. A family
+  ..                          (or the root) with no active member has no
+  ..                          scalar blocks (grid-scalar.h).
+  .. On one process no node is inactive.
+  */
 
   /*
   .. A node's pid is the rank of the process that owns it, 0 to
@@ -428,9 +445,10 @@
   .. tree_insert (p, leaf): p made a node of this process's tree, with any
   .. ancestor it lacks, each ancestor given its family: what a process
   .. does with the nodes of others it learns of (tree-mpi.h, the halo). A
-  .. node made is pruned (its structure unknown here), pid -1 for the
-  .. caller to set, its blocks not filled; a pruned node an ancestor is
-  .. made has children again. With leaf, p is a leaf (if pruned before).
+  .. node made is pruned (its structure unknown here) and inactive, with no
+  .. blocks (a family made has none), pid -1 for the caller to set; a
+  .. pruned node an ancestor is made has children again. With leaf, p is a
+  .. leaf (if pruned before).
   .. Returns the nodes made.
   */
   int  tree_insert (Index p, int leaf);

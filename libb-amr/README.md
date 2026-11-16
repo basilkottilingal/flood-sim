@@ -326,27 +326,29 @@ tested in one process for any number of processes. With `-D_MPI`,
   and sends every node's pid (in Morton order) and the loads to ranks 1 to
   npe - 1 by `MPI_Bcast`; the others set the pids and record the same
   partition. A tree of another size than rank 0's stops the run. From
-  there no process uses the whole tree:
-  1. **its own nodes only:** each keeps its nodes and their ancestors
-     (with their families), and prunes the rest;
-  2. **the halo, by queries:** every index beside one of its nodes is
-     asked of its owner, `tree_partition_owner ()` from the first keys,
-     which answers what it holds there: nothing (a coarser leaf covers
-     it), a leaf, or a node with children. The owner of an index's first
-     leaf holds that index and its ancestors whole, so it knows. Then the
-     process makes, with `tree_insert ()` (`tree.h`), the leaf or the node
-     beside it, or the coarser leaf, and for a leaf the upper children of a
-     node with children below it (the reflux), each with its ancestors and
-     their families; the nodes made get their owners from the keys, and
-     are pruned (their structure unknown) unless known leaves;
-  3. **the plan from what it holds:** what it receives, from its own nodes
-     and the tree here; what it sends, as the others ask it (each sends
-     each owner its receive lists, 7 ints a node, after an `MPI_Alltoall`
-     of the counts). The levels are the whole tree's (`MPI_Allreduce`).
-
-  Three rounds of messages in all, each between the processes that share
-  a boundary. `tree_mpi_end ()` frees the plan and the partition; the tree
-  stays pruned.
+  there no process uses the whole tree: it prunes to its skeleton and
+  makes its plan from it (below). `tree_mpi_end ()` frees the plan and the
+  partition; the tree stays pruned.
+- **The skeleton, active and inactive nodes.** A process holds its own
+  nodes, their ancestors, and N (p) of each own node p: p's same-level
+  neighbours, the coarser leaf covering an absent one, for a leaf the
+  children of a neighbour with children that touch it (the reflux), p's
+  parent and children (the restriction). That is everything the plans
+  read, and its structure is the whole tree's: the owner of a neighbour
+  is its `pid`, here. N () goes both ways (N (x) holds p when N (p) holds
+  x, by 2:1 balance), so the ranks of N () of a process's nodes, its
+  peers, name it too, and every exchange is point to point between peers,
+  sizes first: no `MPI_Alltoall`, nothing of size npe. A node a process
+  neither owns nor receives is inactive (`BAMR_NODE_IS_INACTIVE`, beside
+  `BAMR_NODE_IS_PRUNED`): its flags and pid, but no data. Blocks go by
+  family: a family with an active member has them all, one with none has
+  none (`grid_scalar_family_blocks ()`), and a scalar made later gets
+  blocks in active families only. A node a family brings, out of the
+  skeleton, is of a structure unknown here: pruned.
+- **The plan from the skeleton:** what a process receives, from its own
+  nodes and the tree here (`plan_needs ()`); what it sends, as its peers
+  ask it (each sends each peer its receive lists, 7 ints a node). The
+  levels are the whole tree's (`MPI_Allreduce`).
 - **`tree_mpi_repartition (weight)`** (milestone 3), on the distributed
   tree, collective: weights for the leaves of this process
   (`tree_caches ()->owned`, NULL: 1 each).
@@ -357,11 +359,15 @@ tested in one process for any number of processes. With `-D_MPI`,
      by one `MPI_Allreduce` each (min of the keys of its leaves).
   2. **Migration:** every node of this process that changes hands (by the
      new keys), sent to its new owner, whole: its index, whether a leaf,
-     the block of every scalar in use. The new owner makes it
-     (`tree_insert ()`, the leaves first, so that a parent comes as their
-     ancestor) and copies the blocks in.
-  3. **Then milestone 2's code:** every node's owner from the new keys,
-     pruning to the own nodes and ancestors, the halo by queries, the plan.
+     the block of every scalar in use, and N () of it as structure only,
+     so that the new owner holds the skeleton around it. The new owner
+     makes it (`tree_insert ()`, inactive until it has data) and copies the
+     blocks in. Senders and receivers from the two partitions' first keys:
+     to the new owners of a process's nodes, from the old owners of its
+     new piece of the curve, both contiguous ranges of ranks.
+  3. **Then the skeleton again:** every node's owner from the new keys
+     (`key_first`, kept for this), pruning to the skeleton, the plan,
+     active and inactive nodes.
 
   It returns the nodes this process sent. Integer weights give the whole
   tree's cut bit for bit; other weights may differ at a tie, the sums
@@ -536,7 +542,46 @@ of the whole tree's nodes: 2D 85 of 197 on 3 ranks, 174 on 16; 3D 222 of
 
 The empty process, the parents and the scalar left out were caught by
 nothing until the test had more processes than leaves (1D, 13 ranks, in
-`tests/run.sh` now) and checked every node and every scalar. The pruned
+`tests/run.sh` now) and checked every node and every scalar.
+
+The skeleton (no queries, no `MPI_Alltoall`, inactive nodes). The oracle
+marks the skeleton on the whole tree: the own nodes and N () of them, by
+a search of its own. After each distribution and repartition: the nodes
+kept those of the skeleton and their families; a skeleton node a leaf, a
+parent or pruned as on the whole tree (another may be pruned, its
+structure unknown); active iff the process owns or receives it; blocks
+iff its family has an active member, also for a scalar made after
+(`grid_scalar_check ()`, which now counts blocks in wholly inactive
+families as an error); every node the plan reads in the skeleton; the
+peers symmetric (a 0/1 row per rank through `MPI_Alltoall`, in the test
+only) and every rank of the plan a peer. An inactive node has no block,
+so a read the plan forgot is a NULL read, which ASan reports. 1-3D on 1,
+2, 3, 4, 7, 13, 16 ranks: all pass. A process keeps 0.72, 0.51, 0.51,
+0.37 of the 197 nodes (2D, 2, 4, 7, 16 ranks), and 0.71, 0.51, 0.49, 0.33
+have blocks; 3D 0.82, 0.66, 0.65, 0.45 kept, 0.81, 0.66, 0.65, 0.43 with
+blocks: little saved, halo families being mostly mixed (see "Further
+options").
+
+| bug (one line) | np 3, 7 (2D) | np 3, 7 (3D) | 1D np 13 |
+|---|---|---|---|
+| N (): no coarse leaf for an absent neighbour | 0, 0 | 0, 0 | crash |
+| N (): no touching children (reflux) | 2, 14 | 0, 1 | crash |
+| N (): the far half taken as touching | 1, 3 | 0, 1 | crash |
+| N (): no parent | 0, 0 | 0, 0 | 0 |
+| N (): no children | 0, 0 | 0, 0 | 0 |
+| received nodes left inactive | crash | crash | crash |
+| a new scalar in inactive families too | 2, 15 | 0, 3 | 31 |
+| inactive families keep their blocks | 2, 28 | 0, 6 | 58 |
+| no structure sent with a moving node | crash | 16, 40 | crash |
+| empty old pieces taken as senders | 0, 0 | 0, 0 | 0 |
+| no pruning to the skeleton | 18, 42 | 18, 42 | 78 |
+
+Not caught: the parent and children rules of N (), and the coarse leaf
+but in 1D. On these trees those nodes and ranks are in the skeleton and
+among the peers by other relations too (a coarse leaf is also a neighbour
+of the own node's parent; a parent's owner is a neighbour). The rules stay
+as what the symmetry argument needs. "Empty old pieces" needs a new piece
+of the curve spanning an empty old one, which no test tree makes. The pruned
 count was caught by nothing until the test counted the flags. The local
 levels differ only where a process lacks the finest or coarsest leaves:
 none of the test's trees but 3D on 16 ranks has one.
@@ -1217,6 +1262,17 @@ per-thread free lists, or a lock around `pool_alloc` and `pool_free`.
     accessor.
 - **Reserving ahead.** Before a regrid the tree knows how many blocks it will
   create, so `pool_reserve (n)` could map them in one call.
+- **To be considered: blocks per node for the halo (MPI).** Under MPI a
+  family has blocks iff one of its members is active
+  (`BAMR_NODE_IS_INACTIVE`, the skeleton of tree-mpi.h), so a halo family
+  with one active member carries 2^D blocks: in 3D, 7 of 20^3 Reals (64 KB
+  each in double) for nothing. Measured on `test_mpi`'s small trees the
+  nodes with blocks are 0.33 of the tree against 0.37 kept (2D, 16
+  ranks), 0.43 against 0.45 (3D): little saved there, as halo families
+  are mostly mixed. Blocks per node in mixed families would save the rest,
+  at the cost of the one-object family. Kept per family for now: the
+  author plans to cut the partition by edge cut (fewer halo nodes), which
+  changes what the halo costs; to be weighed after that.
 
 ### Order of work
 
@@ -1562,27 +1618,35 @@ milestones 4-5) next:
    2:1 balance across processes by rounds of requests until none is left;
    coarsening local (families of leaves never split by the partition);
    the halo's structure sent to those who hold it; then milestone 3.
-3. **Multigrid and the rest (milestone 5).** Level exchanges for
+3. **To be considered: a partition by edge cut** (the author's plan). The
+   cut along the Morton curve balances the load but not the surface; a
+   cut that also minimises the edges between processes (graph
+   partitioning on the leaves' adjacency) would shrink the halo, the
+   messages and the blocks halo families carry (see "Block allocation",
+   "Further options"). The skeleton and the plans do not depend on the
+   curve, but the first keys and `tree_partition_owner ()` do: a cut off
+   the curve needs another way to find owners.
+4. **Multigrid and the rest (milestone 5).** Level exchanges for
    `ghosts_update_level ()`, libvof under MPI, real OpenMPI runs, a first
    scaling measure.
-4. **The bit maps in `block_ghosts_cells ()`.** Today it looks up the
+5. **The bit maps in `block_ghosts_cells ()`.** Today it looks up the
    level index on every update, for each of the 3^D - 1 regions. The maps,
    with the neighbours' node pointers, cached per node at each tree change,
    would remove those lookups on one process too, and give the GPU a table.
    The face and vertex rules read from them: `same | fine` at +a keeps face
    m, `fine` at -a refluxes face 0.
-5. **Dummy children for the halo** (discussed, not started). The owner of
+6. **Dummy children for the halo** (discussed, not started). The owner of
    a coarse leaf next to a finer region would fill dummy children with its
    prolongation, then send them like any block of the same level. Every
    halo would then be a copy, and a prolongation's dependencies (`zb`,
    `n`, `alpha`) would stay with their owner. Only the GHOSTS-thick strip
    that fine neighbours read needs filling. Keep the dummies in a table
    sorted by `Index`, out of the level index (no API change).
-6. **Fewer rounds.** There is one exchange per level, as a fine halo needs
+7. **Fewer rounds.** There is one exchange per level, as a fine halo needs
    the coarse leaf's ghosts. A coarse buffer per fine block (Parthenon),
    filled from the coarse neighbours' interiors in the same round as the
    same-level copies, would make it two rounds.
-7. **Periodic boundaries** with it: the wall bits of "Ghost operators and
+8. **Periodic boundaries** with it: the wall bits of "Ghost operators and
    adaptation", item 1, become the maps' "none" on a non-periodic axis.
 
 ## Compile-time block size

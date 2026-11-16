@@ -550,14 +550,12 @@ int tree_insert (Index p, int leaf)
     parent->flags = (parent->flags & ~BAMR_NODE_IS_PRUNED)
                     | BAMR_NODE_HAS_CHILDREN;
     BAMRNode * family = pool_alloc (pool_family);     /* zeroed */
-    void *** t [TREE_NCHILDREN];
     for (int c = 0; c < TREE_NCHILDREN; c++)
     {
-      t [c] = family [c].s = grid_scalar_table_new ();
-      family [c].flags = BAMR_NODE_IS_PRUNED;
+      family [c].s = grid_scalar_table_new ();      /* no blocks: inactive */
+      family [c].flags = BAMR_NODE_IS_PRUNED | BAMR_NODE_IS_INACTIVE;
       family [c].pid = -1;
     }
-    grid_scalar_family_new (t, 1);
     for (int c = 0; c < TREE_NCHILDREN; c++)
     {
       Index q = index_child (up, c);
