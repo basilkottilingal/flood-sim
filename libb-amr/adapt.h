@@ -44,6 +44,19 @@
   .. coarsened parent its restriction: with the defaults (linear, the mean)
   .. both keep the integral of every scalar. On return, the ghosts of every
   .. leaf are valid.
+  ..
+  .. On a distributed tree (tree-mpi.h, a plan applied), collective: each
+  .. process flags its own leaves; 2. refines in rounds with the others
+  .. (tree_mpi_refine (): a coarser neighbour of another process is asked
+  .. of its owner), 3. coarsens its own families level by level, finest
+  .. first (tree_mpi_coarsen ()), then makes its skeleton and plan again
+  .. and repartitions (tree_mpi_repartition ()). The counts returned are
+  .. the whole tree's; the ghosts are left stale, every scalar marked (the
+  .. next update, or stencil loop, makes them). The tree, and every cell-centred scalar, come out
+  .. as on one process, bit for bit. A face or vertex scalar's restriction
+  .. reads the children's ghost layer, which one process updates as it
+  .. coarsens family after family: its coarsened values depend on that
+  .. order, and may differ in the last bits on several processes.
   */
 
   #include "tree.h"

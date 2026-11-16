@@ -1,8 +1,9 @@
 /* tree () on several processes (-D_MPI): MPI started, the tree refined at
- * once to the first level with 4 npe leaves at least, and distributed.
- * Against what that must be: every leaf of this process at that level, the
- * leaves over the processes the whole level once, within one leaf of the
- * mean each, owned as the first keys say; a cell scalar, an integer of the
+ * once to the first level with 4 npe families of leaves at least, and
+ * distributed. Against what that must be: every leaf of this process at
+ * that level, the leaves over the processes the whole level once, within
+ * one family of each other (the cut never splits one), owned as the first
+ * keys say; a cell scalar, an integer of the
  * cell's global index, exact in every ghost inside the domain after
  * ghosts_update () (a ghost missing from the halo, or not sent, is wrong);
  * a reduction over the cells the whole level once. Build with -D_MPI. */
@@ -32,10 +33,10 @@ int main (void)
   MPI_Comm_size (MPI_COMM_WORLD, &npe);
   CHECK (tree_npe () == npe && tree_rank () == rank);
 
-  /* the level: the first with 4 npe leaves at least, below depth 5; on one
-   * process tree () as always, level 1 */
+  /* the level: the first with 4 npe families of leaves at least, below
+   * depth 5; on one process tree () as always, level 1 */
   int L = 1;
-  while (npe > 1 && L < 5 && (1L << (dimension * L)) < 4L * npe)
+  while (npe > 1 && L < 5 && (1L << (dimension * (L - 1))) < 4L * npe)
     L++;
   const TreeCaches * tc = tree_caches ();
   int level = 1, keyed = 1;
@@ -47,8 +48,9 @@ int main (void)
   MPI_Allreduce (&n, &total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce (&n, &most, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce (&n, &least, 1, MPI_LONG, MPI_MIN, MPI_COMM_WORLD);
+  /* within one family of each other: the cut never splits one */
   CHECK (level && keyed && total == 1L << (dimension * L)
-         && most - least <= 1 && least > 0);
+         && most - least <= TREE_NCHILDREN && least > 0);
   CHECK (npe == 1 ? !tree_mpi_plan () : tree_mpi_plan () != NULL);
   /* the counts the tree keeps, against its flags */
   int npr = 0, nlf = 0;

@@ -207,7 +207,9 @@ static int add_children (int IJKLargs)
   return 1;
 }
 
-static int divide_leaf (int IJKLargs)
+/* the leaf at IJKL divided, its children's interiors prolonged from it;
+.. their ghosts made too if ghosts (else the caller's, as tree_divide ()) */
+static int divide_leaf_ghosts (int IJKLargs, int ghosts)
 {
   if (!add_children (IJKL))
     return 0;
@@ -228,10 +230,16 @@ static int divide_leaf (int IJKLargs)
   */
   foreach_scalar_ordered (s)
     block_prolong ((Index) {IJKL}, s);
-  children_of ((Index) {IJKL})
-    foreach_scalar_ordered (s)
-      block_ghosts ((Index) {IJKL}, s);
+  if (ghosts)
+    children_of ((Index) {IJKL})
+      foreach_scalar_ordered (s)
+        block_ghosts ((Index) {IJKL}, s);
   return 1;
+}
+
+static int divide_leaf (int IJKLargs)
+{
+  return divide_leaf_ghosts (IJKL, 1);
 }
 
 /* the children of the leaf-parent at IJKL, gone: it is a leaf again */
@@ -334,6 +342,21 @@ static int touches (Index p, Index q)
   return t;
 }
 
+int tree_child_touches (Index p, Index b, int c)
+{
+  /* along each axis where b is beside p, the half of b towards p */
+  int d [3] = { b.i - p.i, 0, 0 }, touch = 1;
+  #if dimension > 1
+  d [1] = b.j - p.j;
+  #endif
+  #if dimension > 2
+  d [2] = b.k - p.k;
+  #endif
+  for (int a = 0; a < dimension; a++)
+    touch &= !d [a] || ((c >> a) & 1) == (d [a] < 0);
+  return touch;
+}
+
 int tree_coarsen (Index p)
 {
   not_pruned ("tree_coarsen");
@@ -342,12 +365,17 @@ int tree_coarsen (Index p)
   children_of (p)
     if (tree_has_children (node))
       return 0;                       /* a child is not a leaf */
-  /* a neighbour's grandchildren would touch p two levels finer */
+  /* a neighbour's grandchildren would touch p two levels finer: those of
+   * its children that touch p (2:1 balance needs no more) */
   neighbors_of (p, 1)
     if (node && tree_has_children (node))
-      children_of ((Index) {IJKL})
-        if (tree_has_children (node))
+    {
+      Index b = {IJKL};
+      for (int c = 0; c < TREE_NCHILDREN; c++)
+        if (tree_child_touches (p, b, c)
+            && tree_has_children (index_node (index_child (b, c))))
           return 0;
+    }
   /* p gets the restriction of its children, then they go */
   foreach_scalar_ordered (s)
     block_restrict (p, s);
@@ -432,13 +460,14 @@ int tree (int depthmax, int blockdepth)
   tree_replicated (depthmax, blockdepth);
   #ifdef _MPI
   /*
-  .. on several processes: refined to the first level with 4 npe leaves at
-  .. least (below depth max), then distributed
+  .. on several processes: refined to the first level with 4 npe families
+  .. of leaves at least (below depth max), as the cut never splits one,
+  .. then distributed
   */
   if (G(npe) > 1)
   {
     int L = 1;
-    while (L < G(depthmax) && (1L << (dimension * L)) < 4L * G(npe))
+    while (L < G(depthmax) && (1L << (dimension * (L - 1))) < 4L * G(npe))
       L++;
     for (int l = 1; l < L; l++)
     {
@@ -531,6 +560,77 @@ int tree_prune (Index p)
 int tree_pruned (void)
 {
   return G(npruned);
+}
+
+int tree_divide (Index p)
+{
+  if (!index_is_allocated (p) || p.level >= G(depthmax)
+      || !(index_node (p)->flags & BAMR_NODE_LEAF))
+    return 0;
+  INDEX_UNPACK (p);
+  return divide_leaf_ghosts (IJKL, 0);
+}
+
+int tree_merge (Index p)
+{
+  if (!index_is_allocated (p)
+      || !(index_node (p)->flags & BAMR_NODE_HAS_CHILDREN))
+    return 0;
+  children_of (p)
+    if (!node || !(node->flags & BAMR_NODE_LEAF))
+      return 0;
+  foreach_scalar_ordered (s)
+    block_restrict (p, s);
+  INDEX_UNPACK (p);
+  remove_children (IJKL);
+  return 1;
+}
+
+void tree_forget (Index p)
+{
+  BAMRNode * node = index_node (p);
+  if (!node || !(node->flags & BAMR_NODE_LEAF))
+    return;
+  caches_changed ();
+  node->flags = (node->flags & ~BAMR_NODE_LEAF) | BAMR_NODE_IS_PRUNED;
+  G(nlb)--;
+  G(npruned)++;
+  terminal_add (p.level, -1);
+}
+
+void tree_graft (Index p)
+{
+  BAMRNode * node = index_node (p);
+  assert (node && (node->flags & BAMR_NODE_LEAF) && p.level < BAMR_MAX_DEPTH);
+  caches_changed ();
+  node->flags = (node->flags & ~BAMR_NODE_LEAF) | BAMR_NODE_HAS_CHILDREN;
+  terminal_add (p.level, -1);
+  BAMRNode * family = pool_alloc (pool_family);     /* zeroed */
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
+    family [c].s = grid_scalar_table_new ();        /* no blocks: inactive */
+    family [c].flags = BAMR_NODE_LEAF | BAMR_NODE_IS_INACTIVE;
+    family [c].pid = node->pid;
+    Index q = index_child (p, c);
+    INDEX_UNPACK (q);
+    assert (!index_is_allocated (q));
+    lidx_assign (& G (layers) [level], IJK, 1 << level, &family [c]);
+  }
+  terminal_add (p.level + 1, TREE_NCHILDREN);
+  G(nb) += TREE_NCHILDREN;
+  G(nlb) += TREE_NCHILDREN - 1;
+}
+
+void tree_ungraft (Index p)
+{
+  BAMRNode * node = index_node (p);
+  assert (node && (node->flags & BAMR_NODE_HAS_CHILDREN));
+  caches_changed ();
+  free_below (p);
+  node->flags = (node->flags & ~(BAMR_NODE_HAS_CHILDREN | BAMR_NODE_IS_PRUNED))
+                | BAMR_NODE_LEAF;
+  G(nlb)++;
+  terminal_add (p.level, 1);
 }
 
 int tree_insert (Index p, int leaf)

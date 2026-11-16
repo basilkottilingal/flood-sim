@@ -139,6 +139,32 @@ static double cut_fraction (int * pairs)
   return all ? (double) cut / all : 0;
 }
 
+/* the leaves of the unit of the cut starting at leaf q, by the tree's
+ * lookups: a family whose children are all leaves (q its child 0), else
+ * the leaf alone */
+static int unit_size (int q)
+{
+  const TreeCaches * tc = tree_caches ();
+  Index p = tc->leaves [q].p;
+  if (!p.level)
+    return 1;
+  Index up = index_parent (p);
+  int all = 1;
+  for (int c = 0; c < TREE_NCHILDREN; c++) {
+    BAMRNode * x = index_node (index_child (up, c));
+    all &= x && (x->flags & BAMR_NODE_LEAF);
+  }
+  Index first = index_child (up, 0);
+  int zero = first.i == p.i;
+#if dimension > 1
+  zero &= first.j == p.j;
+#endif
+#if dimension > 2
+  zero &= first.k == p.k;
+#endif
+  return all && zero ? TREE_NCHILDREN : 1;
+}
+
 /* every check of the partition just made, for npe and weight */
 static void check (int npe, const double * weight)
 {
@@ -147,16 +173,32 @@ static void check (int npe, const double * weight)
   int n = tc->nleaves;
   CHECK (tp && tp->npe == npe && tp->nleaves == n && tree_partition_valid ());
 
-  /* the pids: in range, never decreasing along the curve; with unit
-   * weights the closed form */
-  int range = 1, order = 1, closed = 1;
+  /* the units: a family of leaves, or a leaf; their weights */
+  double * uw = malloc ((size_t) (n ? n : 1) * sizeof (double)), uwmax = 0;
+  int nu = 0, split = 0, closed = 1;
+  for (int q = 0; q < n; ) {
+    int m = unit_size (q);
+    uw [nu] = 0;
+    for (int k = 0; k < m; k++) {
+      uw [nu] += weight ? weight [q + k] : 1;
+      split |= tc->leaves [q + k].node->pid != tc->leaves [q].node->pid;
+      closed &= weight || tc->leaves [q + k].node->pid
+                == (int) ((long long) npe * (2 * q + 1) / (2 * n));
+    }
+    uwmax = uw [nu] > uwmax ? uw [nu] : uwmax;
+    nu++, q += m;
+  }
+
+  /* the pids: in range, never decreasing along the curve, a family never
+   * split; with unit weights the closed form: a leaf to the process of
+   * its middle, a family of leaves to its child 0's */
+  int range = 1, order = 1;
   for (int q = 0; q < n; q++) {
     int pid = tc->leaves [q].node->pid;
     range &= pid >= 0 && pid < npe;
     order &= !q || pid >= tc->leaves [q - 1].node->pid;
-    closed &= weight || pid == (int) ((long long) npe * (2 * q + 1) / (2 * n));
   }
-  CHECK (range && order && closed);
+  CHECK (range && order && closed && !split);
 
   /* leaf_first and the loads, again from the pids */
   double * load = calloc ((size_t) npe, sizeof (double)), total = 0, wmax = 0;
@@ -180,15 +222,20 @@ static void check (int npe, const double * weight)
   CHECK (firsts && loads);
   CHECK (fabs (tp->imbalance - most / (total / npe)) <= 1e-12 * tp->imbalance);
 
-  /* balance: unit weights within one leaf, none empty when there are
-   * enough; weights within the largest of the optimal cut */
+  /* balance by units: unit weights within one family of the mean, none
+   * empty when every share holds a family; weights within the largest
+   * unit of the optimal cut of the units */
+  (void) wmax, (void) cmin;
   if (!weight)
-    CHECK (cmax - cmin <= 1 && (n < npe || !empty));
+    CHECK (cmax <= (double) n / npe + TREE_NCHILDREN
+           && (double) cmin >= (double) n / npe - TREE_NCHILDREN
+           && (n < TREE_NCHILDREN * npe || !empty));
   else {
-    double opt = optimal (weight, n, npe);
-    CHECK (most <= total / npe + wmax * (1 + 1e-12));
-    CHECK (most <= opt + wmax * (1 + 1e-12) && most >= opt * (1 - 1e-9));
+    double opt = optimal (uw, nu, npe);
+    CHECK (most <= total / npe + uwmax * (1 + 1e-12));
+    CHECK (most <= opt + uwmax * (1 + 1e-12) && most >= opt * (1 - 1e-9));
   }
+  free (uw);
 
   /* a parent: the smallest pid of the leaves in its box, by a search */
   int parents = 1;
@@ -397,6 +444,9 @@ static Entries expected (int me)
       for (int dir = 0; dir < TREE_NDIRS; dir++)
         if (dir != TREE_DIR_CENTRE && classify (p, dir, &X))
           add (&e, parents, TREE_MPI_GHOSTS, p.level, X, me);
+      /* the parents' plan: the node's parent too, the wavelet's */
+      if (parents && p.level > 0)
+        add (&e, parents, TREE_MPI_GHOSTS, p.level, index_parent (p), me);
       for (int a = 0; a < dimension && leaf; a++) {
         int w = 1;
         for (int t = 0; t < a; t++)

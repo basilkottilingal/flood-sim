@@ -105,6 +105,53 @@ static void partition_record (int npe, double * load)
   made = 1;
 }
 
+/* are p and q the same index? */
+static int same_index (Index p, Index q)
+{
+  int same = p.level == q.level && p.i == q.i;
+  #if dimension > 1
+  same &= p.j == q.j;
+  #endif
+  #if dimension > 2
+  same &= p.k == q.k;
+  #endif
+  return same;
+}
+
+/*
+.. The units of the cut: a family of sibling leaves, never split, or a
+.. leaf alone. In a list of leaves in Morton order (the tree's, or a
+.. process's own), the leaves of the unit starting at q: TREE_NCHILDREN if
+.. leaf q is child 0 of a family whose children are all leaves, the
+.. family's leaves following it in the list; else 1
+*/
+static int unit_at (const TreeItem * leaves, int n, int q)
+{
+  Index p = leaves [q].p;
+  if (!p.level || q + TREE_NCHILDREN > n)
+    return 1;
+  Index up = index_parent (p);
+  for (int c = 0; c < TREE_NCHILDREN; c++)
+  {
+    Index x = index_child (up, c);
+    if (!same_index (leaves [q + c].p, x)
+        || !(leaves [q + c].node->flags & BAMR_NODE_LEAF))
+      return 1;
+  }
+  return TREE_NCHILDREN;
+}
+
+/* the process of a leaf, the g-th of n (weight w, after weight before, of
+.. total), by the middle of the leaf: in integers for unit weights */
+static int leaf_pid (int npe, long g, long n, double before, double w,
+                     double total, int weighted)
+{
+  int pid = weighted
+    ? (int) floor (npe * (before + w / 2) / total)
+    : (int) ((long long) npe * (2 * (long long) g + 1) / (2 * (long long) n));
+  return pid < 0 ? 0 : pid >= npe ? npe - 1 : pid;
+}
+
 int tree_partition (int npe, const double * weight)
 {
   if (npe < 1 || tree_pruned ())
@@ -124,26 +171,27 @@ int tree_partition (int npe, const double * weight)
     abort ();
 
   /*
-  .. the leaves: leaf q to the process whose share of the curve holds its
-  .. middle; in integers for unit weights, so the pieces are exact
+  .. leaf q to the process whose share of the curve holds its middle (in
+  .. integers for unit weights, so the pieces are exact); then a family of
+  .. leaves (unit_at ()) whole to the process of its child 0
   */
   double before = 0;
   for (int q = 0; q < n; q++)
   {
-    int pid;
     double w = weight ? weight [q] : 1;
-    if (weight)
-    {
-      pid = (int) floor (npe * (before + w / 2) / total);
-      before += w;
-    }
-    else
-      pid = (int) ((long long) npe * (2 * (long long) q + 1)
-                   / (2 * (long long) n));
-    pid = pid < 0 ? 0 : pid >= npe ? npe - 1 : pid;
-    tc->leaves [q].node->pid = pid;
-    load [pid] += w;
+    tc->leaves [q].node->pid = leaf_pid (npe, q, n, before, w, total,
+                                         weight != NULL);
+    before += w;
   }
+  for (int q = 0; q < n; )
+  {
+    int m = unit_at (tc->leaves, n, q);
+    for (int k = 1; k < m; k++)
+      tc->leaves [q + k].node->pid = tc->leaves [q].node->pid;
+    q += m;
+  }
+  for (int q = 0; q < n; q++)
+    load [tc->leaves [q].node->pid] += weight ? weight [q] : 1;
   /* the parents, finest first: the smallest pid of their children */
   for (int l = tc->depth - 1; l >= 0; l--)
     for (int b = tc->parent_first [l]; b < tc->parent_first [l + 1]; b++)
@@ -335,6 +383,12 @@ static void plan_needs (Needs * v, int rank, int depth_min)
         need (v, rank, parents, TREE_MPI_GHOSTS, p.level, r,
               m.coarse & bit ? index_parent (b) : b);
       }
+      /* every node's parent (the parents' plan): what the wavelet of
+       * adapt_wavelet () reads, with its ghosts, made at the level above
+       * just before */
+      if (parents && p.level > 0)
+        need (v, rank, parents, TREE_MPI_GHOSTS, p.level, r,
+              index_parent (p));
       /* the reflux of a leaf: the upper children along a of the parent
        * below it along a */
       if (leaf)
@@ -493,7 +547,8 @@ static int prune_unneeded (void)
     any [l] |= below || (node->flags & TREE_MPI_NEEDED);
   }
   /* the largest: EMPTY, its parent not */
-  Index * root = malloc ((size_t) (tc->nall ? tc->nall : 1) * sizeof (Index));
+  Index * root = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1)
+                        * sizeof (Index));
   if (!root)
     abort ();
   int n = 0;
@@ -789,7 +844,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
   /* 1. */
   const TreeCaches * tc = tree_caches ();
   int nown = 0;
-  TreeItem * own = malloc ((size_t) (tc->nall ? tc->nall : 1)
+  TreeItem * own = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1)
                            * sizeof (TreeItem));
   if (!own)
     abort ();
@@ -801,6 +856,12 @@ static TreeMpiPlan * skeleton_and_plan (void)
     own [k].node->flags |= TREE_MPI_NEEDED;
     related (own [k].p, own [k].node, mark_needed, NULL);
   }
+  /* a leaf out of the skeleton (a sibling a family brings) of a structure
+   * no one keeps up to date here: pruned, unknown */
+  for (int q = 0; q < tc->nall; q++)
+    if (!(tc->all [q].node->flags & TREE_MPI_NEEDED)
+        && (tc->all [q].node->flags & BAMR_NODE_LEAF))
+      tree_forget (tc->all [q].p);
   prune_unneeded ();
 
   /* 2. */
@@ -902,6 +963,260 @@ static void distribute_again (void)
   ghosts_mark_all_dirty ();
 }
 
+void tree_mpi_redistribute (void)
+{
+  distribute_again ();
+}
+
+/* ---------------------------------------------------------------------- */
+/* adapting the distributed tree                                          */
+/* ---------------------------------------------------------------------- */
+
+/* a growing array of indices */
+typedef struct { Index * a; int n, cap; } Indices;
+
+static void indices_push (Indices * v, Index p)
+{
+  if (v->n == v->cap)
+  {
+    v->cap = v->cap ? 2 * v->cap : 64;
+    v->a = realloc (v->a, (size_t) v->cap * sizeof (Index));
+    if (!v->a)
+      abort ();
+  }
+  v->a [v->n++] = p;
+}
+
+static int index_order (const void * a, const void * b)
+{
+  return index_cmp (* (const Index *) a, * (const Index *) b);
+}
+
+/* v sorted, coarsest first, each once */
+static void indices_unique (Indices * v)
+{
+  if (v->n)
+    qsort (v->a, (size_t) v->n, sizeof (Index), index_order);
+  int u = 0;
+  for (int q = 0; q < v->n; q++)
+    if (!u || index_cmp (v->a [u - 1], v->a [q]))
+      v->a [u++] = v->a [q];
+  v->n = u;
+}
+
+/*
+.. One round's messages with every peer, both ways: to peer k, the
+.. indices ask [k] (a request) and every index of made (what this process
+.. changed); from each, the same, into asked and done. 4 ints an index,
+.. after the two counts
+*/
+static void peer_round (const TreeMpiPlan * plan, Indices * ask,
+                        const Indices * made, Indices * asked,
+                        Indices * done, int tag)
+{
+  int np = plan->npeers, m = np ? np : 1;
+  char ** out = malloc ((size_t) m * sizeof (char *));
+  char ** in = malloc ((size_t) m * sizeof (char *));
+  int * nout = calloc ((size_t) m, sizeof (int));
+  int * nin = calloc ((size_t) m, sizeof (int));
+  Bytes * box = calloc ((size_t) m, sizeof (Bytes));
+  if (!out || !in || !nout || !nin || !box)
+    abort ();
+  for (int k = 0; k < np; k++)
+  {
+    int head [2] = { ask [k].n, made->n }, a [4];
+    bytes_push (&box [k], head, sizeof (head));
+    for (int q = 0; q < ask [k].n; q++)
+      put_index (a, ask [k].a [q]), bytes_push (&box [k], a, sizeof (a));
+    for (int q = 0; q < made->n; q++)
+      put_index (a, made->a [q]), bytes_push (&box [k], a, sizeof (a));
+    out [k] = box [k].a, nout [k] = (int) box [k].n;
+  }
+  exchange_with (np, plan->peers, out, nout, np, plan->peers, in, nin, tag);
+  for (int k = 0; k < np; k++)
+  {
+    int head [2];
+    memcpy (head, in [k], sizeof (head));
+    const int * a = (const int *) (in [k] + sizeof (head));
+    for (int q = 0; q < head [0]; q++, a += 4)
+      indices_push (asked, get_index (a));
+    for (int q = 0; q < head [1]; q++, a += 4)
+      indices_push (done, get_index (a));
+    free (in [k]), free (box [k].a);
+  }
+  free (out), free (in), free (nout), free (nin), free (box);
+}
+
+/* is anything left to do on any process? */
+static int any_left (int left)
+{
+  int any;
+  MPI_Allreduce (&left, &any, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  return any;
+}
+
+int tree_mpi_refine (int n, const Index * list)
+{
+  assert (applied);
+  const TreeMpiPlan * plan = applied;
+  int me = tree_rank (), np = plan->npeers, divided = 0;
+  Indices pending = { NULL, 0, 0 };
+  for (int q = 0; q < n; q++)
+    indices_push (&pending, list [q]);
+  Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
+  if (!ask)
+    abort ();
+  for (int round = 0; ; round++)
+  {
+    /* each round divides at least the coarsest leaf waiting: a few rounds
+     * a level at most */
+    if (round > 4 * (BAMR_MAX_DEPTH + 1))
+    {
+      fprintf (stderr, "tree_mpi_refine (): rank %d: no end after %d "
+               "rounds\n", me, round);
+      abort ();
+    }
+    /*
+    .. the cascade here, sweeps coarsest first until nothing changes: a
+    .. leaf is divided once every index of its level beside it holds a
+    .. node; a coarser leaf covering one is divided first, here if this
+    .. process's, else asked of its owner, and the leaf waits
+    */
+    Indices made = { NULL, 0, 0 };
+    for (int k = 0; k < np; k++)
+      ask [k].n = 0;
+    for (;;)
+    {
+      indices_unique (&pending);
+      Indices next = { NULL, 0, 0 };
+      int progress = 0, before = pending.n;
+      for (int q = 0; q < pending.n; q++)
+      {
+        Index p = pending.a [q];
+        BAMRNode * node = index_is_allocated (p) ? index_node (p) : NULL;
+        if (!node || !(node->flags & BAMR_NODE_LEAF) || node->pid != me
+            || p.level >= tree_get_depth_max ())
+          continue;                   /* done, or not this process's */
+        int blocked = 0;
+        for (int dir = 0; dir < TREE_NDIRS; dir++)
+        {
+          Index b;
+          if (dir == TREE_DIR_CENTRE || !index_dir (p, dir, &b)
+              || index_is_allocated (b))
+            continue;
+          Index c = index_parent (b);   /* the coarser leaf, by 2:1 */
+          BAMRNode * cover = index_node (c);
+          assert (cover && (cover->flags & BAMR_NODE_LEAF));
+          blocked = 1;
+          if (cover->pid == me)
+            indices_push (&next, c);
+          else
+            indices_push (&ask [peer_slot (plan, cover->pid)], c);
+        }
+        if (blocked)
+          indices_push (&next, p);
+        else if (tree_divide (p))
+        {
+          divided++, progress = 1;
+          indices_push (&made, p);
+        }
+      }
+      free (pending.a);
+      pending = next;
+      indices_unique (&pending);
+      if (!progress && pending.n <= before)
+        break;
+    }
+
+    /* the requests to the owners, what was divided to every peer */
+    Indices asked = { NULL, 0, 0 }, done = { NULL, 0, 0 };
+    int sent = made.n;
+    for (int k = 0; k < np; k++)
+    {
+      indices_unique (&ask [k]);
+      sent += ask [k].n;
+    }
+    peer_round (plan, ask, &made, &asked, &done, 205);
+    for (int q = 0; q < done.n; q++)
+    {
+      Index p = done.a [q];
+      if (index_is_allocated (p) && (index_node (p)->flags & BAMR_NODE_LEAF)
+          && index_node (p)->pid != me)
+        tree_graft (p);
+    }
+    for (int q = 0; q < asked.n; q++)
+      indices_push (&pending, asked.a [q]);
+    free (made.a), free (asked.a), free (done.a);
+    if (!any_left (pending.n > 0 || sent > 0))
+      break;
+  }
+  for (int k = 0; k < np; k++)
+    free (ask [k].a);
+  free (ask), free (pending.a);
+  return divided;
+}
+
+/* may family p be merged by 2:1 balance? a leaf of a neighbour's touching
+.. children, each: what the skeleton holds (they are in N () of p's
+.. children) */
+static int may_merge (Index p)
+{
+  for (int dir = 0; dir < TREE_NDIRS; dir++)
+  {
+    Index b;
+    if (dir == TREE_DIR_CENTRE || !index_dir (p, dir, &b)
+        || !index_is_allocated (b))
+      continue;
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+    {
+      Index x = index_child (b, c);
+      if (tree_child_touches (p, b, c) && index_is_allocated (x)
+          && !(index_node (x)->flags & BAMR_NODE_LEAF))
+        return 0;
+    }
+  }
+  return 1;
+}
+
+int tree_mpi_coarsen (int n, const Index * list)
+{
+  assert (applied);
+  const TreeMpiPlan * plan = applied;
+  int me = tree_rank (), np = plan->npeers, merged = 0, top = 0, all;
+  for (int q = 0; q < n; q++)
+    top = list [q].level > top ? list [q].level : top;
+  MPI_Allreduce (&top, &all, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
+  if (!ask)
+    abort ();
+  /* level by level, finest first, as one process does: what is merged
+   * at a level may let a coarser family merge */
+  for (int l = all; l >= 0; l--)
+  {
+    Indices made = { NULL, 0, 0 }, asked = { NULL, 0, 0 },
+      done = { NULL, 0, 0 };
+    for (int q = 0; q < n; q++)
+      if (list [q].level == l && index_is_allocated (list [q])
+          && index_node (list [q])->pid == me && may_merge (list [q])
+          && tree_merge (list [q]))
+      {
+        merged++;
+        indices_push (&made, list [q]);
+      }
+    peer_round (plan, ask, &made, &asked, &done, 207);
+    for (int q = 0; q < done.n; q++)
+    {
+      Index p = done.a [q];
+      if (index_is_allocated (p)
+          && (index_node (p)->flags & BAMR_NODE_HAS_CHILDREN))
+        tree_ungraft (p);
+    }
+    free (made.a), free (asked.a), free (done.a);
+  }
+  free (ask);
+  return merged;
+}
+
 /* the owner of key in a partition's first keys k [0 .. npe] */
 static int owner_of_key (const uint64_t * k, int npe, uint64_t key)
 {
@@ -965,21 +1280,93 @@ int tree_mpi_repartition (const double * weight)
     abort ();
   for (int r = 0; r < npe; r++)
     kmin [r] = UINT64_MAX;
+  /* each leaf by its middle, as tree_partition () */
+  int * pid_of = malloc ((size_t) (n ? n : 1) * sizeof (int));
+  if (!pid_of)
+    abort ();
   for (int q = 0; q < n; q++)
   {
     double w = weight ? weight [q] : 1;
-    long g = before + q;
-    int pid = weight
-      ? (int) floor (npe * (wbefore + w / 2) / wtotal)
-      : (int) ((long long) npe * (2 * (long long) g + 1)
-               / (2 * (long long) total));
+    pid_of [q] = leaf_pid (npe, before + q, total, wbefore, w, wtotal,
+                       weight != NULL);
     wbefore += w;
-    pid = pid < 0 ? 0 : pid >= npe ? npe - 1 : pid;
-    uint64_t key = tree_morton_key (tc->owned [q].p);
-    kmin [pid] = key < kmin [pid] ? key : kmin [pid];
-    load [pid] += w;
-    count [pid]++;
   }
+  /*
+  .. a family of leaves whole to the process of its child 0: here if this
+  .. process holds child 0 (the family's leaves follow it), else from the
+  .. owner of child 0, a peer (the siblings are in N () of each other),
+  .. which sends it to every peer: parent and process, 5 ints
+  */
+  const TreeMpiPlan * plan = applied;
+  int np = plan ? plan->npeers : 0;
+  Bytes tell = { NULL, 0, 0 };
+  for (int q = 0; q < n; )
+  {
+    Index p = tc->owned [q].p;
+    int m = 1, family = p.level > 0, split = 0;
+    Index up = family ? index_parent (p) : p;
+    for (int c = 0; c < TREE_NCHILDREN && family; c++)
+    {
+      Index x = index_child (up, c);
+      BAMRNode * sib = index_is_allocated (x) ? index_node (x) : NULL;
+      family &= sib && (sib->flags & BAMR_NODE_LEAF);
+      split |= sib && sib->pid != me;
+    }
+    if (family && same_index (p, index_child (up, 0)))
+    {
+      /* the family's leaves here follow child 0 along the curve */
+      while (q + m < n && tc->owned [q + m].p.level == p.level
+             && same_index (index_parent (tc->owned [q + m].p), up))
+        pid_of [q + m] = pid_of [q], m++;
+      if (split)
+      {
+        int a [5];
+        put_index (a, up);
+        a [4] = pid_of [q];
+        bytes_push (&tell, a, sizeof (a));
+      }
+    }
+    q += m;
+  }
+  {
+    int mm = np ? np : 1;
+    char ** out = malloc ((size_t) mm * sizeof (char *));
+    char ** in = malloc ((size_t) mm * sizeof (char *));
+    int * nout = calloc ((size_t) mm, sizeof (int));
+    int * nin = calloc ((size_t) mm, sizeof (int));
+    if (!out || !in || !nout || !nin)
+      abort ();
+    for (int k = 0; k < np; k++)
+      out [k] = tell.a, nout [k] = (int) tell.n;
+    exchange_with (np, plan ? plan->peers : NULL, out, nout,
+                   np, plan ? plan->peers : NULL, in, nin, 209);
+    for (int k = 0; k < np; k++)
+    {
+      for (int b = 0; b + (int) sizeof (int [5]) <= nin [k];
+           b += (int) sizeof (int [5]))
+      {
+        int a [5];
+        memcpy (a, in [k] + b, sizeof (a));
+        Index up = get_index (a);
+        /* this process's leaves of that family: children of up */
+        for (int q = 0; q < n; q++)
+          if (tc->owned [q].p.level == up.level + 1
+              && same_index (index_parent (tc->owned [q].p), up))
+            pid_of [q] = a [4];
+      }
+      free (in [k]);
+    }
+    free (out), free (in), free (nout), free (nin), free (tell.a);
+  }
+  for (int q = 0; q < n; q++)
+  {
+    double w = weight ? weight [q] : 1;
+    uint64_t key = tree_morton_key (tc->owned [q].p);
+    kmin [pid_of [q]] = key < kmin [pid_of [q]] ? key : kmin [pid_of [q]];
+    load [pid_of [q]] += w;
+    count [pid_of [q]]++;
+  }
+  free (pid_of);
   /* every process's first key, load and leaves, everywhere */
   MPI_Allreduce (kmin, kall, npe, MPI_UNSIGNED_LONG_LONG, MPI_MIN,
                  MPI_COMM_WORLD);
@@ -1133,7 +1520,7 @@ int tree_mpi_partition (const double * weight)
     abort ();
   }
   /* the others: every node's pid, in Morton order, and the loads */
-  int * pid = malloc ((size_t) (tc->nall ? tc->nall : 1) * sizeof (int));
+  int * pid = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1) * sizeof (int));
   double * load = malloc ((size_t) npe * sizeof (double));
   if (!pid || !load)
     abort ();

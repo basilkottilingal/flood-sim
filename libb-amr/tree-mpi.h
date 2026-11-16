@@ -105,7 +105,9 @@
   ..                      bits (level l: their cells, restricted already),
   ..                      and those of its coarse bits (level l - 1: their
   ..                      ghosts made at level l - 1 just before, for the
-  ..                      prolongation, which reads them)
+  ..                      prolongation, which reads them); in the parents'
+  ..                      plan, its parent too (level l - 1, as the
+  ..                      coarse ones: what the wavelet reads)
   ..   TREE_MPI_FACES     with the ghosts of level l, face scalars only: for
   ..                      each of r's leaves of level l whose lower
   ..                      neighbour along an axis a is a parent, that
@@ -188,6 +190,27 @@
   ..                                Integer weights give the whole tree's
   ..                                cut exactly; others may differ at a
   ..                                tie, the sums being in another order
+  ..   tree_mpi_refine (n, list)    collective: the leaves list [0..n) of
+  ..                                this process divided (tree_divide ()),
+  ..                                with every leaf 2:1 balance needs, here
+  ..                                or by its owner, in rounds: a leaf
+  ..                                waits for a coarser neighbour of
+  ..                                another process, asked to divide it;
+  ..                                each round what was divided goes to
+  ..                                every peer, which divides its copy
+  ..                                (tree_graft ()); until nothing is left
+  ..                                anywhere. The leaves divided here
+  ..   tree_mpi_coarsen (n, list)   collective: the families under list
+  ..                                [0..n), this process's, merged
+  ..                                (tree_merge ()) where 2:1 balance
+  ..                                allows (the touching children of a
+  ..                                neighbour all leaves), level by level,
+  ..                                finest first, each level's merges sent
+  ..                                to the peers (tree_ungraft ()). The
+  ..                                families merged here
+  ..   tree_mpi_redistribute ()     the skeleton and plan made again, after
+  ..                                the tree changed
+  ..   (adapt_wavelet () calls the three, then tree_mpi_repartition ())
   ..   tree_mpi_end ()              exchanges off, the plan and partition
   ..                                freed; the tree stays pruned
   ..   tree_mpi_plan ()             the plan applied, NULL if none
@@ -196,8 +219,9 @@
   ..                                scalars s [0..n): what ghosts_update_list
   ..                                () calls
   ..
-  .. Not yet: adapting under MPI; ghosts_update_level () (multigrid),
-  .. block_ghosts () alone.
+  .. Not yet: ghosts_update_level () (multigrid), block_ghosts () alone;
+  .. tree_refine () and tree_coarsen () by hand on a distributed tree
+  .. (adapt_wavelet () does it).
   */
 
   /* 1. the partition */
@@ -274,6 +298,9 @@
   #ifdef _MPI
   int                 tree_mpi_partition (const double * weight);
   int                 tree_mpi_repartition (const double * weight);
+  int                 tree_mpi_refine (int n, const Index * list);
+  int                 tree_mpi_coarsen (int n, const Index * list);
+  void                tree_mpi_redistribute (void);
   void                tree_mpi_end (void);
   const TreeMpiPlan * tree_mpi_plan (void);
   void                tree_mpi_exchange (int parents, int kind, int level,

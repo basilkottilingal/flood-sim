@@ -368,7 +368,8 @@
   /*
   .. tree (depthmax, blockdepth): the tree, from level 1 (2^dimension
   .. leaves). On several processes (-D_MPI), refined at once to the first
-  .. level with 4 npe leaves at least, and distributed (tree_mpi_partition
+  .. level with 4 npe families of leaves at least (the cut never splits a
+  .. family), and distributed (tree_mpi_partition
   .. (), tree-mpi.h): each process its own leaves and a layer around them.
   .. Such a tree cannot be refined or coarsened yet.
   .. tree_replicated (depthmax, blockdepth): the same, not distributed: the
@@ -404,8 +405,9 @@
   ..                      it, as far as needed. Returns how many leaves were
   ..                      divided: 0 if p is not a leaf, or at depth max.
   ..   tree_coarsen (p)   merges the children of p, all leaves, back into p,
-  ..                      unless a neighbour of p has grandchildren, which
-  ..                      would then touch p two levels finer. Returns 1 if
+  ..                      unless a neighbour of p has grandchildren that
+  ..                      would then touch p two levels finer (the children
+  ..                      of a neighbour that touch p have children). Returns 1 if
   ..                      it did, 0 if not.
   ..
   .. The children of a node are allocated together, nodes and blocks: one
@@ -422,6 +424,15 @@
   */
   int  tree_refine (Index p);
   int  tree_coarsen (Index p);
+
+  /*
+  .. tree_child_touches (p, b, c): does child c of b, a node of p's level
+  .. beside p (b = p + d, each d -1, 0 or 1), touch p? Along each axis
+  .. with d != 0, the child is in the half of b towards p. What
+  .. tree_coarsen () checks: coarsening p is refused only if such a child
+  .. has children, which would touch p two levels finer.
+  */
+  int  tree_child_touches (Index p, Index b, int c);
 
   /*
   .. Pruning: a subtree gone from this process (tree-mpi.h decides which).
@@ -452,5 +463,32 @@
   .. Returns the nodes made.
   */
   int  tree_insert (Index p, int leaf);
+
+  /*
+  .. The steps of adapting a distributed tree (tree-mpi.h), with no 2:1
+  .. balance and no ghosts: the caller keeps the balance, and updates the
+  .. ghosts after.
+  ..   tree_divide (p)    the leaf p divided: its children leaves, their
+  ..                      interiors prolonged from p, interior and ghosts,
+  ..                      their ghosts not made. 1 if divided, 0 if p is not
+  ..                      a leaf or at depth max
+  ..   tree_merge (p)     p's children, all leaves, restricted into p and
+  ..                      freed: p a leaf. 1, or 0 if not so
+  ..   tree_graft (p)     another process's leaf p, held here, divided as
+  ..                      its owner did: children leaves, inactive, with no
+  ..                      blocks, of p's pid
+  ..   tree_ungraft (p)   another process's family under p, held here,
+  ..                      merged as its owner did: what is below p freed,
+  ..                      p a leaf
+  .. and tree_forget (p), below.
+  */
+  int  tree_divide (Index p);
+  int  tree_merge (Index p);
+  /* tree_forget (p): another process's leaf p, out of this process's
+  .. skeleton, made pruned: its structure no longer known here (no one
+  .. would say when it changes) */
+  void tree_forget (Index p);
+  void tree_graft (Index p);
+  void tree_ungraft (Index p);
 
 #endif

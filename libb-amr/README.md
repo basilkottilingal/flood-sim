@@ -372,6 +372,54 @@ tested in one process for any number of processes. With `-D_MPI`,
   It returns the nodes this process sent. Integer weights give the whole
   tree's cut bit for bit; other weights may differ at a tie, the sums
   being made in another order.
+- **Families of leaves never split** (milestone 4, on one process too).
+  Each leaf goes by its middle as above, then every family whose children
+  are all leaves goes whole to the process of its child 0. The pids still
+  never decrease along the curve, and a process's load is within one
+  family's weight of the mean. Merging makes new families of leaves that
+  may span processes; `tree_mpi_repartition ()` gathers them: the owner of
+  child 0, knowing from its skeleton that the family is all leaves (the
+  siblings are in N () of each other), tells its peers the family's
+  process, one round. So a family is always one process's at adapting.
+- **Adapting the distributed tree** (milestone 4): `adapt_wavelet ()`
+  with a plan applied.
+  - The parents' plan receives every node's parent too, with its ghosts:
+    what the wavelet reads.
+  - Each process flags its own leaves, as on one process.
+  - **Refining, in rounds** (`tree_mpi_refine ()`): a leaf is divided
+    (`tree_divide ()`: children prolonged, no balance, no ghosts) once
+    every index of its level beside it holds a node. A coarser leaf
+    covering one is divided first: here if this process's, else asked of
+    its owner (a peer), and the leaf waits a round. Each round, what was
+    divided goes to every peer, which divides its copy (`tree_graft ()`:
+    leaves, inactive, no blocks). The rounds end when no process has
+    anything waiting or sent (`MPI_Allreduce`), a few a level at most.
+  - **Coarsening, level by level, finest first** (`tree_mpi_coarsen ()`):
+    each process merges its own families (`tree_merge ()`) where 2:1
+    balance allows, from its skeleton (the touching children of the
+    neighbours are in N () of the family's children), and sends the
+    merges to its peers (`tree_ungraft ()`). A level's merges can let a
+    coarser family merge, as on one process; merges of one level do not
+    interact.
+  - Then the skeleton and plan again (`tree_mpi_redistribute ()`), and
+    `tree_mpi_repartition (NULL)`. A leaf out of the skeleton (a sibling
+    a family brings) is forgotten at each skeleton (`tree_forget ()`:
+    pruned, unknown): no one would tell this process when it changes, so
+    it must not claim to know it.
+  - **What comes out:** the tree and every cell-centred scalar as on one
+    process, bit for bit (the order of the rounds does not matter: a leaf
+    is prolonged from its own cells and ghosts as they were at the start,
+    a family merged from its children's interiors). A face or vertex
+    scalar's restriction reads the children's ghost layer, which one
+    process updates as it coarsens family after family, so its merged
+    values depend on that order: on several processes they may differ in
+    the last bits.
+- **`tree_coarsen ()`'s 2:1 check, exact** (milestone 4, on one process
+  too): coarsening p is refused only if a child of a neighbour that
+  touches p has children (`tree_child_touches ()`). It refused before if
+  any child of a neighbour had children: more than 2:1 needs, and more
+  than a process's skeleton knows. One process now coarsens a little more
+  often; `tests/bit/compare.sh` differs for adapting runs.
 - **In `ghosts_update_list ()`** (`#ifdef _MPI`, with a plan applied): the
   exchange before each restriction level and each ghost level, at the
   plan's levels. Without `_MPI`, every node has pid 0 = rank: nothing
@@ -586,6 +634,51 @@ count was caught by nothing until the test counted the flags. The local
 levels differ only where a process lacks the finest or coarsest leaves:
 none of the test's trees but 3D on 16 ranks has one.
 
+Milestone 4 (adapting). `tests/test_adapt_mpi.c`: each process builds the
+whole tree (`tree_replicated ()`), refined about a sphere, and adapts it
+five times as one process does (`adapt_wavelet ()`, maxlevel 5, 4 in 3D):
+three steps to a sharp front (`tanh`, width 0.01) whose centre moves,
+which refine and coarsen, then two on a constant, which merge every family
+down to minlevel (and make families of leaves that span processes). The
+reference: the counts of each step, and every leaf with every cell of two
+cell scalars (the adapted field and a linear one carried along) after a
+ghost update, after the front and at the end. Then the same tree
+distributed (`tree_mpi_partition ()`) and adapted the same way: the
+counts of each step the reference's; after each step every process within
+one family of the mean; at both checkpoints every leaf owned once and
+every cell of both scalars (interior and ghosts) the reference's, bit for
+bit. 1-3D on 1, 2, 3, 4, 7, 13, 16 ranks: all pass (2D: 304 leaves and
+243 200 cells after the front; 3D: 1212 leaves, 19.4 million cells).
+`test_adapt.c` adds the exact 2:1 check: a family beside a node whose far
+child has children is coarsened, the tree stays balanced; once the near
+child has children, not.
+
+The test found two faults before it passed: the cut could leave a family
+of leaves split after merges (the families were whole only when the cut
+made them; now the repartition gathers them), and a process could hold a
+sibling out of its skeleton as a leaf after its owner had divided it,
+then trip on its children arriving with a move (now forgotten at every
+skeleton).
+
+| bug (one line) | adapt 2D, 3D | partition 2D | adapt_mpi np 3 2D, 3D; np 13 2D | mpi np 3 |
+|---|---|---|---|---|
+| coarsen: the far half taken as touching | 4, crash | 0 | 9, 9; 39 | 0 |
+| coarsen: no 2:1 check | 2, crash | 0 | crash | 0 |
+| the cut: families split | 0 | 35 | 3, 0; 0 | 31 |
+| the repartition: split families not gathered | 0 | 0 | 0, 6; 26 | 0 |
+| the plan: parents not received | 0 | 2 | 6, 6; crash | 0 |
+| refine: a remote coarser leaf not asked | 0 | 0 | crash (no end) | 0 |
+| refine: peers not told (no graft) | 0 | 0 | crash | 0 |
+| coarsen: peers not told (no ungraft) | 0 | 0 | crash | 0 |
+| coarsen: no 2:1 check under MPI | 0 | 0 | crash | 0 |
+| coarsen: all levels in one round | 0 | 0 | 9, 3; 39 | 0 |
+| a leaf out of the skeleton not forgotten | 0 | 0 | 0, 0; crash | 0 |
+| no repartition after adapting | 0 | 0 | 3, 3; 13 | 0 |
+
+The missing repartition was caught by nothing until the test checked the
+balance after each step. A remote family taken as a candidate changes
+nothing (its leaves are never flagged here), so its check is not listed.
+
 On real ranks, with OpenMPI (`sudo apt install openmpi-bin
 libopenmpi-dev`):
 
@@ -629,8 +722,10 @@ processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
   tree npe times: every process owns all of it then.
 - Writes through a pointer, a member or a subscript in a stencil loop
   (`*e = ...`, `same [k] += ...`) are not reductions: serial only.
-- Adapting under MPI: refining and coarsening a pruned tree, a new
-  partition, then moving the blocks to their owners.
+- `tree_refine ()` and `tree_coarsen ()` called by hand on a distributed
+  tree still stop the run: adapting goes through `adapt_wavelet ()`.
+- A face or vertex scalar coarsened on several processes may differ from
+  one process in the last bits (see "Adapting the distributed tree").
 - `ghosts_update_level ()` (multigrid) and `block_ghosts ()` called alone
   do not exchange.
 - Memory: a process still builds the whole tree before pruning. In the end
@@ -1614,10 +1709,8 @@ partition, plans, pruning" above). The distributed tree (plan B,
 milestones 4-5) next:
 
 1. **Migration (milestone 3), done:** `tree_mpi_repartition ()`.
-2. **Adapting (milestone 4).** `adapt_wavelet ()` on each process's leaves;
-   2:1 balance across processes by rounds of requests until none is left;
-   coarsening local (families of leaves never split by the partition);
-   the halo's structure sent to those who hold it; then milestone 3.
+2. **Adapting (milestone 4), done:** `adapt_wavelet ()` on a distributed
+   tree.
 3. **To be considered: a partition by edge cut** (the author's plan). The
    cut along the Morton curve balances the load but not the surface; a
    cut that also minimises the edges between processes (graph

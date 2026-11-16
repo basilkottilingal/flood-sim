@@ -6,6 +6,10 @@
 
 #include "adapt.h"
 #include "block-ghosts.h"
+#ifdef _MPI
+# include <mpi.h>
+# include "tree-mpi.h"
+#endif
 
 /* the wavelet of p for s, scratch a block to prolong into */
 static double wavelet_into (Index p, int s, Real * scratch)
@@ -109,6 +113,13 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   /* 2. refine, coarsest first: a cascade for balance then goes down */
   if (refine.n)
     qsort (refine.a, refine.n, sizeof (Index), by_level_up);
+  #ifdef _MPI
+  /* distributed (tree-mpi.h): the balance kept in rounds with the others */
+  const TreeMpiPlan * mp = tree_mpi_plan ();
+  if (mp)
+    st.refined = tree_mpi_refine ((int) refine.n, refine.a);
+  else
+  #endif
   foreach (p in refine)
     st.refined += tree_refine (p);
 
@@ -125,7 +136,8 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   */
   cache (Index) merge;
   foreach_node () {
-    if (!tree_has_children (node) || level < minlevel || level == 0)
+    if (!tree_has_children (node) || level < minlevel || level == 0
+        || node->pid != tree_rank ())     /* this process's families */
       continue;
     int all = 1;
     children_of ((Index) {IJKL})
@@ -137,6 +149,11 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   }
   if (merge.n)
     qsort (merge.a, merge.n, sizeof (Index), by_level_down);
+  #ifdef _MPI
+  if (mp)
+    st.coarsened = tree_mpi_coarsen ((int) merge.n, merge.a);
+  else
+  #endif
   foreach (p in merge)
     st.coarsened += tree_coarsen (p);
 
@@ -144,5 +161,17 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
   foreach_node ()
     node->flags &= ~(BAMR_NODE_REFINE | BAMR_NODE_COARSEN);
   free (scratch);
+  #ifdef _MPI
+  /* 5. distributed: the skeleton and plan again, the load balanced again;
+   * the counts the whole tree's */
+  if (mp)
+  {
+    tree_mpi_redistribute ();
+    tree_mpi_repartition (NULL);
+    int mine [2] = { st.refined, st.coarsened }, all [2];
+    MPI_Allreduce (mine, all, 2, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    st.refined = all [0], st.coarsened = all [1];
+  }
+  #endif
   return st;
 }

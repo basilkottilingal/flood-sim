@@ -258,9 +258,12 @@ int main (void)
     CHECK (ok && grid_scalar_check ());
   }
 
-  /* 5. the wavelet of a linear field is zero away from the walls */
+  /* 5. the wavelet of a linear field is zero away from the walls. It reads
+   * the parent and its ghosts: every level updated (the leaves alone were
+   * enough only while the parent of the leaf at the centre happened to
+   * hold its restriction) */
   set (linear);
-  ghosts_update (u);
+  ghosts_update_levels (u);
   {
     double x [3] = { 0.5, 0.5, 0.5 };
     Index q = leaf_at (x);
@@ -309,6 +312,24 @@ int main (void)
     set (one);
     AdaptStats st = adapt_wavelet (1, (int []) { u }, &max, 0, 4);
     CHECK (st.refined == 1 && tree_get_nleaves () == nc && grid_scalar_check ());
+  }
+
+  /* 9. the exact 2:1 check of tree_coarsen (): a family p beside a node b
+   * whose far child (not touching p) has children may be coarsened, and
+   * the tree stays balanced; once b's near child has children too, not */
+  {
+    Index p = { TREE_ROOT };
+    p.level = 2, p.i = 1;                 /* x in [0.25, 0.5) */
+    Index b = p;
+    b.i = 2;                              /* beside p, above it in x */
+    tree_refine (index_parent (p)), tree_refine (index_parent (b));
+    CHECK (tree_refine (p) > 0 && tree_refine (b) > 0);
+    Index far = index_child (b, 1), near = index_child (b, 0);
+    CHECK (!tree_child_touches (p, b, 1) && tree_child_touches (p, b, 0));
+    CHECK (tree_refine (far) > 0 && balanced ());
+    CHECK (tree_coarsen (p) == 1 && balanced () && grid_scalar_check ());
+    CHECK (tree_refine (p) > 0 && tree_refine (near) > 0 && balanced ());
+    CHECK (tree_coarsen (p) == 0 && balanced ());
   }
 
   tree_destroy ();
