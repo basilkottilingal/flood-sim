@@ -63,7 +63,7 @@ static double residual (scalar a, scalar b, face_vector alpha, scalar lambda,
 {
   fluxes (a, alpha, g);
   double max = 0;
-  foreach () {
+  foreach (reduction (max:max)) {
     double div = 0;
     foreach_dimension ()
       div += (double) g.x[1] - g.x[];

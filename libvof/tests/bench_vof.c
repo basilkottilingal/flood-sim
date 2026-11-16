@@ -79,7 +79,7 @@ int main (void)
   }
   long cells = 0;
   /* the sphere's fraction of each cell, by 4^dimension points */
-  foreach () {
+  foreach (reduction (+:cells)) {
     int in = 0, all = 0;
     for (int a = 0; a < 4; a++)
       for (int b = 0; b < (dimension > 1 ? 4 : 1); b++)
@@ -103,7 +103,7 @@ int main (void)
     vof_advection (c, uf, dt);
   double t = (now () - t0) / steps;
   long interface = 0;
-  foreach ()
+  foreach (reduction (+:interface))
     interface += c[] > 1e-6 && c[] < 1 - 1e-6;
   printf ("{\"dimension\": %d, \"cells\": %ld, \"interface\": %.4f, "
           "\"ms_per_step\": %.3f, \"ns_per_cell\": %.2f}\n", dimension, cells,

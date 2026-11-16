@@ -77,7 +77,7 @@ static double finest (void)
 static double integral (scalar s)
 {
   double sum = 0;
-  foreach () {
+  foreach (reduction (+:sum)) {
     double v = 1;
     for (int a = 0; a < dimension; a++)
       v *= Delta;
@@ -205,7 +205,7 @@ static void test_translation (void)
     dist += dt;
   }
   double e = 0;
-  foreach () {
+  foreach (reduction (max:e)) {
     double d = fabs (c[] - slug (x - Delta / 2, x + Delta / 2, a + dist,
                                   b + dist));
     e = d > e ? d : e;
@@ -253,7 +253,7 @@ static void refined_plane (coord n, double a, double * ef, double * em)
   double dm = fabs (integral (c) - m0), dm0 = fabs (integral (c0) - m1);
   int bad = 0;
   *ef = *em = 0;
-  foreach () {
+  foreach (reduction (+:bad)) {
     double e = plane_cell (n, a, x, y, z, Delta);
     bad += !(c[] >= 0 && c[] <= 1);
     *ef = fmax (*ef, fabs (c[] - e));
@@ -373,11 +373,11 @@ static double vortex (int level, int jumps, double T)
     t += dt;
     double dm = fabs (integral (c) - m0) / m0;
     worst = dm > worst ? dm : worst;
-    foreach ()
+    foreach (reduction (+:bad))
       bad += !(c[] >= 0 && c[] <= 1);
   }
   double e = 0;
-  foreach () {
+  foreach (reduction (+:e)) {
     double v = 1;
     for (int a = 0; a < dimension; a++)
       v *= Delta;
@@ -504,7 +504,7 @@ static void test_rotation (void)
   for (int pass = 0; pass < 2; pass++) {
     set_turned (1);
     vof_advection (c, uf, dt);                     /* n + 1, n + dimension */
-    foreach () {
+    foreach (reduction (+:changed)) {
       int i = (int) (x * N), j = (int) (y * N), k = (int) (z * N);
       Real v = dimension == 2 ? AT (j, i, 0) : AT (j, k, i);
       same [pass] += c[] == v;

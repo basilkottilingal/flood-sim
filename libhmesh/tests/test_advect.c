@@ -118,7 +118,7 @@ static double against_vof (Hmesh * M, scalar c, scalar c2)
 {
   hm_vof (M, c2);
   double e = 0;
-  foreach ()
+  foreach (reduction (max:e))
     e = fmax (e, fabs (c[] - c2[]));
   return e;
 }
@@ -288,7 +288,7 @@ static void test_thread (void)
   hm_tree_from_function (M, thread);
   hm_vof (M, c);
   double before = 0;
-  foreach ()
+  foreach (reduction (max:before))
     if (fabs (x - XC) < 0.25 / 32)
       before = fmax (before, c[]);
   /* x' = s (x - XC), s dt = 1.75: the sides from 0.2 to 0.55 of a cell */
@@ -297,7 +297,7 @@ static void test_thread (void)
   fill (uf, 1.);
   int r = manifold_advect (M, uf, c, dt, uf, 0.);
   double e = against_vof (M, c, c2), col = 1;
-  foreach ()
+  foreach (reduction (min:col))
     if (fabs (x - XC) < 0.25 / 32)
       col = fmin (col, c[]);
   CHECK (r == 0 && fabs (before - 0.4) < 1e-6 && col == 1 && e < tol_c,
@@ -342,13 +342,13 @@ static void test_limits (void)
   set_field (1, 0, 0, 0, 0);
   fill (uf, 1.);
   double * p0 = positions (M), sum0 = 0, sum1 = 0;
-  foreach ()
+  foreach (reduction (+:sum0))
     sum0 += c[];
   int r = manifold_advect (M, uf, c, 0.6 * h, uf, 0.);
   long moved = 0;
   hm_foreach (M, 0, v)
     moved += hm_x (M, 0)[v] != p0[3*v];
-  foreach ()
+  foreach (reduction (+:sum1))
     sum1 += c[];
   CHECK (r == -1 && !moved && sum0 == sum1, "CFL 0.6: %d, %ld points moved",
          r, moved);
@@ -359,7 +359,7 @@ static void test_limits (void)
       c[] = 0.25;
   r = manifold_advect (M, uf, c, 0.3 * h, uf, 0.);
   double corner = 0;
-  foreach ()
+  foreach (reduction (max:corner))
     if (x < h && y < h)
       corner = c[];
   CHECK (r == 0 && corner == (Real) 0.25, "a far cell written: %g", corner);

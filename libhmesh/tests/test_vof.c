@@ -277,7 +277,7 @@ static double against_polygon (scalar c, const double (* p)[2], int n,
                                int reverse, double * total)
 {
   double emax = 0, sum = 0;
-  foreach () {
+  foreach (reduction (max:emax) reduction (+:sum)) {
     double h = Delta;
     double want = polygon_in_box (p, n, x - h/2, y - h/2, h) / (h*h);
     if (reverse)
@@ -508,7 +508,7 @@ static void test_tree3 (void)
   CHECK (hm_clip (M, (double []) { 0, 0, 0 }, 1.) == 0, "plane: clip");
   long left = hm_vof (M, c);
   double emax = 0, sum = 0;
-  foreach () {
+  foreach (reduction (max:emax) reduction (+:sum)) {
     double h = Delta, m[3] = { -0.17, 0.11, 1 };
     /* z <= 0.43 + 0.17 x - 0.11 y in the cell's unit coordinates */
     double alpha = (0.43 + 0.17*(x - h/2) - 0.11*(y - h/2) - (z - h/2)) / h;
@@ -529,7 +529,7 @@ static void test_tree3 (void)
   M = octahedron (c0, r);
   left = hm_vof (M, c);
   emax = 0, sum = 0;
-  foreach () {
+  foreach (reduction (max:emax) reduction (+:sum)) {
     double h = Delta, lo[3] = { x - h/2, y - h/2, z - h/2 };
     double v = octahedron_in_box (c0, r, lo, h) / (h*h*h);
     emax = fmax (emax, fabs (c[] - v));
@@ -549,7 +549,7 @@ static void test_tree3 (void)
   left = hm_vof (M, c);
   sum = 0;
   double cmin = 1, cmax = 0;
-  foreach () {
+  foreach (reduction (max:cmax) reduction (min:cmin) reduction (+:sum)) {
     sum += c[]*Delta*Delta*Delta;
     cmin = fmin (cmin, c[]), cmax = fmax (cmax, c[]);
   }

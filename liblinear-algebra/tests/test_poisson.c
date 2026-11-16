@@ -84,7 +84,7 @@ static void refine_all (int to)
 static double max_diff (scalar u, scalar v)
 {
   double m = 0;
-  foreach () {
+  foreach (reduction (max:m)) {
     double d = fabs ((double) u[] - v[]);
     m = d > m ? d : m;
   }
@@ -160,7 +160,7 @@ int main (void)
     }
     mg_helmholtz_operator (q, alpha, zero, out);
     double total = 0, scale = 0;
-    foreach () {
+    foreach (reduction (+:scale, total)) {
       double v = Delta;
       for (int d = 1; d < dimension; d++)
         v *= Delta;

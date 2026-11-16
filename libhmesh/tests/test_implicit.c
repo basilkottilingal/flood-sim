@@ -342,7 +342,7 @@ static void test_tree (void)
   /* the volume fractions: the interface's own volume */
   long left = hm_vof (M, c);
   double sum = 0;
-  foreach ()
+  foreach (reduction (+:sum))
     sum += c[] * pow (Delta, D);
   double tol = sizeof (Real) == sizeof (float) ? 1e-6 : 1e-12;
   CHECK (left == 0 && fabs (sum - S.volume) < tol, "tree: vof %ld left, "
