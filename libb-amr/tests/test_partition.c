@@ -201,6 +201,25 @@ static void check (int npe, const double * weight)
     parents &= tc->parents_by_level [b].node->pid == least;
   }
   CHECK (parents);
+
+  /* the keys: increasing along the leaves, a node's its first leaf's; the
+   * owner of every node from them alone, its pid; the leaves of this
+   * process (rank 0): those of pid 0, in order */
+  int keys = 1, owners = 1, owned = 1, k = 0;
+  for (int q = 1; q < n; q++)
+    keys &= tree_morton_key (tc->leaves [q].p)
+            > tree_morton_key (tc->leaves [q - 1].p);
+  for (int q = 0; q < tc->nall; q++) {
+    Index p = tc->all [q].p, f = p;
+    while (!(index_node (f)->flags & BAMR_NODE_LEAF))
+      f = index_child (f, 0);
+    keys &= tree_morton_key (p) == tree_morton_key (f);
+    owners &= tree_partition_owner (p) == tc->all [q].node->pid;
+  }
+  for (int q = 0; q < n; q++)
+    if (tc->leaves [q].node->pid == 0)
+      owned &= k < tc->nowned && tc->owned [k++].node == tc->leaves [q].node;
+  CHECK (keys && owners && owned && k == tc->nowned);
   free (load), free (count);
 }
 

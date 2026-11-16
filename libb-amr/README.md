@@ -244,14 +244,27 @@ tested in one process for any number of processes. With `-D_MPI`,
 `ghosts_update ()` exchanges blocks.
 
 - **Ranks** (`tree.h`). `tree_npe ()` and `tree_rank ()` read two statics
-  of `tree.c`. With `-D_MPI` they are `MPI_COMM_WORLD`'s, read by `tree ()`
-  (after `MPI_Init ()`); without, constants: 1 and 0. Ranks are 0-based,
-  as MPI's.
+  of `tree.c`. With `-D_MPI` they are `MPI_COMM_WORLD`'s, read by `tree ()`,
+  which starts MPI if the program has not (`MPI_Init_thread`,
+  `MPI_THREAD_FUNNELED`) and finalises it at exit; without, constants: 1
+  and 0. Ranks are 0-based, as MPI's.
 - **The owner, `node->pid`.** The root gets `tree_rank ()`, children their
   parent's pid, so a tree made on a process is that process's until it is
   partitioned. `ghosts_update_list ()` makes the ghosts of, and restricts,
   the nodes with `pid == tree_rank ()` only, with or without MPI (on one
   process, every node).
+- **Loops over this process's leaves.** `tree_caches ()->owned` lists the
+  leaves with `pid == tree_rank ()`, in Morton order, made again when the
+  tree or the owners change. `foreach_leaf ()`, `foreach_leaf_parallel ()`,
+  the loops over faces and vertices, and so `foreach ()`, walk it;
+  `foreach_level (l)` and `foreach_level_or_leaf (l)` skip the nodes owned
+  elsewhere. On one process nothing changes.
+- **Reductions** (cwrap's `reduction (op:v)`, libc-pp README): after the
+  loop, `tree_reduce (&v, type, op)` combines v over the processes
+  (`MPI_Allreduce`, `+ * min max` of int, long, long long, their unsigned,
+  float, double), rank 0's starting value counted once. Before a partition
+  every process owns the whole tree, so a sum counts it npe times: the
+  partition is to come first (milestone 2 makes `tree ()` do it).
 - **Partition.** The leaves are cut along the Morton curve into npe
   contiguous pieces by weight. Leaf q goes to `floor (npe (W_q + w_q / 2) /
   W)`, the piece that holds its middle; with unit weights this is computed
@@ -259,6 +272,13 @@ tested in one process for any number of processes. With `-D_MPI`,
   the process of its first leaf. A refinement, a coarsening or a pruning
   makes the partition stale (`tree_partition_valid ()`); a pruned tree is
   refused.
+- **The pieces by their first keys.** `tree_morton_key (p)` (`tree.h`) is
+  p's place on the curve, its first cell's bits interleaved at level
+  `BAMR_MAX_DEPTH`. The partition keeps each process's first key
+  (`key_first`, npe + 1, an empty process taking the next one's), and
+  `tree_partition_owner (p)` finds the owner of any index by a binary
+  search of them, without the node: what a process will ask about nodes it
+  does not hold (milestone 2, the halo).
 - **Neighbours as bit maps.** `tree_neighbours (p)` gives three masks of
   3^D - 1 bits, numbered as `block_ghosts ()` numbers its regions: `same`
   (a leaf of p's level), `fine` (a parent of p's level), `coarse` (no node
@@ -315,18 +335,27 @@ tested in one process for any number of processes. With `-D_MPI`,
 | unit-weight cut | the closed form `floor (npe (2 q + 1) / (2 n))`; pieces within one leaf; none empty when n >= npe |
 | weighted cut | loads summed again from the pids; max <= W / npe + w_max, and <= the optimal contiguous cut (bisection with greedy packing) + w_max |
 | parents | the smallest pid of the leaves inside the parent's box, by search |
+| keys, owners, this process's leaves (every cut above) | `tree_morton_key ()` increasing along the leaves, a node's its first leaf's (found by descending); `tree_partition_owner ()` of every node its pid; `owned` the leaves of pid 0, in order |
 | bit maps and ranks, every node and direction | the leaves that overlap the neighbour's box on the finest lattice; the pid of the node read, by search |
 | plans for npe = 1, 4, 7 | what each process must receive, from that geometry, from the owners; every send list equal, item for item, to the matching receive list |
 | pruning, each process of npe = 1, 4, 7 (sphere), 2^D + 3 (uniform: some own nothing) | the tree made again for each; a node kept iff it is the root or its parent has something needed strictly below, by a search of boxes; every kept node at its place with its flags and pid, the pruned ones `IS_PRUNED` without children; every other node gone from the level index; `tree_pruned ()`, the node and leaf counts, the depth and coarsest level (0 with no leaf left), the lists; the partition stale and refused; a pruned node not pruned again; a scalar made and freed, `grid_scalar_check ()` |
 | bad arguments, staleness | npe 0, weight 0 or NaN refused, partition kept; stale after refining |
 
-`tests/test_mpi.c`, with `-D_MPI`: a cell scalar, a face vector and a
+`tests/test_mpi.c`, with `-D_MPI`, MPI started by `tree ()` and
+finalised at exit: a cell scalar, a face vector and a
 vertex scalar on a tree refined about a sphere. The references are
 `ghosts_update ()` on the whole tree, before the partition (each process
 owns every node then). Each process also makes the partition itself, to
 compare with what rank 0 sends, and then gives every node back its own
 rank. After `tree_mpi_partition ()`, every node needed is still there, and
-the pids and the partition are those made locally. Then every kept block
+the pids and the partition are those made locally, its first keys too;
+the owner of every node of the whole tree, freed here or not, comes from
+the keys alone; each process's `owned` list is its kept leaves of its
+rank, in order, and over the processes every leaf once. Reductions in
+`foreach ()` (`+` of cells and levels, `*` with one factor 3 at the
+corner cell, `min` and `max` of the level), `foreach_face ()` (`+`, by
+axis) and `foreach_level (2)` give the whole tree once, against the same
+loops before the partition, which gave it npe times. Then every kept block
 a process does not own is poisoned (NaN), and so are the ghosts of its own
 leaves and its own parents. After `ghosts_update ()`, every cell that the
 update writes in an owned node must equal the reference bit for bit, for
@@ -366,7 +395,32 @@ tree's coarsest: none of the test's trees has one.
 needs no MPI installed. The stand-in forks the ranks in `MPI_Init ()` and
 joins each two by a socket pair. Every message carries its tag and length,
 and a receive that does not match them stops the run. It has
-`MPI_Initialized` and `MPI_Bcast` (bytes, int, long, double) now.
+`MPI_Init_thread`, `MPI_Initialized`, `MPI_Finalized`, `MPI_Bcast`, and
+`MPI_Allreduce` of `+ * min max` over int, long, long long, their
+unsigned, float and double. Rank 0's `MPI_Finalize ()` fails the run if
+another rank failed, also when called at exit.
+
+Milestone 1 (owned leaves, reductions, MPI in `tree ()`, first keys):
+`test_mpi` passes in 1-3D on 1, 2, 3, 4, 7, 10, 13, 16 ranks in float and
+1, 2, 4, 7, 13 in double. Deliberate bugs, one line each (failures in
+`test_partition` / `test_mpi` on 3 ranks, 2D and 3D alike):
+
+| bug | partition | mpi |
+|---|---|---|
+| `owned`: every leaf | 27 | 6 |
+| `foreach_leaf ()` over every leaf | - | 3 |
+| faces over every leaf | - | 3 |
+| a level loop over every pid | - | 3 |
+| the owners changed, the lists kept | 29 | 0 (pruning rebuilds them) |
+| an empty process's first key 0 | 10, 6 | 0 |
+| the owner's search off by one | 27 | 3 |
+| a key's bits interleaved the wrong way | 31 | 3 |
+| `tree_reduce ()`: min and max swapped | - | 3 |
+| `tree_reduce ()`: no `MPI_Allreduce` | - | 3 |
+| `tree ()` does not start MPI | - | 1 |
+
+The min/max swap passed until the test reduced the rank itself: every
+piece touches the coarsest and finest levels and both ends of x.
 
 On real ranks, with OpenMPI (`sudo apt install openmpi-bin
 libopenmpi-dev`):
@@ -402,9 +456,12 @@ processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
 ### Not done yet
 
-- `foreach ()` and the other loops still visit every leaf left in the
-  lists: the process's own, those it receives, and their siblings. A
-  reduction counts some twice. Next: loops over the owned leaves only.
+- The tree is still whole on every process until `tree_mpi_partition ()`,
+  and a reduction before it counts the tree npe times. Next (milestone
+  2): `tree ()` partitions a coarse uniform level at once, and each
+  process finds its halo by asking the owners (`tree_partition_owner ()`).
+- Writes through a pointer, a member or a subscript in a stencil loop
+  (`*e = ...`, `same [k] += ...`) are not reductions: serial only.
 - Adapting under MPI: refining and coarsening a pruned tree, a new
   partition, then moving the blocks to their owners.
 - `ghosts_update_level ()` (multigrid) and `block_ghosts ()` called alone

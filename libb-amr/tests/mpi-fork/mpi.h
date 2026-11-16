@@ -15,11 +15,15 @@
   .. plan whose two sides disagree is caught. Isend and Irecv progress in
   .. MPI_Waitall () (poll), so no send blocks another's receive.
   ..
-  ..   MPI_Init, MPI_Initialized, MPI_Finalize, MPI_Comm_rank, MPI_Comm_size
+  ..   MPI_Init, MPI_Init_thread, MPI_Initialized, MPI_Finalize,
+  ..   MPI_Finalized, MPI_Comm_rank, MPI_Comm_size
   ..   MPI_Isend, MPI_Irecv, MPI_Waitall   MPI_BYTE only
-  ..   MPI_Bcast                           MPI_BYTE, MPI_INT, MPI_LONG,
+  ..   MPI_Bcast                           any type below
+  ..   MPI_Allreduce                       MPI_SUM, MPI_PROD, MPI_MIN, MPI_MAX
+  ..                                       of MPI_INT, MPI_LONG, MPI_LONG_LONG,
+  ..                                       MPI_UNSIGNED, MPI_UNSIGNED_LONG,
+  ..                                       MPI_UNSIGNED_LONG_LONG, MPI_FLOAT,
   ..                                       MPI_DOUBLE
-  ..   MPI_Allreduce                       MPI_SUM of MPI_INT, MPI_LONG
   */
 
   typedef int MPI_Comm;
@@ -33,12 +37,25 @@
   #define MPI_INT             2
   #define MPI_LONG            3
   #define MPI_DOUBLE          4
+  #define MPI_LONG_LONG       5
+  #define MPI_UNSIGNED        6
+  #define MPI_UNSIGNED_LONG   7
+  #define MPI_UNSIGNED_LONG_LONG 8
+  #define MPI_FLOAT           9
   #define MPI_SUM             1
+  #define MPI_PROD            2
+  #define MPI_MIN             3
+  #define MPI_MAX             4
   #define MPI_STATUSES_IGNORE ((MPI_Status *) 0)
+  #define MPI_THREAD_SINGLE   0
+  #define MPI_THREAD_FUNNELED 1
 
   int MPI_Init (int * argc, char *** argv);
+  int MPI_Init_thread (int * argc, char *** argv, int required,
+                       int * provided);
   int MPI_Initialized (int * flag);
   int MPI_Finalize (void);
+  int MPI_Finalized (int * flag);
   int MPI_Comm_rank (MPI_Comm comm, int * rank);
   int MPI_Comm_size (MPI_Comm comm, int * size);
   int MPI_Isend (const void * buf, int count, MPI_Datatype type, int dest,

@@ -64,7 +64,7 @@ static void refine_near (int to)
 static double corners_error (void)
 {
   double err = 0;
-  foreach () {
+  foreach (reduction (max:err)) {
     double x0 = x - 0.5 * Delta, D = Delta;
 #if dimension == 1
     double c [2] = { v[], v[1] };
@@ -110,7 +110,7 @@ int main (void)
   foreach_vertex ()
     w[] = (Real) x;
   double perr = 0;
-  foreach ()
+  foreach (reduction (max:perr))
     perr = fmax (perr, fabs (w[] - (x - 0.5 * Delta)));
   printf ("  vertex positions: error %.3g\n", perr);
   CHECK (perr < tol);

@@ -590,7 +590,7 @@ int main (void)
     int ok = 1;
     for (int l = 0; l <= tree_get_depth (); l++) {
       double sum = 0;
-      foreach_level_or_leaf (l) {
+      foreach_level_or_leaf (l, reduction (+:sum)) {
         double v = Delta;
         for (int a = 1; a < dimension; a++)
           v *= Delta;
@@ -599,7 +599,7 @@ int main (void)
       cover = fmax (cover, fabs (sum - vol));
       if (l <= tree_get_depth_min ()) {
         double full = 0;
-        foreach_level (l) {
+        foreach_level (l, reduction (+:full)) {
           double v = Delta;
           for (int a = 1; a < dimension; a++)
             v *= Delta;
@@ -678,7 +678,7 @@ int main (void)
           }
       foreach_level_or_leaf_colour (l, BAMR_BOTH)
         cnt[] += 1;
-      foreach_level_or_leaf (l)
+      foreach_level_or_leaf (l, reduction (min:ok))
         ok &= cnt[] == 2;
       foreach_level_or_leaf (l)
         q[] = 0;
@@ -686,7 +686,7 @@ int main (void)
       foreach_level_or_leaf_colour (l, BAMR_BOTH)
         q[] = q[-1] + 1;
       double lo = 1e30, hi = 0;
-      foreach_level_or_leaf (l)
+      foreach_level_or_leaf (l, reduction (max:hi) reduction (min:lo))
         lo = fmin (lo, q[]), hi = fmax (hi, q[]);
       ok &= lo == 1 && hi == tree_block_shape ().m;
     }

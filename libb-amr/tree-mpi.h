@@ -49,6 +49,12 @@
   ..                                 ()->leaves, each > 0, or NULL: 1 each.
   ..                                 Returns 0, -1 for npe < 1, a weight not
   ..                                 > 0 or a pruned tree (nothing changed)
+  ..   tree_partition_owner (p)      the process whose piece of the curve
+  ..                                 holds p, from the first keys alone
+  ..                                 (key_first): a leaf's, its pid; a
+  ..                                 node's, its first leaf's, so its pid
+  ..                                 too. p need not be in this process's
+  ..                                 tree
   ..   tree_get_partition ()         the last one made, NULL if none
   ..   tree_partition_valid ()       1 if made since the tree last changed
   ..   tree_partition_free ()        frees it (tree_destroy () does not)
@@ -168,11 +174,16 @@
                                leaf_first [r + 1] - 1 of tree_caches ()->
                                leaves, of the whole tree; npe + 1        */
     double * load;          /* the weight of each process's leaves       */
+    uint64_t * key_first;   /* the Morton key of each process's first
+                               leaf (tree_morton_key ()), the next one's
+                               for a process with none; npe + 1, the
+                               last UINT64_MAX                           */
     double imbalance;       /* the largest load over the mean, >= 1      */
     unsigned generation;    /* tree_generation when made                 */
   } TreePartition;
 
   int                   tree_partition (int npe, const double * weight);
+  int                   tree_partition_owner (Index p);
   const TreePartition * tree_get_partition (void);
   int                   tree_partition_valid (void);
   void                  tree_partition_free (void);

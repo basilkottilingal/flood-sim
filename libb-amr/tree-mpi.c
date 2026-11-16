@@ -28,8 +28,27 @@ void tree_partition_free (void)
 {
   free (part.leaf_first);
   free (part.load);
+  free (part.key_first);
   part = (TreePartition) { 0 };
   made = 0;
+}
+
+int tree_partition_owner (Index p)
+{
+  assert (made);
+  /* the last process whose first key is at most p's: an empty one has the
+   * next one's key, so it is passed over */
+  uint64_t key = tree_morton_key (p);
+  int lo = 0, hi = part.npe;          /* key_first [lo] <= key < [hi] */
+  while (hi - lo > 1)
+  {
+    int mid = (lo + hi) / 2;
+    if (part.key_first [mid] <= key)
+      lo = mid;
+    else
+      hi = mid;
+  }
+  return lo;
 }
 
 const TreePartition * tree_get_partition (void)
@@ -43,23 +62,32 @@ int tree_partition_valid (void)
 }
 
 /*
-.. the partition recorded from the leaves' pids, set already, and each
-.. process's load (taken)
+.. the partition recorded from the nodes' pids, set already, and each
+.. process's load (taken). The owners changed: the lists again (the
+.. leaves of this process)
 */
 static void partition_record (int npe, double * load)
 {
+  tree_caches_changed ();
   const TreeCaches * tc = tree_caches ();
   int n = tc->nleaves;
   int * first = malloc ((size_t) (npe + 1) * sizeof (int));
-  if (!first)
+  uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
+  if (!first || !key)
     abort ();
-  /* the first leaf of each process: pid does not decrease along the curve */
+  /* the first leaf of each process: pid does not decrease along the curve;
+   * its key, or the next process's for one with no leaf */
   for (int r = 0, q = 0; r <= npe; r++)
   {
     while (q < n && tc->leaves [q].node->pid < r)
       q++;
     first [r] = q;
   }
+  for (int r = npe; r >= 0; r--)
+    key [r] = r == npe ? UINT64_MAX
+            : first [r] < first [r + 1] ? tree_morton_key (tc->leaves [first [r]].p)
+            : key [r + 1];
+  key [0] = 0;                        /* the curve starts with process 0 */
   double total = 0, most = 0;
   for (int r = 0; r < npe; r++)
   {
@@ -69,6 +97,7 @@ static void partition_record (int npe, double * load)
   tree_partition_free ();
   part = (TreePartition) {
     .npe = npe, .nleaves = n, .leaf_first = first, .load = load,
+    .key_first = key,
     .imbalance = n ? most / (total / npe) : 1, .generation = tree_generation,
   };
   made = 1;

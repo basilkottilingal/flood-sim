@@ -53,7 +53,7 @@ static void refine_near (int to)
 static double net_flux (face_vector f)
 {
   double total = 0, scale = 0;
-  foreach () {
+  foreach (reduction (+:scale, total)) {
     double out = 0, area = 1;
     foreach_dimension ()
       out += f.x[1] - f.x[];
@@ -102,7 +102,7 @@ int main (void)
   /* each cell's lower faces, but on a wall, where the ghost is a mirror */
   double err = 0, g_x = 1, g_y = 2, g_z = 3;
   (void) g_y, (void) g_z;
-  foreach ()
+  foreach (reduction (max:err))
     foreach_dimension ()
       if (x > Delta)
         err = fmax (err, fabs (G.x[] - g_x));
@@ -113,7 +113,7 @@ int main (void)
   foreach_face ()
     P.x[] = (Real) x;
   double perr = 0;
-  foreach ()
+  foreach (reduction (max:perr))
     perr = fmax (perr, fabs (P.x[] - (x - 0.5 * Delta)));
   printf ("  face positions: error %.3g\n", perr);
   CHECK (perr < tol);
@@ -125,7 +125,7 @@ int main (void)
   foreach_face ()
     P.x[] = (Real) Delta;
   int finer = 0;
-  foreach ()
+  foreach (reduction (+:finer))
     finer += P.x[] < 0.75 * Delta;
   printf ("  read at the cell: %d lower faces from a finer region\n", finer);
   CHECK (finer > 0);

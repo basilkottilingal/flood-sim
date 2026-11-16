@@ -6,8 +6,11 @@
  * too: a block missing from the plan, or sent too early, leaves a NaN or a
  * different value; one pruned that is read, a crash (ASan). Leaves and
  * every node (parents too). The partition, made by rank 0 and broadcast,
- * against the same made by each process. Build with -D_MPI, run with
- * mpiexec -n 1, 2, 3, 4 ... */
+ * against the same made by each process; every node's owner from the
+ * first keys alone; each process's leaves, every leaf once over them;
+ * reductions over the processes, the whole tree once. MPI started by
+ * tree (). Build with -D_MPI, run with mpiexec -n 1, 2, 3, 4 ... */
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,12 +218,54 @@ static void compare (int parents)
   free (r1 [parents]), free (r2 [parents]);
 }
 
-int main (int argc, char ** argv)
+/* stencil loops with reduction (): every operator, a loop by axis, a loop
+ * over a level; sums start at START, which must count once */
+enum { START = 7 };
+struct sums { long cells, faces, levels, level2, prod; int lmin, lmax;
+              double xmin, xmax; int rmin, rmax; };
+static struct sums whole;
+static long whole_leaves;
+
+static struct sums reduced (void)
 {
-  MPI_Init (&argc, &argv);
+  long cells = START, faces = START, levels = 0, level2 = 0, prod = 1;
+  int lmin = 1 << 20, lmax = -1;
+  double xmin = 2, xmax = -1;
+  int rmin = 1 << 20, rmax = -1;      /* the ranks with cells: min and max
+                                       * differ from process to process */
+  foreach (reduction (+:cells, levels) reduction (*:prod)
+           reduction (min:lmin, xmin, rmin) reduction (max:lmax, xmax, rmax)) {
+    int l = (int) lround (log2 (1. / (Delta * tree_get_block_m ())));
+    cells++;
+    levels += l;
+    prod *= 1 + 2 * (x < Delta && y < Delta && z < Delta);  /* one cell */
+    lmin = l < lmin ? l : lmin;
+    lmax = l > lmax ? l : lmax;
+    xmin = x < xmin ? x : xmin;
+    xmax = x > xmax ? x : xmax;
+    int r = tree_rank ();
+    rmin = r < rmin ? r : rmin;
+    rmax = r > rmax ? r : rmax;
+  }
+  foreach_face (reduction (+:faces))
+    faces++;
+  foreach_level (2, reduction (+:level2))
+    level2++;
+  return (struct sums) { cells, faces, levels, level2, prod, lmin, lmax,
+                         xmin, xmax, rmin, rmax };
+}
+
+int main (void)
+{
+  /* MPI started by tree (), and finalised at exit */
+  int on = 0;
+  MPI_Initialized (&on);
+  tree (5, 4);
+  int now = 0;
+  MPI_Initialized (&now);
   MPI_Comm_rank (MPI_COMM_WORLD, &rank);
   MPI_Comm_size (MPI_COMM_WORLD, &npe);
-  tree (5, 4);
+  CHECK (!on && now);
   refine_sphere (dimension == 3 ? 2 : 3);
   list [nlist++] = a;
   list [nlist++] = F.x;
@@ -246,6 +291,8 @@ int main (int argc, char ** argv)
   CHECK (own);
   reference (0);
   reference (1);
+  whole = reduced ();
+  whole_leaves = tree_caches ()->nleaves;
 
   /* the partition each process would make, to compare with rank 0's */
   int * pid = malloc ((size_t) nnodes * sizeof (int));
@@ -256,9 +303,13 @@ int main (int argc, char ** argv)
   memcpy (first, tree_get_partition ()->leaf_first,
           (size_t) (npe + 1) * sizeof (int));
   double imbalance = tree_get_partition ()->imbalance;
+  uint64_t * keys = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
+  memcpy (keys, tree_get_partition ()->key_first,
+          (size_t) (npe + 1) * sizeof (uint64_t));
   tree_partition_free ();
   for (int q = 0; q < nnodes; q++)
     nodes [q].node->pid = rank;   /* this process's again: rank 0 tells */
+  tree_caches_changed ();
 
   CHECK (tree_mpi_partition (NULL) == 0);
   const TreeMpiPlan * plan = tree_mpi_plan ();
@@ -282,13 +333,63 @@ int main (int argc, char ** argv)
            && !memcmp (tp->leaf_first, first, (size_t) (npe + 1)
                                                 * sizeof (int)));
     CHECK (tree_caches ()->nall == nalive && tree_get_nblocks () == nalive);
-    long kept = nalive, sum;
-    MPI_Allreduce (&kept, &sum, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+    /* the owner of every node of the whole tree, freed here or not, from
+     * the first keys alone; the keys rank 0's, as made here */
+    int owners = !memcmp (tp->key_first, keys, (size_t) (npe + 1)
+                                                * sizeof (uint64_t));
+    for (int q = 0; q < nnodes; q++)
+      owners &= tree_partition_owner (nodes [q].p) == pid [q];
+    CHECK (owners);
+    /* the leaves of this process: those kept with its rank, in order;
+     * over the processes every leaf once */
+    const TreeCaches * tc = tree_caches ();
+    int listed = 1, k = 0;
+    for (int q = 0; q < nnodes; q++)
+      if (pid [q] == rank && alive [q]
+          && (nodes [q].node->flags & BAMR_NODE_LEAF)) {
+        listed &= k < tc->nowned && tc->owned [k].node == nodes [q].node;
+        k++;
+      }
+    listed &= k == tc->nowned;
+    long counts [2] = { tc->nowned, nalive }, sums [2];
+    MPI_Allreduce (counts, sums, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+    CHECK (listed && sums [0] == whole_leaves);
     if (rank == 0)
       printf ("  %.2f of the %d nodes kept by a process\n",
-              (double) sum / npe / nnodes, nnodes);
+              (double) sums [1] / npe / nnodes, nnodes);
   }
-  free (pid), free (first);
+  free (pid), free (first), free (keys);
+
+  /* reductions over the processes, each its own leaves now: the whole
+   * tree once. Before the partition each process owned all of it: npe
+   * times (the value before a loop counted once, rank 0's) */
+  {
+    struct sums got = reduced ();
+    /* the ranks with cells: from 0 to the last one with a leaf */
+    const TreePartition * tp = tree_get_partition ();
+    int last = npe - 1;
+    while (last > 0 && tp->leaf_first [last] == tp->leaf_first [last + 1])
+      last--;
+    CHECK (got.rmin == 0 && got.rmax == last && whole.rmin == 0
+           && whole.rmax == npe - 1);
+    long p = 1;
+    for (int r = 0; r < npe; r++)
+      p *= got.prod;
+    CHECK (got.cells - START == (whole.cells - START) / npe
+           && (whole.cells - START) % npe == 0
+           && got.faces - START == (whole.faces - START) / npe
+           && got.level2 * npe == whole.level2 && got.levels * npe == whole.levels
+           && got.prod == 3 && whole.prod == p
+           && got.lmin == whole.lmin && got.lmax == whole.lmax
+           && got.lmin < got.lmax
+           && got.xmin == whole.xmin && got.xmax == whole.xmax
+           && got.xmin < 0.05 && got.xmax > 0.95);
+    if (rank == 0)
+      printf ("  reductions: %ld cells, %ld faces, levels %d to %d, "
+              "corner %ld, level-2 cells %ld: the whole tree once\n",
+              got.cells - START, got.faces - START, got.lmin, got.lmax,
+              got.prod, got.level2);
+  }
 
   compare (0);
   compare (1);
@@ -307,6 +408,5 @@ int main (int argc, char ** argv)
   if (rank == 0)
     printf ("dimension %d, %d processes: %d checks, %d failed\n", dimension,
             npe, checks, ftot);
-  MPI_Finalize ();
-  return ftot != 0;
+  return ftot != 0;                   /* MPI_Finalize () at exit: tree ()'s */
 }

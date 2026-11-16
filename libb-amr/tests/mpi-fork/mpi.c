@@ -14,7 +14,7 @@
 
 enum { NP_MAX = 16, REQ_MAX = 1024 };
 
-static int me = 0, np = 1, fd [NP_MAX], initialized = 0;
+static int me = 0, np = 1, fd [NP_MAX], initialized = 0, finalized = 0;
 static pid_t child [NP_MAX];
 
 typedef struct
@@ -83,19 +83,44 @@ int MPI_Initialized (int * flag)
   return 0;
 }
 
+/* forked processes: any threading the caller does is its own */
+int MPI_Init_thread (int * argc, char *** argv, int required, int * provided)
+{
+  *provided = required;
+  return MPI_Init (argc, argv);
+}
+
+int MPI_Finalized (int * flag)
+{
+  *flag = finalized;
+  return 0;
+}
+
 int MPI_Finalize (void)
 {
+  finalized = 1;
   for (int r = 0; r < np; r++)
     if (r != me)
       close (fd [r]);
+  /* rank 0 waits for the others, and fails if one did: also when called
+   * at exit (atexit ()), where only _exit () may end the run */
+  int failed = 0;
   if (me == 0)
     for (int r = 1; r < np; r++)
     {
       int status = 0;
       waitpid (child [r], &status, 0);
       if (!WIFEXITED (status) || WEXITSTATUS (status))
+      {
         fprintf (stderr, "mpi-fork: rank %d failed\n", r);
+        failed = 1;
+      }
     }
+  if (failed)
+  {
+    fflush (stdout), fflush (stderr);
+    _exit (1);
+  }
   return 0;
 }
 
@@ -207,15 +232,31 @@ int MPI_Waitall (int n, MPI_Request * req, MPI_Status * status)
   }
 }
 
+/* the size of one item of type, 0 if not one of the stand-in's */
+static size_t type_size (MPI_Datatype type)
+{
+  switch (type)
+  {
+  case MPI_BYTE:               return 1;
+  case MPI_INT:                return sizeof (int);
+  case MPI_LONG:               return sizeof (long);
+  case MPI_DOUBLE:             return sizeof (double);
+  case MPI_LONG_LONG:          return sizeof (long long);
+  case MPI_UNSIGNED:           return sizeof (unsigned);
+  case MPI_UNSIGNED_LONG:      return sizeof (unsigned long);
+  case MPI_UNSIGNED_LONG_LONG: return sizeof (unsigned long long);
+  case MPI_FLOAT:              return sizeof (float);
+  default:                     return 0;
+  }
+}
+
 /* root sends to every other rank in turn */
 int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
                MPI_Comm comm)
 {
-  size_t size = type == MPI_BYTE ? 1 : type == MPI_INT ? sizeof (int)
-              : type == MPI_LONG ? sizeof (long)
-              : type == MPI_DOUBLE ? sizeof (double) : 0;
+  size_t size = type_size (type);
   if (!size || count < 0 || root < 0 || root >= np)
-    fail ("Bcast: MPI_BYTE, MPI_INT, MPI_LONG or MPI_DOUBLE from a rank");
+    fail ("Bcast: a type of the stand-in's, from a rank");
   int bytes = (int) ((size_t) count * size), tag = -2;
   MPI_Request q;
   if (me == root)
@@ -234,16 +275,43 @@ int MPI_Bcast (void * buf, int count, MPI_Datatype type, int root,
   return 0;
 }
 
+/* out [k] = out [k] op in [k], k < count, for items of type T */
+#define COMBINE(T)                                                      \
+  for (int k = 0; k < count; k++)                                       \
+  {                                                                     \
+    T a = ((T *) out) [k], b = ((const T *) in) [k];                    \
+    ((T *) out) [k] = op == MPI_SUM ? a + b : op == MPI_PROD ? a * b    \
+                    : op == MPI_MIN ? (b < a ? b : a) : (b > a ? b : a);\
+  }
+
+static void combine (void * out, const void * in, int count,
+                     MPI_Datatype type, MPI_Op op)
+{
+  switch (type)
+  {
+  case MPI_INT:                COMBINE (int); break;
+  case MPI_LONG:               COMBINE (long); break;
+  case MPI_DOUBLE:             COMBINE (double); break;
+  case MPI_LONG_LONG:          COMBINE (long long); break;
+  case MPI_UNSIGNED:           COMBINE (unsigned); break;
+  case MPI_UNSIGNED_LONG:      COMBINE (unsigned long); break;
+  case MPI_UNSIGNED_LONG_LONG: COMBINE (unsigned long long); break;
+  case MPI_FLOAT:              COMBINE (float); break;
+  default:                     fail ("Allreduce: a type of the stand-in's");
+  }
+}
+
+/* every rank's to rank 0, combined in rank order, sent back */
 int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
                    MPI_Op op, MPI_Comm comm)
 {
-  (void) comm;
-  if (op != MPI_SUM || (type != MPI_INT && type != MPI_LONG))
-    fail ("Allreduce: MPI_SUM of MPI_INT or MPI_LONG only");
-  size_t size = type == MPI_INT ? sizeof (int) : sizeof (long);
-  int bytes = (int) (count * size), tag = -1;
+  size_t size = type_size (type);
+  if (op < MPI_SUM || op > MPI_MAX || !size || type == MPI_BYTE || count < 0)
+    fail ("Allreduce: MPI_SUM, MPI_PROD, MPI_MIN or MPI_MAX of a type of "
+          "the stand-in's");
+  int bytes = (int) ((size_t) count * size), tag = -1;
   memcpy (out, in, (size_t) bytes);
-  char * buf = malloc ((size_t) bytes);
+  char * buf = malloc ((size_t) bytes + 1);
   MPI_Request q;
   if (me == 0)
   {
@@ -251,11 +319,7 @@ int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
     {
       MPI_Irecv (buf, bytes, MPI_BYTE, r, tag, comm, &q);
       MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
-      for (int k = 0; k < count; k++)
-        if (type == MPI_INT)
-          ((int *) out) [k] += ((int *) buf) [k];
-        else
-          ((long *) out) [k] += ((long *) buf) [k];
+      combine (out, buf, count, type, op);
     }
     for (int r = 1; r < np; r++)
     {

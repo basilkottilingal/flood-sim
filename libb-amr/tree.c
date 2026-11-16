@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <assert.h>
@@ -17,6 +18,9 @@
 /* the levels that hold terminal cells are the bits of a uint32_t */
 #if BAMR_MAX_DEPTH >= 32
 # error "BAMR_MAX_DEPTH must be below 32: tree.c keeps levels as bits of a uint32_t"
+#endif
+#if dimension * BAMR_MAX_DEPTH > 64
+# error "dimension * BAMR_MAX_DEPTH above 64: tree_morton_key () is a uint64_t"
 #endif
 
 /*
@@ -52,6 +56,32 @@ int tree_rank (void)
 {
   return G(rank);
 }
+
+void tree_reduce (void * v, int type, int op)
+{
+  assert (type >= TREE_INT && type <= TREE_DOUBLE);
+  assert (op >= TREE_SUM && op <= TREE_MAX);
+  #ifdef _MPI
+  if (G(npe) > 1)
+  {
+    static const MPI_Datatype types [] = {
+      MPI_INT, MPI_LONG, MPI_LONG_LONG, MPI_UNSIGNED, MPI_UNSIGNED_LONG,
+      MPI_UNSIGNED_LONG_LONG, MPI_FLOAT, MPI_DOUBLE,
+    };
+    static const size_t size [] = {
+      sizeof (int), sizeof (long), sizeof (long long), sizeof (unsigned),
+      sizeof (unsigned long), sizeof (unsigned long long), sizeof (float),
+      sizeof (double),
+    };
+    MPI_Op ops [] = { MPI_SUM, MPI_PROD, MPI_MIN, MPI_MAX };
+    char in [sizeof (long double)];
+    memcpy (in, v, size [type]);
+    MPI_Allreduce (in, v, 1, types [type], ops [op], MPI_COMM_WORLD);
+  }
+  #else
+  (void) v;
+  #endif
+}
 LevelIndex G(layers) [BAMR_MAX_DEPTH + 1] = {{0}};
 static Pool * pool_node = NULL;       /* the root, which has no siblings */
 
@@ -62,7 +92,7 @@ static Pool * pool_node = NULL;       /* the root, which has no siblings */
 static int caches_are_dirty = 1;
 unsigned tree_generation = 0;
 static TreeItem * c_all, * c_leaves, * c_by_level, * c_leaves_by_level,
-  * c_parents_by_level;
+  * c_parents_by_level, * c_owned;
 static int c_cap = 0;
 static TreeCaches caches;
 
@@ -103,8 +133,9 @@ void tree_destroy (void)
 {
   caches_changed ();
   free (c_all), free (c_leaves), free (c_by_level), free (c_leaves_by_level);
-  free (c_parents_by_level);
+  free (c_parents_by_level), free (c_owned);
   c_all = c_leaves = c_by_level = c_leaves_by_level = c_parents_by_level = NULL;
+  c_owned = NULL;
   c_cap = 0;
   for (int l = 0; l <= BAMR_MAX_DEPTH; ++l)
   {
@@ -337,6 +368,17 @@ int tree_coarsen (Index p)
   return 1;
 }
 
+#ifdef _MPI
+/* at exit, if tree () started MPI and nothing finalised it */
+static void mpi_finalize (void)
+{
+  int done = 0;
+  MPI_Finalized (&done);
+  if (!done)
+    MPI_Finalize ();
+}
+#endif
+
 static int grid_init (int depthmax, int blockdepth)
 {
   if (pool_node)
@@ -348,13 +390,17 @@ static int grid_init (int depthmax, int blockdepth)
   G (level_bits) = 0;
   G (npruned)    = 0;
   #ifdef _MPI
+  /* MPI, started here if the program did not: finalised at exit */
   int on = 0;
   MPI_Initialized (&on);
-  if (on)
+  if (!on)
   {
-    MPI_Comm_size (MPI_COMM_WORLD, &G(npe));
-    MPI_Comm_rank (MPI_COMM_WORLD, &G(rank));
+    int provided;
+    MPI_Init_thread (NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    atexit (mpi_finalize);
   }
+  MPI_Comm_size (MPI_COMM_WORLD, &G(npe));
+  MPI_Comm_rank (MPI_COMM_WORLD, &G(rank));
   #endif
   G (blockdepth) = blockdepth;
 
@@ -461,14 +507,16 @@ void tree_shift_resize (double x0, double y0, double z0, double h0)
 .. then each by level, still in that order */
 static void caches_update (void)
 {
-  int n = G(nb), na = 0, nl = 0, depth = 0;
+  int n = G(nb), na = 0, nl = 0, no = 0, depth = 0;
   if (n > c_cap) {
     c_all = realloc (c_all, (size_t) n * sizeof (TreeItem));
     c_leaves = realloc (c_leaves, (size_t) n * sizeof (TreeItem));
     c_by_level = realloc (c_by_level, (size_t) n * sizeof (TreeItem));
     c_leaves_by_level = realloc (c_leaves_by_level, (size_t) n * sizeof (TreeItem));
     c_parents_by_level = realloc (c_parents_by_level, (size_t) n * sizeof (TreeItem));
-    if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level || !c_parents_by_level)
+    c_owned = realloc (c_owned, (size_t) n * sizeof (TreeItem));
+    if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level || !c_parents_by_level
+        || !c_owned)
       abort ();
     c_cap = n;
   }
@@ -482,6 +530,8 @@ static void caches_update (void)
     if (node->flags & BAMR_NODE_LEAF) {
       c_leaves [nl++] = it;
       lcount [level]++;
+      if (node->pid == G(rank))
+        c_owned [no++] = it;
     }
     else if (tree_has_children (node))
       pcount [level]++;
@@ -508,6 +558,7 @@ static void caches_update (void)
   }
   caches.all = c_all, caches.nall = na;
   caches.leaves = c_leaves, caches.nleaves = nl;
+  caches.owned = c_owned, caches.nowned = no;
   caches.by_level = c_by_level;
   caches.leaves_by_level = c_leaves_by_level;
   caches.parents_by_level = c_parents_by_level;
@@ -525,6 +576,23 @@ const TreeCaches * tree_caches (void)
 void tree_caches_changed (void)
 {
   caches_changed ();
+}
+
+uint64_t tree_morton_key (Index p)
+{
+  assert (p.level >= 0 && p.level <= BAMR_MAX_DEPTH);
+  int s = BAMR_MAX_DEPTH - p.level;
+  uint64_t key = 0, x [3] = { (uint64_t) p.i << s, 0, 0 };
+  #if dimension > 1
+  x [1] = (uint64_t) p.j << s;
+  #endif
+  #if dimension > 2
+  x [2] = (uint64_t) p.k << s;
+  #endif
+  for (int b = 0; b < BAMR_MAX_DEPTH; b++)
+    for (int a = 0; a < dimension; a++)
+      key |= ((x [a] >> b) & 1) << (dimension * b + a);
+  return key;
 }
 
 void tree_changed_under (const char * loop)

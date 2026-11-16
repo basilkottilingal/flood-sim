@@ -58,13 +58,13 @@ int main (void)
 
   /* 1. every interior cell once, and a sum over them */
   long n = 0;
-  foreach () {
+  foreach (reduction (+:n)) {
     s[] = 2;
     n++;
   }
   CHECK (n == cells);
   double total = 0;
-  foreach ()
+  foreach (reduction (+:total))
     total += s[];
   CHECK (total == 2. * cells);
 
@@ -194,7 +194,7 @@ int main (void)
   CHECK (diff (s, q) < (sizeof (Real) == 4 ? 1e-3 : 1e-10));
   CHECK (x == 99);
   double dmin = 1e30, dmax = 0;          /* the refined leaf: Delta / 2 */
-  foreach () {
+  foreach (reduction (max:dmax) reduction (min:dmin)) {
     dmin = fmin (dmin, Delta);
     dmax = fmax (dmax, Delta);
   }

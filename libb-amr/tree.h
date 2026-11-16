@@ -1,6 +1,7 @@
 #ifndef _BAMR_H_
 #define _BAMR_H_
 
+  #include <stdint.h>
   #include "level-index.h"
   #include "real.h"
 
@@ -89,14 +90,29 @@
 
   /*
   .. The processes: kept in tree.c. With -D_MPI, those of MPI_COMM_WORLD,
-  .. read by tree () (after MPI_Init ()); without, constants: 1 process,
-  .. of rank 0.
+  .. read by tree (), which starts MPI first if the program has not
+  .. (MPI_Init_thread, MPI_THREAD_FUNNELED: MPI is called outside OpenMP's
+  .. regions) and then finalises it at exit; a program that called
+  .. MPI_Init () itself finalises it itself. Without -D_MPI, constants: 1
+  .. process, of rank 0.
   ..
   ..   tree_npe ()    the number of processes
   ..   tree_rank ()   this process's, 0 to tree_npe () - 1
   */
   int tree_npe (void);
   int tree_rank (void);
+
+  /*
+  .. tree_reduce (v, type, op): the value at v combined over the processes,
+  .. in place: what cwrap writes after a stencil loop with reduction (op:v)
+  .. (libc-pp README). type, from v's C type: TREE_INT, TREE_LONG, ...; op:
+  .. TREE_SUM, TREE_PROD, TREE_MIN, TREE_MAX. Nothing on one process.
+  */
+  enum { TREE_INT, TREE_LONG, TREE_LONG_LONG, TREE_UNSIGNED,
+         TREE_UNSIGNED_LONG, TREE_UNSIGNED_LONG_LONG, TREE_FLOAT,
+         TREE_DOUBLE };
+  enum { TREE_SUM, TREE_PROD, TREE_MIN, TREE_MAX };
+  void tree_reduce (void * v, int type, int op);
 
   /*
   .. The tree's nodes in lists, made again only after the tree changes
@@ -124,6 +140,11 @@
     int nall;
     const TreeItem * leaves;       /* the leaves                       */
     int nleaves;
+    const TreeItem * owned;        /* the leaves of this process (pid
+                                      == tree_rank ()), in the same
+                                      order: every leaf on one process,
+                                      what foreach () visits           */
+    int nowned;
     const TreeItem * by_level;     /* every node of level l: by_level
                                       [level_first [l] .. level_first
                                       [l + 1])                         */
@@ -143,6 +164,14 @@
   /* the lists to be made again, after flags that change them were set by
   .. hand. tree_generation changes too */
   void tree_caches_changed (void);
+
+  /*
+  .. tree_morton_key (p): the place of p on the Morton curve, from its
+  .. first cell at level BAMR_MAX_DEPTH, the bits of i, j, k interleaved (i
+  .. lowest). Leaves have distinct keys, in the order of tree_caches ()->
+  .. leaves; a node has its first leaf's.
+  */
+  uint64_t tree_morton_key (Index p);
 
   /*
   .. tree_node (IJKL): the node there, or NULL. tree_is_allocated (IJKL):

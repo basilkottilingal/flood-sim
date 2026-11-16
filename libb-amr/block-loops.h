@@ -76,7 +76,8 @@
   ..  'continue' goes to the next cell (or row) in all of them.
   ..
   ..  Over blocks: foreach_leaf () and foreach_leaf_parallel () visit every
-  ..  leaf block; block_table () gathers a scalar's blocks for gpu_cells ().
+  ..  leaf block of this process (every leaf on one process); block_table ()
+  ..  gathers a scalar's blocks for gpu_cells ().
   ..  A stencil reads the ghosts in place: cell_at (a, -1, 0) of a cell on
   ..  the edge of the interior is a ghost, valid after ghosts_update ().
   ..
@@ -594,17 +595,20 @@
   }
 
   /*
-  .. foreach_leaf () { ... }: every leaf block, in Morton order, with IJKL,
-  .. node and sblocks. 'continue' goes to the next leaf. It reads the tree's
-  .. list of leaves (tree_caches (), tree.h), made again only after the tree
-  .. changes: no walk. The tree must not change in it.
+  .. foreach_leaf () { ... }: every leaf block of this process, in Morton
+  .. order, with IJKL, node and sblocks: those with pid == tree_rank (),
+  .. every leaf on one process. 'continue' goes to the next leaf. It reads
+  .. the tree's list of them (tree_caches ()->owned, tree.h), made again
+  .. only after the tree or the owners change: no walk. The tree must not
+  .. change in it. The loops over faces and vertices, and so foreach (),
+  .. visit the same leaves.
   */
   @loop foreach_leaf () : IJKL, node, sblocks
   {
     const TreeCaches * tc = tree_caches ();
-    const TreeItem * items = tc->leaves;
+    const TreeItem * items = tc->owned;
     unsigned generation = tree_generation;
-    for (int q = 0, n = tc->nleaves; q < n; q++)
+    for (int q = 0, n = tc->nowned; q < n; q++)
     {
       if (tree_generation != generation)
         tree_changed_under ("foreach_leaf");
@@ -629,8 +633,8 @@
   @loop foreach_leaf_parallel () : IJKL, node, sblocks
   {
     const TreeCaches * tc = tree_caches ();
-    const TreeItem * items = tc->leaves;
-    int n = tc->nleaves;
+    const TreeItem * items = tc->owned;
+    int n = tc->nowned;
     BLOCK_PRAGMA (omp parallel for schedule (dynamic))
     for (int b = 0; b < n; b++)
     {
@@ -652,6 +656,9 @@
   ..                                    coarser than l, coarsest first, then
   ..                                    every node of level l
   ..
+  .. Of this process's nodes only (pid == tree_rank ()): every node on one
+  .. process.
+  ..
   .. Below tree_get_depth_min () the two are the same, every level being
   .. full. They give ghosts_by_caller: in the stencil loops over them
   .. (foreach_level (l), foreach_level_or_leaf (l), below) cwrap writes no
@@ -671,10 +678,13 @@
     int ghosts_by_caller = 1, L = block_level_clamp (l);
     (void) ghosts_by_caller;
     int q0 = L < 0 ? 0 : tc->level_first [L], q1 = L < 0 ? 0 : tc->level_first [L + 1];
+    int me = tree_rank ();
     for (int q = q0; q < q1; q++)
     {
       if (tree_generation != generation)
         tree_changed_under ("foreach_level");
+      if (tc->by_level [q].node->pid != me)
+        continue;                     /* another process's */
       INDEX_UNPACK (tc->by_level [q].p);
       BAMRNode * node = tc->by_level [q].node;
       void *** sblocks = node->s;
@@ -692,12 +702,15 @@
     /* the leaves of levels 0 .. L - 1, then the nodes of level L */
     int nleaf = L < 0 ? 0 : tc->leaf_first [L] - tc->leaf_first [0];
     int nlevel = L < 0 ? 0 : tc->level_first [L + 1] - tc->level_first [L];
+    int me = tree_rank ();
     for (int q = 0; q < nleaf + nlevel; q++)
     {
       if (tree_generation != generation)
         tree_changed_under ("foreach_level_or_leaf");
       const TreeItem * it = q < nleaf ? &tc->leaves_by_level [q]
                                       : &tc->by_level [tc->level_first [L] + q - nleaf];
+      if (it->node->pid != me)
+        continue;                     /* another process's */
       INDEX_UNPACK (it->p);
       BAMRNode * node = it->node;
       void *** sblocks = node->s;
@@ -828,9 +841,9 @@
   @loop foreach_leaf_faces (int axis) : IJKL, node, sblocks, face_last
   {
     const TreeCaches * tc = tree_caches ();
-    const TreeItem * items = tc->leaves;
+    const TreeItem * items = tc->owned;
     unsigned generation = tree_generation;
-    for (int q = 0, n = tc->nleaves; q < n; q++)
+    for (int q = 0, n = tc->nowned; q < n; q++)
     {
       if (tree_generation != generation)
         tree_changed_under ("foreach_face");
@@ -914,9 +927,9 @@
   @loop foreach_leaf_vertices () : IJKL, node, sblocks, vertex_walls
   {
     const TreeCaches * tc = tree_caches ();
-    const TreeItem * items = tc->leaves;
+    const TreeItem * items = tc->owned;
     unsigned generation = tree_generation;
-    for (int q = 0, n = tc->nleaves; q < n; q++)
+    for (int q = 0, n = tc->nowned; q < n; q++)
     {
       if (tree_generation != generation)
         tree_changed_under ("foreach_vertex");
@@ -989,9 +1002,11 @@
   enum { BAMR_GHOSTS = GHOSTS };
 
   /*
-  .. block_table (s, table, where): the blocks of scalar s in the leaves, in
-  .. Morton order, into table [0..], and their indices into where [0..] if
-  .. not NULL. Returns how many: tree_get_nleaves (). For gpu_cells (): with
+  .. block_table (s, table, where): the blocks of scalar s in the leaves of
+  .. this process (foreach_leaf ()'s), in Morton order, into table [0..],
+  .. and their indices into where [0..] if not NULL. Returns how many:
+  .. tree_caches ()->nowned, tree_get_nleaves () on one process. For
+  .. gpu_cells (): with
   .. table on the device, u [blk][c] is cell c of leaf blk.
   */
   static inline int block_table (int s, Real ** table, Index * where)
