@@ -347,6 +347,25 @@ tested in one process for any number of processes. With `-D_MPI`,
   Three rounds of messages in all, each between the processes that share
   a boundary. `tree_mpi_end ()` frees the plan and the partition; the tree
   stays pruned.
+- **`tree_mpi_repartition (weight)`** (milestone 3), on the distributed
+  tree, collective: weights for the leaves of this process
+  (`tree_caches ()->owned`, NULL: 1 each).
+  1. **The new cut by prefix sums:** the leaves and the weight before this
+     process's (`MPI_Exscan`), the totals (`MPI_Allreduce`); each leaf to
+     the process `tree_partition ()` would give it on the whole tree (in
+     integers for unit weights). Each process's first key, load and leaves
+     by one `MPI_Allreduce` each (min of the keys of its leaves).
+  2. **Migration:** every node of this process that changes hands (by the
+     new keys), sent to its new owner, whole: its index, whether a leaf,
+     the block of every scalar in use. The new owner makes it
+     (`tree_insert ()`, the leaves first, so that a parent comes as their
+     ancestor) and copies the blocks in.
+  3. **Then milestone 2's code:** every node's owner from the new keys,
+     pruning to the own nodes and ancestors, the halo by queries, the plan.
+
+  It returns the nodes this process sent. Integer weights give the whole
+  tree's cut bit for bit; other weights may differ at a tie, the sums
+  being made in another order.
 - **In `ghosts_update_list ()`** (`#ifdef _MPI`, with a plan applied): the
   exchange before each restriction level and each ghost level, at the
   plan's levels. Without `_MPI`, every node has pid 0 = rank: nothing
@@ -484,7 +503,40 @@ global cell index exact in every ghost inside the domain after
 | the owner from the asking node, not the index | crash | crash |
 
 "crash": a rank stops (an assertion, ASan, a node asked of a process that
-does not own it, or a message the stand-in did not expect). The pruned
+does not own it, or a message the stand-in did not expect).
+
+Milestone 3 (`tree_mpi_repartition ()`). `test_mpi` takes a second oracle
+from the whole tree, with integer weights from each leaf's key (7 or 8 on
+the second half of the curve, 1 or 2 on the first, so that the cut moves
+far). After the first distribution it fills a field `d` on every node of
+each process (`foreach_level ()`, parents too) and poisons every other
+block of it. A repartition with unit weights must move nothing and leave
+the first oracle's plan; one with the weights must give the second
+oracle's cut (loads, leaf counts, first keys, imbalance), pids, nodes and
+plan entry for entry; `d` exact on every node of its new owner; every
+other scalar on the leaves as the last update left it (made again by
+`fill ()` and the same update); and the ghosts bit for bit. 1-3D, float
+on 1, 3, 7, 13, 16 ranks, double on 2, 5, 13 (3D: 5): all pass. Moved,
+of the whole tree's nodes: 2D 85 of 197 on 3 ranks, 174 on 16; 3D 222 of
+521 on 3, 465 on 16, with 44 million cells compared.
+
+| bug (one line) | mpi np 3, 7 (2D, 3D) | 1D np 13 |
+|---|---|---|
+| `MPI_Exscan` ignored: every rank counts from 0 | 35, 83; 19, 83 | |
+| the weights ignored | 21, 48; 21, 49 | |
+| the cut by the running sum, not the leaf's middle | 16, 38; 0, 34 | |
+| an empty process keeps its own key | 0 | 131 |
+| the parents not sent | 3, 7 | 13 |
+| the blocks not copied in | 3, 7 | |
+| one scalar short | 3, 7 | 13 |
+| a leaf received made pruned | crash | |
+| the pids by the old partition | crash | |
+| the halo not made again | crash | |
+| the imbalance from the local load | 5, 13; 2, 12 | |
+
+The empty process, the parents and the scalar left out were caught by
+nothing until the test had more processes than leaves (1D, 13 ranks, in
+`tests/run.sh` now) and checked every node and every scalar. The pruned
 count was caught by nothing until the test counted the flags. The local
 levels differ only where a process lacks the finest or coarsest leaves:
 none of the test's trees but 3D on 16 ranks has one.
@@ -525,8 +577,9 @@ processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
 - `tree_mpi_partition ()` still starts from a whole tree on every process
   (`tree ()`'s coarse uniform one, or `tree_replicated ()`'s), and rank 0
-  partitions it. Moving blocks to new owners (milestone 3) and adapting
-  (milestone 4) will start from the distributed tree instead.
+  partitions it; `tree_mpi_repartition ()` works on the distributed tree.
+  Adapting (milestone 4) is next: it will refine and coarsen the
+  distributed tree, then repartition.
 - With `tree_replicated ()`, a reduction before the partition counts the
   tree npe times: every process owns all of it then.
 - Writes through a pointer, a member or a subscript in a stencil loop
@@ -1500,14 +1553,11 @@ plans, pruning that frees the subtrees, the exchange in
 `ghosts_update_list ()`, loops over owned leaves with reductions
 (milestone 1), and `tree ()` distributing at once, each process finding
 its halo by queries to the owners and making its plan from what it holds
-(milestone 2) ("MPI: partition, plans, pruning" above). The distributed
-tree (plan B, milestones 3-5) next:
+(milestone 2), and repartition with the blocks moved (milestone 3) ("MPI:
+partition, plans, pruning" above). The distributed tree (plan B,
+milestones 4-5) next:
 
-1. **Migration (milestone 3).** A new partition computed on the
-   distributed tree (prefix sums of the weights, `MPI_Exscan`), each
-   leaf's new owner from it; the blocks sent to their new owners, which
-   make the nodes (`tree_insert ()`); the old copies pruned; the halo and
-   the plan made again (milestone 2's code).
+1. **Migration (milestone 3), done:** `tree_mpi_repartition ()`.
 2. **Adapting (milestone 4).** `adapt_wavelet ()` on each process's leaves;
    2:1 balance across processes by rounds of requests until none is left;
    coarsening local (families of leaves never split by the partition);

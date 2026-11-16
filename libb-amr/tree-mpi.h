@@ -152,6 +152,23 @@
   ..                                exchanges on, every scalar marked stale.
   ..                                Returns 0, -1 if rank 0's tree_partition
   ..                                () refused (nothing changed)
+  ..   tree_mpi_repartition (weight)
+  ..                                on the distributed tree, collective: a
+  ..                                new cut by weight [q] for each leaf q
+  ..                                of tree_caches ()->owned (NULL: 1
+  ..                                each), by prefix sums (MPI_Exscan),
+  ..                                each leaf where tree_partition () on
+  ..                                the whole tree would put it; every
+  ..                                node that changes hands sent to its
+  ..                                new owner with its blocks (every
+  ..                                scalar), made there (tree_insert ());
+  ..                                then the halo and the plan again.
+  ..                                Returns the nodes this process sent,
+  ..                                -1 if a weight is not > 0 anywhere or
+  ..                                no partition was made (nothing done).
+  ..                                Integer weights give the whole tree's
+  ..                                cut exactly; others may differ at a
+  ..                                tie, the sums being in another order
   ..   tree_mpi_end ()              exchanges off, the plan and partition
   ..                                freed; the tree stays pruned
   ..   tree_mpi_plan ()             the plan applied, NULL if none
@@ -235,6 +252,7 @@
   /* 5. MPI */
   #ifdef _MPI
   int                 tree_mpi_partition (const double * weight);
+  int                 tree_mpi_repartition (const double * weight);
   void                tree_mpi_end (void);
   const TreeMpiPlan * tree_mpi_plan (void);
   void                tree_mpi_exchange (int parents, int kind, int level,

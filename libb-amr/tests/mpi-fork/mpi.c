@@ -325,6 +325,36 @@ static void combine (void * out, const void * in, int count,
   }
 }
 
+/* rank r gets the values of ranks 0 .. r - 1 combined, in rank order;
+ * rank 0's out is left as it was (undefined, as MPI's) */
+int MPI_Exscan (const void * in, void * out, int count, MPI_Datatype type,
+                MPI_Op op, MPI_Comm comm)
+{
+  size_t size = type_size (type);
+  if (op < MPI_SUM || op > MPI_MAX || !size || type == MPI_BYTE || count < 0)
+    fail ("Exscan: MPI_SUM, MPI_PROD, MPI_MIN or MPI_MAX of a type of the "
+          "stand-in's");
+  int bytes = (int) ((size_t) count * size), tag = -4;
+  char * buf = malloc ((size_t) bytes + 1);
+  MPI_Request q;
+  for (int r = me + 1; r < np; r++)
+  {
+    MPI_Isend (in, bytes, MPI_BYTE, r, tag, comm, &q);
+    MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
+  }
+  for (int r = 0; r < me; r++)
+  {
+    MPI_Irecv (buf, bytes, MPI_BYTE, r, tag, comm, &q);
+    MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
+    if (r == 0)
+      memcpy (out, buf, (size_t) bytes);
+    else
+      combine (out, buf, count, type, op);
+  }
+  free (buf);
+  return 0;
+}
+
 /* every rank's to rank 0, combined in rank order, sent back */
 int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
                    MPI_Op op, MPI_Comm comm)

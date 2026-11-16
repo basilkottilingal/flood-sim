@@ -22,6 +22,7 @@
 scalar a;
 face_vector F;
 vertex_scalar v;
+scalar d;                        /* moved with its blocks: milestone 3 */
 
 static int checks, fails, rank, npe;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; \
@@ -247,7 +248,6 @@ static void compare (int parents)
     printf ("  parents %d: %ld cells compared, %ld differ; %ld blocks "
             "received (of %d nodes)\n", parents, sum [0], sum [1], total,
             nnodes);
-  free (r1 [parents]), free (r2 [parents]);
 }
 
 /* stencil loops with reduction (): every operator, a loop by axis, a loop
@@ -285,6 +285,171 @@ static struct sums reduced (void)
     level2++;
   return (struct sums) { cells, faces, levels, level2, prod, lmin, lmax,
                          xmin, xmax, rmin, rmax };
+}
+
+/* a weight for leaf p, from its key: 7 or 8 on the second half of the
+ * curve, 1 or 2 on the first, so that the cut moves far; integers, so that
+ * sums are exact in any order */
+static double weight_of (Index p)
+{
+  uint64_t key = tree_morton_key (p);
+  int second = (key >> (dimension * BAMR_MAX_DEPTH - 1)) & 1;
+  return 1 + 6 * second + (double) ((key * 2654435761u >> 7) % 2);
+}
+
+/*
+.. an oracle, from the whole tree, for weights w (of the whole tree's
+.. leaves, NULL: 1 each): the pids, the partition (tree_partition ()),
+.. the plan (tree_mpi_plan_new ()), what is needed (its own and what it
+.. receives), and so what a process keeps: the root, and every node whose
+.. parent has something needed strictly below; a needed node has children
+.. iff something needed is below it
+*/
+typedef struct {
+  int * pid, * first, * oflags, nwant, nkeep, depth [2];
+  uint64_t * keys;
+  double imbalance, * load;
+  Entry * want;
+  char * need, * below, * keep;
+} Oracle;
+
+static Oracle oracle_of (const double * w)
+{
+  Oracle o;
+  CHECK (tree_partition (npe, w) == 0);
+  const TreePartition * tp = tree_get_partition ();
+  o.pid = malloc ((size_t) nnodes * sizeof (int));
+  o.first = malloc ((size_t) (npe + 1) * sizeof (int));
+  o.keys = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
+  o.load = malloc ((size_t) npe * sizeof (double));
+  for (int q = 0; q < nnodes; q++)
+    o.pid [q] = nodes [q].node->pid;
+  memcpy (o.first, tp->leaf_first, (size_t) (npe + 1) * sizeof (int));
+  memcpy (o.keys, tp->key_first, (size_t) (npe + 1) * sizeof (uint64_t));
+  memcpy (o.load, tp->load, (size_t) npe * sizeof (double));
+  o.imbalance = tp->imbalance;
+  TreeMpiPlan * plan = tree_mpi_plan_new (rank);
+  o.depth [0] = plan->depth, o.depth [1] = plan->depth_min;
+  o.nwant = entries_of (plan, &o.want);
+  tree_mpi_plan_free (plan);
+  o.need = calloc ((size_t) nnodes, 1);
+  o.below = calloc ((size_t) nnodes, 1);
+  o.keep = calloc ((size_t) nnodes, 1);
+  o.oflags = malloc ((size_t) nnodes * sizeof (int));
+  o.nkeep = 0;
+  for (int q = 0; q < nnodes; q++)
+    o.need [q] = o.pid [q] == rank, o.oflags [q] = nodes [q].node->flags;
+  for (int k = 0; k < o.nwant; k++)
+    if (!o.want [k].send)
+      o.need [position (o.want [k].p)] = 1;
+  for (int q = 0; q < nnodes; q++)
+    for (Index p = nodes [q].p; o.need [q] && p.level > 0; ) {
+      p = index_parent (p);
+      o.below [position (p)] = 1;
+    }
+  for (int q = 0; q < nnodes; q++) {
+    o.keep [q] = !nodes [q].p.level
+                 || o.below [position (index_parent (nodes [q].p))];
+    o.nkeep += o.keep [q];
+  }
+  tree_partition_free ();
+  return o;
+}
+
+static void oracle_free (Oracle * o)
+{
+  free (o->pid), free (o->first), free (o->keys), free (o->load);
+  free (o->want), free (o->need), free (o->below), free (o->keep);
+  free (o->oflags);
+}
+
+/*
+.. the distributed tree against an oracle, made from the queries, not the
+.. whole tree: the plan the oracle's, entry for entry; the nodes kept, by
+.. index, the oracle's; their pids; a needed node a leaf, a parent or
+.. pruned as there; the counts; the partition and its keys; the leaves of
+.. this process. The nodes are found again by index (nodes [], alive []):
+.. those freed and made again are others
+*/
+static void check_oracle (const Oracle * o, const char * what)
+{
+  const TreeMpiPlan * plan = tree_mpi_plan ();
+  CHECK (npe == 1 || (plan && plan->rank == rank && plan->npe == npe));
+  if (!plan)
+    return;
+  Entry * got;
+  int ngot = entries_of (plan, &got), equal = ngot == o->nwant;
+  for (int k = 0; k < ngot && equal; k++)
+    equal = got [k].parents == o->want [k].parents
+            && got [k].kind == o->want [k].kind
+            && got [k].level == o->want [k].level
+            && got [k].send == o->want [k].send
+            && got [k].peer == o->want [k].peer
+            && same_index (got [k].p, o->want [k].p);
+  CHECK (equal && plan->depth == o->depth [0]
+         && plan->depth_min == o->depth [1]);
+  free (got);
+  const TreePartition * tp = tree_get_partition ();
+  int kept = 1, pids = 1, flags = 1, nalive = 0;
+  for (int q = 0; q < nnodes; q++) {
+    BAMRNode * here = index_is_allocated (nodes [q].p)
+                      ? index_node (nodes [q].p) : NULL;
+    kept &= (here != NULL) == o->keep [q];
+    pids &= !here || here->pid == o->pid [q];
+    if (here && o->need [q]) {
+      int f = here->flags & (BAMR_NODE_LEAF | BAMR_NODE_HAS_CHILDREN
+                             | BAMR_NODE_IS_PRUNED);
+      int w = (o->oflags [q] & BAMR_NODE_LEAF) ? BAMR_NODE_LEAF
+              : o->below [q] ? BAMR_NODE_HAS_CHILDREN : BAMR_NODE_IS_PRUNED;
+      flags &= f == w;
+    }
+    nodes [q].node = here;
+    alive [q] = here != NULL;
+    nalive += alive [q];
+  }
+  CHECK (kept && pids && flags);
+  /* the counts the tree keeps, against its flags */
+  const TreeCaches * tc = tree_caches ();
+  int npr = 0, nlf = 0;
+  for (int q = 0; q < tc->nall; q++) {
+    npr += (tc->all [q].node->flags & BAMR_NODE_IS_PRUNED) != 0;
+    nlf += (tc->all [q].node->flags & BAMR_NODE_LEAF) != 0;
+  }
+  CHECK (npr == tree_pruned () && nlf == tree_get_nleaves ()
+         && nlf == tc->nleaves);
+  CHECK (tc->nall == o->nkeep && tree_get_nblocks () == o->nkeep);
+  /* the partition rank 0's (or the prefix sums'), as the oracle's; the
+   * owner of every node of the whole tree, freed here or not, from the
+   * first keys alone */
+  int loads = 1;
+  for (int r = 0; r < npe; r++)
+    loads &= fabs (tp->load [r] - o->load [r]) <= 1e-12 * o->load [r];
+  CHECK (tp && tp->npe == npe && loads
+         && fabs (tp->imbalance - o->imbalance) <= 1e-12 * o->imbalance
+         && !memcmp (tp->leaf_first, o->first, (size_t) (npe + 1)
+                                              * sizeof (int))
+         && !memcmp (tp->key_first, o->keys, (size_t) (npe + 1)
+                                             * sizeof (uint64_t)));
+  int owners = 1;
+  for (int q = 0; q < nnodes; q++)
+    owners &= tree_partition_owner (nodes [q].p) == o->pid [q];
+  CHECK (owners);
+  /* the leaves of this process: those kept with its rank, in order;
+   * over the processes every leaf once */
+  int listed = 1, k = 0;
+  for (int q = 0; q < nnodes; q++)
+    if (o->pid [q] == rank && alive [q]
+        && (nodes [q].node->flags & BAMR_NODE_LEAF)) {
+      listed &= k < tc->nowned && tc->owned [k].node == nodes [q].node;
+      k++;
+    }
+  listed &= k == tc->nowned;
+  long counts [2] = { tc->nowned, nalive }, sums [2];
+  MPI_Allreduce (counts, sums, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  CHECK (listed && sums [0] == whole_leaves);
+  if (rank == 0)
+    printf ("  %s: %.2f of the %d nodes kept by a process, imbalance %.3f\n",
+            what, (double) sums [1] / npe / nnodes, nnodes, tp->imbalance);
 }
 
 int main (void)
@@ -327,135 +492,19 @@ int main (void)
   whole = reduced ();
   whole_leaves = tree_caches ()->nleaves;
 
-  /* the partition each process would make, to compare with rank 0's */
-  int * pid = malloc ((size_t) nnodes * sizeof (int));
-  int * first = malloc ((size_t) (npe + 1) * sizeof (int));
-  CHECK (tree_partition (npe, NULL) == 0);
-  for (int q = 0; q < nnodes; q++)
-    pid [q] = nodes [q].node->pid;
-  memcpy (first, tree_get_partition ()->leaf_first,
-          (size_t) (npe + 1) * sizeof (int));
-  double imbalance = tree_get_partition ()->imbalance;
-  uint64_t * keys = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
-  memcpy (keys, tree_get_partition ()->key_first,
-          (size_t) (npe + 1) * sizeof (uint64_t));
-
-  /*
-  .. the oracle, from the whole tree: the plan (tree_mpi_plan_new ()),
-  .. what is needed (its own and what it receives), and so what a process
-  .. keeps: the root, and every node whose parent has something needed
-  .. strictly below; a needed node has children iff something needed is
-  .. below it
-  */
-  TreeMpiPlan * oracle = tree_mpi_plan_new (rank);
-  int oracle_depth [2] = { oracle->depth, oracle->depth_min };
-  Entry * want;
-  int nwant = entries_of (oracle, &want);
-  char * need = calloc ((size_t) nnodes, 1);
-  char * below = calloc ((size_t) nnodes, 1);
-  char * keep = calloc ((size_t) nnodes, 1);
-  int * oflags = malloc ((size_t) nnodes * sizeof (int)), nkeep = 0;
-  for (int q = 0; q < nnodes; q++)
-    need [q] = pid [q] == rank, oflags [q] = nodes [q].node->flags;
-  for (int k = 0; k < nwant; k++)
-    if (!want [k].send)
-      need [position (want [k].p)] = 1;
-  for (int q = 0; q < nnodes; q++)
-    for (Index p = nodes [q].p; need [q] && p.level > 0; ) {
-      p = index_parent (p);
-      below [position (p)] = 1;
-    }
-  for (int q = 0; q < nnodes; q++) {
-    keep [q] = !nodes [q].p.level
-              || below [position (index_parent (nodes [q].p))];
-    nkeep += keep [q];
-  }
-  tree_mpi_plan_free (oracle);
-  tree_partition_free ();
+  /* the oracles, from the whole tree: unit weights, then weights by
+   * index, the whole tree's leaves in order */
+  double * w = malloc ((size_t) whole_leaves * sizeof (double));
+  for (int q = 0; q < whole_leaves; q++)
+    w [q] = weight_of (tree_caches ()->leaves [q].p);
+  Oracle unit = oracle_of (NULL), weighted = oracle_of (w);
+  free (w);
   for (int q = 0; q < nnodes; q++)
     nodes [q].node->pid = rank;   /* this process's again: rank 0 tells */
   tree_caches_changed ();
 
   CHECK (tree_mpi_partition (NULL) == 0);
-  const TreeMpiPlan * plan = tree_mpi_plan ();
-  CHECK (plan && plan->rank == rank && plan->npe == npe);
-  CHECK (npe > 1 ? tree_pruned () > 0 : !tree_pruned ());
-  {
-    /*
-    .. made from the queries, not the whole tree: the plan the oracle's,
-    .. entry for entry; the nodes kept, by index, the oracle's; their
-    .. pids; a needed node a leaf, a parent or pruned as there. The nodes
-    .. are found again by index: those freed and made again are others
-    */
-    Entry * got;
-    int ngot = entries_of (plan, &got), equal = ngot == nwant;
-    for (int k = 0; k < ngot && equal; k++)
-      equal = got [k].parents == want [k].parents && got [k].kind == want [k].kind
-              && got [k].level == want [k].level && got [k].send == want [k].send
-              && got [k].peer == want [k].peer
-              && same_index (got [k].p, want [k].p);
-    CHECK (equal && plan->depth == oracle_depth [0]
-           && plan->depth_min == oracle_depth [1]);
-    const TreePartition * tp = tree_get_partition ();
-    int kept = 1, pids = 1, flags = 1, nalive = 0;
-    for (int q = 0; q < nnodes; q++) {
-      BAMRNode * here = index_is_allocated (nodes [q].p)
-                        ? index_node (nodes [q].p) : NULL;
-      kept &= (here != NULL) == keep [q];
-      pids &= !here || here->pid == pid [q];
-      if (here && need [q]) {
-        int f = here->flags & (BAMR_NODE_LEAF | BAMR_NODE_HAS_CHILDREN
-                               | BAMR_NODE_IS_PRUNED);
-        int w = (oflags [q] & BAMR_NODE_LEAF) ? BAMR_NODE_LEAF
-                : below [q] ? BAMR_NODE_HAS_CHILDREN : BAMR_NODE_IS_PRUNED;
-        flags &= f == w;
-      }
-      nodes [q].node = here;
-      alive [q] = here != NULL;
-      nalive += alive [q];
-    }
-    CHECK (kept && pids && flags);
-    /* the counts the tree keeps, against its flags */
-    const TreeCaches * tcc = tree_caches ();
-    int npr = 0, nlf = 0;
-    for (int q = 0; q < tcc->nall; q++) {
-      npr += (tcc->all [q].node->flags & BAMR_NODE_IS_PRUNED) != 0;
-      nlf += (tcc->all [q].node->flags & BAMR_NODE_LEAF) != 0;
-    }
-    CHECK (npr == tree_pruned () && nlf == tree_get_nleaves ()
-           && nlf == tcc->nleaves);
-    CHECK (tp && tp->npe == npe && tp->imbalance == imbalance
-           && !memcmp (tp->leaf_first, first, (size_t) (npe + 1)
-                                                * sizeof (int)));
-    CHECK (tree_caches ()->nall == nkeep && tree_get_nblocks () == nkeep);
-    free (got);
-    /* the owner of every node of the whole tree, freed here or not, from
-     * the first keys alone; the keys rank 0's, as made here */
-    int owners = !memcmp (tp->key_first, keys, (size_t) (npe + 1)
-                                                * sizeof (uint64_t));
-    for (int q = 0; q < nnodes; q++)
-      owners &= tree_partition_owner (nodes [q].p) == pid [q];
-    CHECK (owners);
-    /* the leaves of this process: those kept with its rank, in order;
-     * over the processes every leaf once */
-    const TreeCaches * tc = tree_caches ();
-    int listed = 1, k = 0;
-    for (int q = 0; q < nnodes; q++)
-      if (pid [q] == rank && alive [q]
-          && (nodes [q].node->flags & BAMR_NODE_LEAF)) {
-        listed &= k < tc->nowned && tc->owned [k].node == nodes [q].node;
-        k++;
-      }
-    listed &= k == tc->nowned;
-    long counts [2] = { tc->nowned, nalive }, sums [2];
-    MPI_Allreduce (counts, sums, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
-    CHECK (listed && sums [0] == whole_leaves);
-    if (rank == 0)
-      printf ("  %.2f of the %d nodes kept by a process\n",
-              (double) sums [1] / npe / nnodes, nnodes);
-  }
-  free (pid), free (first), free (keys);
-  free (want), free (need), free (below), free (keep), free (oflags);
+  check_oracle (&unit, "partition");
 
   /* reductions over the processes, each its own leaves now: the whole
    * tree once. Before the partition each process owned all of it: npe
@@ -490,6 +539,88 @@ int main (void)
 
   compare (0);
   compare (1);
+
+  /*
+  .. repartition on the distributed tree (milestone 3). A field d, filled
+  .. on this process's leaves, every other block of it poisoned (NaN):
+  .. after a repartition, a leaf that came here without its data shows.
+  .. Unit weights again: the same cut, nothing sent, the same plan. Then
+  .. weights by index: the oracle's cut, plan and nodes; d exact on every
+  .. leaf of this process; the ghosts again bit for bit
+  */
+  for (int l = 0; l <= BAMR_MAX_DEPTH; l++)     /* every node: parents too */
+    foreach_level (l)
+      d[] = sin (5 * x + 0.3) + cos (3 * y) * z;
+  for (int q = 0; q < nnodes; q++)
+    if (alive [q]) {
+      BAMRNode * node = nodes [q].node;
+      int mine = node->pid == rank;
+      Real * b = block_data (node->s, d);
+      for (long c = 0; c < cells; c++)
+        if (!mine || !owned (tree_block_shape (), CWRAP_CENTRE, c))
+          b [c] = (Real) NAN;
+    }
+  long moved = tree_mpi_repartition (NULL), allmoved;
+  MPI_Allreduce (&moved, &allmoved, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  CHECK (allmoved == 0);
+  check_oracle (&unit, "unit weights again");
+  {
+    const TreeCaches * tc = tree_caches ();
+    int nw = tc->nowned;
+    double * wo = malloc ((size_t) (nw ? nw : 1) * sizeof (double));
+    for (int q = 0; q < nw; q++)
+      wo [q] = weight_of (tc->owned [q].p);
+    moved = tree_mpi_repartition (wo);
+    free (wo);
+  }
+  MPI_Allreduce (&moved, &allmoved, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  CHECK (npe == 1 ? allmoved == 0 : allmoved > 0);
+  check_oracle (&weighted, "weights");
+  {
+    /* d on every node of this process, parents too, as filled */
+    long bad = 0, seen = 0, all [2], mine [2];
+    for (int l = 0; l <= BAMR_MAX_DEPTH; l++)
+      foreach_level (l, reduction (+:bad, seen)) {
+        bad += !(d[] == (Real) (sin (5 * x + 0.3) + cos (3 * y) * z));
+        seen++;
+      }
+    /* every other scalar too, on the leaves: the values the last update
+     * left, which fill () and the same update make again (a refluxed face
+     * is the mean of the fine faces beside it) */
+    BlockShape sh = tree_block_shape ();
+    const TreeCaches * tc = tree_caches ();
+    Real * kept = malloc ((size_t) (tc->nowned ? tc->nowned : 1) * nlist
+                          * cells * sizeof (Real));
+    for (int q = 0; q < tc->nowned; q++)
+      for (int k = 0; k < nlist; k++)
+        memcpy (kept + ((size_t) q * nlist + k) * cells,
+                block_data (tc->owned [q].node->s, list [k]),
+                cells * sizeof (Real));
+    fill ();
+    ghosts_update_list (nlist, list, 1);
+    tc = tree_caches ();
+    for (int q = 0; q < tc->nowned; q++)
+      for (int k = 0; k < nlist; k++) {
+        const Real * b = block_data (tc->owned [q].node->s, list [k]);
+        const Real * o = kept + ((size_t) q * nlist + k) * cells;
+        for (long c = 0; c < cells; c++)
+          if (owned (sh, scalar_location (list [k]), c))
+            bad += memcmp (&b [c], &o [c], sizeof (Real)) != 0, seen++;
+      }
+    free (kept);
+    mine [0] = bad, mine [1] = seen;
+    MPI_Allreduce (mine, all, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+    CHECK (all [0] == 0 && all [1] > 0);
+    if (rank == 0)
+      printf ("  %ld nodes moved; every scalar on every node of its owner "
+              "as before: %ld of %ld cells wrong\n", allmoved, all [0],
+              all [1]);
+  }
+  compare (0);
+  compare (1);
+  oracle_free (&unit), oracle_free (&weighted);
+  for (int p = 0; p < 2; p++)
+    free (r1 [p]), free (r2 [p]);
 
   /* off: the tree stays pruned; an update makes its own nodes, no crash */
   int npruned = tree_pruned ();

@@ -152,7 +152,9 @@ for prec in "" "-DBAMR_SINGLE"; do
     run vertices $d "$prec" tests/test_vertices.c "$lib/tree.c" $src
     run partition $d "$prec" tests/test_partition.c "$lib/tree.c" "$lib/tree-mpi.c" $src
     # with -D_MPI, on processes forked by the stand-in tests/mpi-fork
-    for np in 1 3; do
+    # 1D on 13 processes too: more than its 12 leaves, some own none
+    nps="1 3"; [ "$d" = 1 ] && nps="1 3 13"
+    for np in $nps; do
       runenv=MPI_FORK_NP=$np
       run mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_mpi.c "$lib/tree.c" \
         "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
