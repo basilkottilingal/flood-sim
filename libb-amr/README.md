@@ -713,24 +713,66 @@ processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
 ### Not done yet
 
-- `tree_mpi_partition ()` still starts from a whole tree on every process
-  (`tree ()`'s coarse uniform one, or `tree_replicated ()`'s), and rank 0
-  partitions it; `tree_mpi_repartition ()` works on the distributed tree.
-  Adapting (milestone 4) is next: it will refine and coarsen the
-  distributed tree, then repartition.
-- With `tree_replicated ()`, a reduction before the partition counts the
-  tree npe times: every process owns all of it then.
-- Writes through a pointer, a member or a subscript in a stencil loop
-  (`*e = ...`, `same [k] += ...`) are not reductions: serial only.
-- `tree_refine ()` and `tree_coarsen ()` called by hand on a distributed
-  tree still stop the run: adapting goes through `adapt_wavelet ()`.
-- A face or vertex scalar coarsened on several processes may differ from
-  one process in the last bits (see "Adapting the distributed tree").
-- `ghosts_update_level ()` (multigrid) and `block_ghosts ()` called alone
-  do not exchange.
-- Memory: a process still builds the whole tree before pruning. In the end
-  each should build only its part and a layer around it.
-- Fewer rounds: one exchange per level now. See "MPI" in "Future plans".
+What the distributed tree cannot do yet, most important first.
+
+**Wrong or missing under MPI**
+
+1. **Multigrid.** `ghosts_update_level ()` and the level loops make no
+   exchange, so `mg_helmholtz ()` (liblinear-algebra) is wrong on a
+   distributed tree. The level loops already skip other processes' nodes,
+   and the residual norm is a reduction; the per-level exchange is the
+   missing piece (milestone 5).
+2. **`block_ghosts ()` called alone** makes no exchange: only
+   `ghosts_update_list ()` and what calls it do.
+3. **Refining or coarsening by hand:** `tree_refine ()` and
+   `tree_coarsen ()` stop the run on a distributed tree; only
+   `adapt_wavelet ()` adapts it.
+4. **Coarsened face and vertex scalars** may differ from one process in
+   the last bits: their restriction reads the children's ghost layer,
+   which one process updates family after family (see "Adapting the
+   distributed tree"). Cell scalars come out bit for bit.
+5. **Reductions** count the tree npe times before a partition with
+   `tree_replicated ()` (every process owns all of it then), and writes
+   through a pointer, a member or a subscript in a stencil loop
+   (`*e = ...`, `same [k] += ...`) are not reductions: serial only.
+
+**Not tested where it will run**
+
+6. **Real MPI:** since the rewrite, only on the stand-in `tests/mpi-fork`,
+   up to 16 processes on one machine; not on OpenMPI ranks, nor on more
+   than one node.
+7. **The other libraries:** libvof not run under MPI; libhmesh (points
+   that move between processes) has no MPI design yet; no output (libview)
+   or checkpoint and restart of a distributed tree.
+8. **Rules of the skeleton no test needs:** N ()'s parent and children
+   rules, and its coarse leaf but in 1D (reached by other relations on
+   the test trees); a new piece of the curve spanning an empty old one.
+
+**Scale and speed**
+
+9. **The start needs the whole tree on every process:** `tree ()`'s
+   coarse uniform level, or a `tree_replicated ()` mesh refined first. An
+   initial mesh too large for one process must be grown after
+   distributing, by `adapt_wavelet ()`.
+10. **O(npe) on each process:** the first keys (`key_first`), and the
+    repartition's `MPI_Allreduce` of npe-long arrays (an `MPI_Allgather` of
+    one key and one load per process would do).
+11. **Communication rounds:** one exchange per level in a ghost update,
+    and no computation overlapping it. See "MPI" in "Future plans"
+    (dummy children for the halo, coarse buffers).
+12. **Halo memory:** blocks go by family, so a mixed halo family carries
+    unused blocks; blocks per node wait for the edge-cut partition (see
+    "Block allocation", "Further options").
+13. **Load weights:** given by hand, no cost measured per block;
+    non-integer weights may not give the whole tree's cut at a tie.
+
+**Later, as planned**
+
+14. Periodic boundaries; the partition by edge cut; MPI with GPU offload.
+    MPI is started `MPI_THREAD_FUNNELED`: no OpenMP thread may call MPI.
+
+Suggested order: 1 and 2 (milestone 5), then 6 on OpenMPI ranks, then 7
+for libvof.
 
 ## Tests
 
