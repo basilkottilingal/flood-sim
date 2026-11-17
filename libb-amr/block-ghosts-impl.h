@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bamr-error.h"
 #include "block-ghosts.h"
 #ifdef _MPI
 # include "tree-mpi.h"
@@ -666,7 +667,7 @@ static void block_ghosts_first (Index p, int s)
       n *= sh.m + 1;
     Real * buf = malloc ((size_t) n * sizeof (Real));
     if (!buf)
-      abort ();
+      BAMR_ABORT ("out of memory");
     vertex_walls_row (sh, b, walls, buf, 0);
     block_ghosts_cells (p, s);
     vertex_walls_row (sh, b, walls, buf, 1);
@@ -976,7 +977,7 @@ void ghosts_update_list (int n, const int * given, int parents)
   const int * first = tc->level_first;
   ScalarOps * o = malloc ((size_t) n * sizeof (ScalarOps));
   if (!o)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int q = 0; q < n; q++)
     o [q] = scalar_get_ops (s [q]);
   /*

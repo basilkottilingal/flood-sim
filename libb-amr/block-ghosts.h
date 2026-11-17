@@ -83,8 +83,8 @@
   .. m - 1, the coarse block's interior), and X & 1 says which half. The
   .. coarse block's first ghost layer is valid, so X >> 1 +- 1 can be read.
   ..
-  .. prolong_cells (pr) below visits every fine cell to fill: write a
-  .. prolongation with it. It may read other scalars of the same nodes
+  .. foreach_prolongation (pr) below visits every fine cell to fill:
+  .. write a prolongation with it. It may read other scalars of the same nodes
   .. (index_node (pr->coarse_index)->s), for prolongations that need them,
   .. as the depth for the water height. It writes only pr->fine, at those
   .. cells: blocks of one level run at once.
@@ -282,19 +282,9 @@
   @prolongation prolong_none;
   @restriction  restriction_none;
 
-  /*
-  .. prolong_cells (pr) { ... }: every fine cell pr asks for, with f its
-  .. index in pr->fine, cc the index of its coarse cell in pr->coarse, and
-  .. sgn [3] the half it is in along each axis, -1 or +1 (0 beyond the
-  .. dimension). A neighbour of the coarse cell along axis a is
-  .. cc +- block_stride (pr->shape, a). No break.
-  ..
-  ..   prolong_cells (pr)
-  ..     pr->fine [f] = pr->coarse [cc];          // injection
-  */
   /* the coarse cell C and the half sgn of the fine cell x, along axis a:
   .. in range, as prolongation_in_range () checked for the whole region */
-  #define BAMR_FINE_TO_COARSE(off, x, C, sgn, m, a) do {                    \
+  #define BAMR_FINE_TO_COARSE(off, x, C, sgn, a) do {                       \
       int X_ = (off) [a] + (x) [a];                                       \
       (C) [a] = X_ >> 1;                                                  \
       (sgn) [a] = X_ & 1 ? 1 : -1;                                        \
@@ -311,33 +301,6 @@
               || pr->off [a] + pr->hi [a] > 2 * pr->shape.m))
         return 0;
     return 1;
-  }
-
-  @loop prolong_cells (const Prolongation * pr) : f, cc, sgn
-  {
-    assert (prolongation_in_range (pr));
-    const int * lo = pr->lo, * hi = pr->hi;
-    int x [3] = { 0, 0, 0 };
-  #if dimension > 2
-    for (x [2] = lo [2]; x [2] < hi [2]; x [2]++)
-  #endif
-  #if dimension > 1
-    for (x [1] = lo [1]; x [1] < hi [1]; x [1]++)
-  #endif
-    for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
-    {
-      int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 0);
-  #if dimension > 1
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 1);
-  #endif
-  #if dimension > 2
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, pr->shape.m, 2);
-  #endif
-      long f = block_at (pr->shape, x), cc = block_at (pr->shape, C);
-      (void) f, (void) cc, (void) sgn;
-      {...}
-    }
   }
 
   /*
@@ -404,7 +367,10 @@
     {...}
   }
 
-  /* prolong_cells (pr), the fine cell c, its coarse cell cc, sgn its half */
+  /* every fine cell pr asks for: c in the fine block, its coarse cell cc
+  .. in the coarse one (a neighbour of it along axis a is cc +-
+  .. block_stride (shape, a)), sgn [3] the half it is in, -1 or +1 (0
+  .. beyond the dimension); what foreach_prolongation () visits */
   @loop prolong_points (const Prolongation * pr) : c, shape, cc, sgn
   {
     BlockShape shape = pr->shape;
@@ -420,12 +386,12 @@
     for (x [0] = lo [0]; x [0] < hi [0]; x [0]++)
     {
       int C [3] = { 0, 0, 0 }, sgn [3] = { 0, 0, 0 };
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 0);
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, 0);
   #if dimension > 1
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 1);
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, 1);
   #endif
   #if dimension > 2
-      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, shape.m, 2);
+      BAMR_FINE_TO_COARSE (pr->off, x, C, sgn, 2);
   #endif
       long c = block_at (shape, x), cc = block_at (shape, C);
       (void) c, (void) cc, (void) sgn;

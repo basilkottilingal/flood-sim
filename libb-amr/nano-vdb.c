@@ -7,6 +7,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include "bamr-error.h"
 #include "nano-vdb.h"
 
 NanoVDB nvdb_new (int len)
@@ -64,7 +65,7 @@ static void node_put (NvNode * n, int l, int s, void * p)
       n->cap = NVDB_SLOTS (l);
     n->c = realloc (n->c, n->cap * sizeof (void *));
     if (!n->c)
-      abort ();
+      BAMR_ABORT ("out of memory");
   }
   memmove (n->c + r + 1, n->c + r, (n->n - r) * sizeof (void *));
   n->c [r] = p;
@@ -112,7 +113,7 @@ static void root_grow (NanoVDB m)
   m->root_cap = cap ? 2 * cap : 16;
   m->root = calloc (m->root_cap, sizeof (NvTile));
   if (!m->root)
-    abort ();
+    BAMR_ABORT ("out of memory");
   m->root_n = 0;
   for (uint32_t h = 0; h < cap; h++)
     if (old [h].node)

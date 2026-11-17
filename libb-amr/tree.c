@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <assert.h>
 
+#include "bamr-error.h"
 #include "tree.h"
 #include "grid-scalar.h"
 #include "block-ghosts.h"
@@ -475,7 +476,7 @@ int tree (int depthmax, int blockdepth)
       int n = tc->nleaves;
       Index * leaves = malloc ((size_t) n * sizeof (Index));
       if (!leaves)
-        abort ();
+        BAMR_ABORT ("out of memory");
       for (int q = 0; q < n; q++)
         leaves [q] = tc->leaves [q].p;
       for (int q = 0; q < n; q++)
@@ -700,7 +701,7 @@ static void caches_update (void)
     c_owned = realloc (c_owned, (size_t) n * sizeof (TreeItem));
     if (!c_all || !c_leaves || !c_by_level || !c_leaves_by_level || !c_parents_by_level
         || !c_owned)
-      abort ();
+      BAMR_ABORT ("out of memory");
     c_cap = n;
   }
   int count [BAMR_MAX_DEPTH + 1] = {0}, lcount [BAMR_MAX_DEPTH + 1] = {0};

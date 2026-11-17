@@ -8,6 +8,7 @@
 # include <mpi.h>
 #endif
 
+#include "bamr-error.h"
 #include "block-ghosts.h"
 #include "tree-mpi.h"
 
@@ -75,7 +76,7 @@ static void partition_record (int npe, double * load)
   int * first = malloc ((size_t) (npe + 1) * sizeof (int));
   uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
   if (!first || !key)
-    abort ();
+    BAMR_ABORT ("out of memory");
   /* the first leaf of each process: pid does not decrease along the curve;
    * its key, or the next process's for one with no leaf */
   for (int r = 0, q = 0; r <= npe; r++)
@@ -168,7 +169,7 @@ int tree_partition (int npe, const double * weight)
     }
   double * load = calloc ((size_t) npe, sizeof (double));
   if (!load)
-    abort ();
+    BAMR_ABORT ("out of memory");
 
   /*
   .. leaf q to the process whose share of the curve holds its middle (in
@@ -308,13 +309,15 @@ static int index_cmp (Index a, Index b)
 {
   if (a.level != b.level)
     return a.level < b.level ? -1 : 1;
-  for (int ax = dimension - 1; ax >= 0; ax--)
-  {
-    int x = index_axis (a, ax), y = index_axis (b, ax);
-    if (x != y)
-      return x < y ? -1 : 1;
-  }
-  return 0;
+  #if dimension > 2
+  if (a.k != b.k)
+    return a.k < b.k ? -1 : 1;
+  #endif
+  #if dimension > 1
+  if (a.j != b.j)
+    return a.j < b.j ? -1 : 1;
+  #endif
+  return (a.i > b.i) - (a.i < b.i);
 }
 
 static int need_cmp (const void * pa, const void * pb)
@@ -348,7 +351,7 @@ static void need (Needs * v, int rank, int parents, int kind, int level,
     v->cap = v->cap ? 2 * v->cap : 1024;
     v->a = realloc (v->a, (size_t) v->cap * sizeof (Need));
     if (!v->a)
-      abort ();
+      BAMR_ABORT ("out of memory");
   }
   v->a [v->n++] = (Need) { parents, kind, level, send, send ? r : owner,
                            { x, X } };
@@ -443,7 +446,7 @@ static void plan_lists (TreeMpiPlan * plan, Needs * v)
     *list = realloc (*list, (size_t) (*n + 1) * sizeof (TreeMpiList));
     TreeItem * item = malloc ((size_t) (e - q) * sizeof (TreeItem));
     if (!*list || !item)
-      abort ();
+      BAMR_ABORT ("out of memory");
     for (long k = q; k < e; k++)
       item [k - q] = v->a [k].it;
     (*list) [(*n)++] = (TreeMpiList) { f->peer, (int) (e - q), item };
@@ -460,7 +463,7 @@ TreeMpiPlan * tree_mpi_plan_new (int rank)
   const TreeCaches * tc = tree_caches ();
   TreeMpiPlan * plan = calloc (1, sizeof (TreeMpiPlan));
   if (!plan)
-    abort ();
+    BAMR_ABORT ("out of memory");
   plan->rank = rank, plan->npe = part.npe;
   plan->depth = tc->depth, plan->depth_min = tree_get_depth_min ();
   plan->generation = tree_generation;
@@ -550,7 +553,7 @@ static int prune_unneeded (void)
   Index * root = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1)
                         * sizeof (Index));
   if (!root)
-    abort ();
+    BAMR_ABORT ("out of memory");
   int n = 0;
   for (int q = 0; q < tc->nall; q++)
   {
@@ -627,7 +630,7 @@ static void bytes_push (Bytes * v, const void * x, size_t n)
     v->cap = v->n + n > 2 * v->cap ? v->n + n : 2 * v->cap;
     v->a = realloc (v->a, v->cap);
     if (!v->a)
-      abort ();
+      BAMR_ABORT ("out of memory");
   }
   memcpy (v->a + v->n, x, n);
   v->n += n;
@@ -645,7 +648,7 @@ static void exchange_with (int nto, const int * to, char ** out,
   MPI_Request * req = malloc ((size_t) (nto + nfrom + 1)
                               * sizeof (MPI_Request));
   if (!req)
-    abort ();
+    BAMR_ABORT ("out of memory");
   int nr = 0;
   for (int k = 0; k < nfrom; k++)
     MPI_Irecv (&nin [k], (int) sizeof (int), MPI_BYTE, from [k], tag,
@@ -662,7 +665,7 @@ static void exchange_with (int nto, const int * to, char ** out,
       continue;
     in [k] = malloc ((size_t) nin [k]);
     if (!in [k])
-      abort ();
+      BAMR_ABORT ("out of memory");
     MPI_Irecv (in [k], nin [k], MPI_BYTE, from [k], tag + 1, MPI_COMM_WORLD,
                &req [nr++]);
   }
@@ -742,7 +745,7 @@ static void add_rank (Index x, void * arg)
     v->cap = v->cap ? 2 * v->cap : 64;
     v->a = realloc (v->a, (size_t) v->cap * sizeof (int));
     if (!v->a)
-      abort ();
+      BAMR_ABORT ("out of memory");
   }
   v->a [v->n++] = r;
 }
@@ -847,7 +850,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
   TreeItem * own = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1)
                            * sizeof (TreeItem));
   if (!own)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int q = 0; q < tc->nall; q++)
     if (tc->all [q].node->pid == me)
       own [nown++] = tc->all [q];
@@ -879,7 +882,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
   /* 3. */
   TreeMpiPlan * plan = calloc (1, sizeof (TreeMpiPlan));
   if (!plan)
-    abort ();
+    BAMR_ABORT ("out of memory");
   plan->rank = me, plan->npe = npe;
   plan->npeers = u, plan->peers = rs.a;
   tc = tree_caches ();
@@ -902,7 +905,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
   int * nout = calloc ((size_t) m, sizeof (int));
   int * nin = calloc ((size_t) m, sizeof (int));
   if (!ask || !out || !in || !nout || !nin)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (long q = 0; q < v.n; q++)
   {
     const Need * f = &v.a [q];
@@ -939,7 +942,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
         v.cap = v.cap ? 2 * v.cap : 1024;
         v.a = realloc (v.a, (size_t) v.cap * sizeof (Need));
         if (!v.a)
-          abort ();
+          BAMR_ABORT ("out of memory");
       }
       v.a [v.n++] = (Need) { a [0], a [1], a [2], 1, plan->peers [k],
                              { p, X } };
@@ -982,7 +985,7 @@ static void indices_push (Indices * v, Index p)
     v->cap = v->cap ? 2 * v->cap : 64;
     v->a = realloc (v->a, (size_t) v->cap * sizeof (Index));
     if (!v->a)
-      abort ();
+      BAMR_ABORT ("out of memory");
   }
   v->a [v->n++] = p;
 }
@@ -1021,7 +1024,7 @@ static void peer_round (const TreeMpiPlan * plan, Indices * ask,
   int * nin = calloc ((size_t) m, sizeof (int));
   Bytes * box = calloc ((size_t) m, sizeof (Bytes));
   if (!out || !in || !nout || !nin || !box)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int k = 0; k < np; k++)
   {
     int head [2] = { ask [k].n, made->n }, a [4];
@@ -1065,7 +1068,7 @@ int tree_mpi_refine (int n, const Index * list)
     indices_push (&pending, list [q]);
   Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
   if (!ask)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int round = 0; ; round++)
   {
     /* each round divides at least the coarsest leaf waiting: a few rounds
@@ -1188,7 +1191,7 @@ int tree_mpi_coarsen (int n, const Index * list)
   MPI_Allreduce (&top, &all, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
   if (!ask)
-    abort ();
+    BAMR_ABORT ("out of memory");
   /* level by level, finest first, as one process does: what is merged
    * at a level may let a coarser family merge */
   for (int l = all; l >= 0; l--)
@@ -1277,13 +1280,13 @@ int tree_mpi_repartition (const double * weight)
   long * count = calloc ((size_t) npe, sizeof (long));
   long * call = malloc ((size_t) npe * sizeof (long));
   if (!kmin || !kall || !load || !lall || !count || !call)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int r = 0; r < npe; r++)
     kmin [r] = UINT64_MAX;
   /* each leaf by its middle, as tree_partition () */
   int * pid_of = malloc ((size_t) (n ? n : 1) * sizeof (int));
   if (!pid_of)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int q = 0; q < n; q++)
   {
     double w = weight ? weight [q] : 1;
@@ -1335,7 +1338,7 @@ int tree_mpi_repartition (const double * weight)
     int * nout = calloc ((size_t) mm, sizeof (int));
     int * nin = calloc ((size_t) mm, sizeof (int));
     if (!out || !in || !nout || !nin)
-      abort ();
+      BAMR_ABORT ("out of memory");
     for (int k = 0; k < np; k++)
       out [k] = tell.a, nout [k] = (int) tell.n;
     exchange_with (np, plan ? plan->peers : NULL, out, nout,
@@ -1375,7 +1378,7 @@ int tree_mpi_repartition (const double * weight)
   int * first = malloc ((size_t) (npe + 1) * sizeof (int));
   uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
   if (!first || !key)
-    abort ();
+    BAMR_ABORT ("out of memory");
   first [0] = 0;
   for (int r = 0; r < npe; r++)
     first [r + 1] = first [r] + (int) call [r];
@@ -1410,7 +1413,7 @@ int tree_mpi_repartition (const double * weight)
   int * to = malloc ((size_t) (tc->nall + 1) * sizeof (int)), nto = 0;
   int * from = malloc ((size_t) npe * sizeof (int)), nfrom = 0;
   if (!to || !from)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int q = 0; q < tc->nall; q++)
     if (tc->all [q].node->pid == me)
     {
@@ -1437,7 +1440,7 @@ int tree_mpi_repartition (const double * weight)
   char ** in = malloc ((size_t) mf * sizeof (char *));
   int * nin = calloc ((size_t) mf, sizeof (int));
   if (!box || !out || !nout || !in || !nin)
-    abort ();
+    BAMR_ABORT ("out of memory");
   int sent = 0;
   for (int q = 0; q < tc->nall; q++)
   {
@@ -1523,7 +1526,7 @@ int tree_mpi_partition (const double * weight)
   int * pid = malloc ((tc->nall > 0 ? (size_t) tc->nall : 1) * sizeof (int));
   double * load = malloc ((size_t) npe * sizeof (double));
   if (!pid || !load)
-    abort ();
+    BAMR_ABORT ("out of memory");
   if (rank == 0)
   {
     for (int q = 0; q < tc->nall; q++)
@@ -1575,7 +1578,7 @@ void tree_mpi_exchange (int parents, int kind, int level, int n, const int * s)
   MPI_Request * req = malloc ((size_t) nm * sizeof (MPI_Request));
   char ** buf = malloc ((size_t) nm * sizeof (char *));
   if (!req || !buf)
-    abort ();
+    BAMR_ABORT ("out of memory");
   for (int k = 0; k < nm; k++)
   {
     const TreeMpiList * list = k < ex->nrecv ? &ex->recv [k]
@@ -1584,7 +1587,7 @@ void tree_mpi_exchange (int parents, int kind, int level, int n, const int * s)
     assert (len <= INT_MAX);
     buf [k] = malloc (len);
     if (!buf [k])
-      abort ();
+      BAMR_ABORT ("out of memory");
     if (k < ex->nrecv)
       MPI_Irecv (buf [k], (int) len, MPI_BYTE, list->peer, tag, MPI_COMM_WORLD,
                  &req [k]);

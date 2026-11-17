@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <cwrap/cache.h>
 
+#include "bamr-error.h"
 #include "adapt.h"
 #include "block-ghosts.h"
 #ifdef _MPI
@@ -32,7 +33,7 @@ static Real * scratch_block (void)
 {
   Real * b = malloc ((size_t) tree_block_shape ().cells * sizeof (Real));
   if (!b)
-    abort ();
+    BAMR_ABORT ("out of memory");
   return b;
 }
 
