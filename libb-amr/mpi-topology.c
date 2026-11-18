@@ -1,5 +1,5 @@
 /*
- * mpi_topology.c — discover the topology of an MPI job on a cluster/supercomputer.
+ * mpi-topology.c — discover the topology of an MPI job on a cluster/supercomputer.
  *
  * What it reports
  *   1. Per rank : host, node id, local rank, current CPU, socket (package),
@@ -12,12 +12,12 @@
  *         same group/rack, across the spine/global links).
  *
  * Build
- *   mpicc -O2 -o mpi_topology mpi_topology.c    # sysfs only (Linux)
- *   mpicc -O2 -DHAVE_HWLOC -o mpi_topology mpi_topology.c $ (pkg-config --cflags --libs hwloc)  # with hwloc >= 2.0
+ *   mpicc -O2 -o mpi-topology mpi-topology.c    # sysfs only (Linux)
+ *   mpicc -O2 -DHAVE_HWLOC -o mpi-topology mpi-topology.c $ (pkg-config --cflags --libs hwloc)  # with hwloc >= 2.0
  *
  * Run (examples)
- *   srun -N 8 --ntasks-per-node=4 --cpu-bind=cores ./mpi_topology
- *   mpirun -np 64 --map-by ppr:8:node --bind-to core ./mpi_topology --iters 2000
+ *   srun -N 8 --ntasks-per-node=4 --cpu-bind=cores ./mpi-topology
+ *   mpirun -np 64 --map-by ppr:8:node --bind-to core ./mpi-topology --iters 2000
  *
  * Options
  *   --iters N    ping-pong iterations per node pair (default 1000)
@@ -25,8 +25,12 @@
  *   --out PREFIX   CSV file prefix (default "topo") -> PREFIX_ranks.csv,
  *          PREFIX_nodes.csv, PREFIX_latency.csv
  */
-#define _GNU_SOURCE
-#include <mpi.h>
+
+#ifdef _MPI
+
+#ifndef _GNU_SOURCE
+#   define _GNU_SOURCE
+#endif
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,27 +39,14 @@
 #include <dirent.h>
 #include <glob.h>
 #ifdef HAVE_HWLOC
-#include <hwloc.h>
+#   include <hwloc.h>
 #endif
+
+#include "mpi-topology.h"
 
 #define HOSTLEN   64
 #define STRLEN   160
 #define MAX_NUMA  64
-
-typedef struct {
-  int  rank, node_id, local_rank, local_size;
-  int  cpu, socket, numa, core, l3;
-  char host[HOSTLEN];
-  char affinity[STRLEN];
-} rank_info_t;
-
-typedef struct {
-  int  node_id, nranks;
-  int  sockets, numa, cores, pus, l3s, gpus, nnics;
-  double mem_gb;
-  char   host[HOSTLEN];
-  char   nics[STRLEN];
-} node_info_t;
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -76,7 +67,7 @@ static void append (char *dst, size_t len, const char *src)
 }
 
 /* Compress a cpu_set_t into "0-3,8,10-11". */
-static void cpuset_to_string (const cpu_set_t *set, char *buf, size_t len)
+void cpuset_to_string (const cpu_set_t *set, char *buf, size_t len)
 {
   char tmp[32];
   int start = -1;
@@ -95,7 +86,7 @@ static void cpuset_to_string (const cpu_set_t *set, char *buf, size_t len)
 }
 
 /* NUMA node of a CPU from sysfs: /sys/devices/system/cpu/cpuN/nodeK */
-static int sysfs_cpu_numa (int cpu)
+int sysfs_cpu_numa (int cpu)
 {
   char pat[96];
   glob_t g;
@@ -109,7 +100,7 @@ static int sysfs_cpu_numa (int cpu)
   return node;
 }
 
-static int sysfs_count (const char *pattern)
+int sysfs_count (const char *pattern)
 {
   glob_t g;
   int n = 0;
@@ -120,7 +111,7 @@ static int sysfs_count (const char *pattern)
 
 /* GPUs = PCI display/3D controllers from NVIDIA, AMD or Intel
  * (skips BMC VGA chips like ASPEED/Matrox). Works with or without hwloc. */
-static int sysfs_count_gpus (void)
+int sysfs_count_gpus (void)
 {
   DIR *d = opendir ("/sys/bus/pci/devices");
   struct dirent *e;
@@ -142,7 +133,7 @@ static int sysfs_count_gpus (void)
 
 /* High-speed NICs: RDMA devices (mlx5_0, cxi0, hfi1_0, ...) and
  * Slingshot/IB netdevs (hsn0, ib0). */
-static int sysfs_list_nics (char *buf, size_t len)
+int sysfs_list_nics (char *buf, size_t len)
 {
   const char *dirs[] = { "/sys/class/infiniband", "/sys/class/cxi", "/sys/class/net" };
   int n = 0;
@@ -165,8 +156,7 @@ static int sysfs_list_nics (char *buf, size_t len)
 }
 
 /* ------------------------------------------------- per-rank / per-node */
-
-static void fill_rank_info (rank_info_t *ri, void *topo_ptr)
+void fill_rank_info (rank_info_t *ri, void *topo_ptr)
 {
   cpu_set_t set;
   CPU_ZERO (&set);
@@ -203,7 +193,7 @@ static void fill_rank_info (rank_info_t *ri, void *topo_ptr)
   ri->numa = sysfs_cpu_numa (ri->cpu);
 }
 
-static void fill_node_info (node_info_t *ni, void *topo_ptr)
+void fill_node_info (node_info_t *ni, void *topo_ptr)
 {
 #ifdef HAVE_HWLOC
   hwloc_topology_t topo = * (hwloc_topology_t *)topo_ptr;
@@ -247,7 +237,7 @@ static void fill_node_info (node_info_t *ni, void *topo_ptr)
   ni->nnics = sysfs_list_nics (ni->nics, sizeof ni->nics);
 }
 
-static void print_numa_distances (void)
+void print_numa_distances (void)
 {
   char path[96], line[1024];
   int n = sysfs_count ("/sys/devices/system/node/node[0-9]*");
@@ -271,7 +261,7 @@ static void print_numa_distances (void)
 /* Round-robin tournament: n/2 disjoint pairs ping-pong at once,
  * n-1 rounds in total, so the cost grows with n rather than n^2.
  * Result (one-way latency in microseconds) is reduced to leader 0. */
-static void measure_latency (MPI_Comm leaders, int iters, double *mat)
+void measure_latency (MPI_Comm leaders, int iters, double *mat)
 {
   int me, n;
   MPI_Comm_rank (leaders, &me);
@@ -317,7 +307,7 @@ static int cmp_double (const void *a, const void *b)
   return (x > y) - (x < y);
 }
 
-static void report_latency (const double *mat, const node_info_t *nodes, int n, const char *prefix)
+void report_latency (const double *mat, const node_info_t *nodes, int n, const char *prefix)
 {
   int np = n * (n - 1) / 2;
   if (np == 0) { printf ("\n (only one node: no inter-node latency to measure)\n"); return; }
@@ -382,7 +372,7 @@ static void report_latency (const double *mat, const node_info_t *nodes, int n, 
 
 /* ------------------------------------------------------------------ main */
 
-int main (int argc, char **argv)
+int mpi_topology (int argc, char **argv)
 {
   int iters = 1000, do_latency = 1;
   const char *prefix = "topo";
@@ -539,3 +529,4 @@ int main (int argc, char **argv)
   MPI_Finalize ();
   return 0;
 }
+#endif
