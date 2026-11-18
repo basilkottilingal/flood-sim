@@ -1538,6 +1538,38 @@ Deferred; none started.
    `BAMR_RED` or `BAMR_BLACK`, or every cell in order, `BAMR_BOTH`) and
    `ghosts_update_level (s, l)`, called explicitly. Still open: lazy
    ghosts per level, `coarse ()` inside `foreach ()`: see `multigrid.md`.
+6. **The dependency closure, in near-linear time** (discussed, to do
+   later). `ghost_dependents_rebuild ()` (block-ghosts-impl.h) makes the
+   transitive closure of "who depends on s" by passes of `foreach_scalar
+   (t) foreach_scalar (s)` until nothing changes: O(n² W) a pass (W =
+   ⌈n / 64⌉ words), O(n³ W) at worst, with n the scalars in use. Small at
+   `NSCALAR_MAX` 64 (W = 1), and it runs only when a scalar is made,
+   freed, or its operators set, not per step; the closure itself stays,
+   since it makes marking a scalar stale one OR (block-ghosts.h).
+   1. **One pass, O((n + E) W).** The dependencies are a DAG (cycles are
+      refused), so a depth-first walk in topological order gives
+      closure (t) = the union, over t's direct dependents s, of {s} and
+      closure (s): each scalar visited once, each edge (E of them, at
+      most GHOST_DEPS_MAX a scalar) read once. The walk finds a cycle
+      too (a scalar met again while on its stack), which replaces
+      `ghost_dependents_cycle ()` and the rebuild, check, undo of
+      `ghost_ops_set ()`.
+   2. **No rebuild when nothing can change, O(1).** A scalar with the
+      default operators has no dependency and none on it: making or
+      freeing it changes no closure but its own row and stale bit. A
+      test of edges either way (its uses, its bit in the closure) skips
+      the rebuild: almost every `grid_scalar_new ()` and
+      `grid_scalar_free ()`, the reset at new included.
+   3. **Incremental, not worth it at n <= 64.** Adding an edge "s reads
+      d" can be O(n W): a cycle iff s is d or s is in d's closure, one
+      bit; else every x that is d or holds d gets {s} and closure (s).
+      Removing edges is the hard direction (a closure does not know
+      which paths an edge carried): recompute with 1.
+
+   Tests for it: those that bind coupled operators (`test_ghosts`,
+   `ops_coupled` in libc-pp, libvof's `prolong_plane` and its
+   dependencies) must give the same closures and refuse the same cycles,
+   and a timing of `grid_scalar_new ()` and `free ()` before and after.
 
 ## Faces, fluxes and vertices
 

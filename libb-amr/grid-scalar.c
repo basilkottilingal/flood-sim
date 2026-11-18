@@ -23,6 +23,16 @@ static size_t block_reals = 0;     /* Reals in a block                 */
 /*
 .. used as the constructor for creating blocks for scalar 's'. It will be
 .. hooked to the constructor that allocate 's' (libc-pp/srs/scalar.c)
+..
+.. Both hooks run only while a tree exists (grid_scalar_init () to
+.. grid_scalar_destroy ()), so the operators are reset at both ends:
+..   at new   an id freed while no tree existed kept its operators (no
+..            free hook ran): the new scalar must not get another's
+..   at free  the freed id leaves the dependency graph and its stale bit
+..            goes (ghost_dependents_rebuild ()), so an update of a
+..            scalar it read does not pull the freed one in
+.. Within one tree's life the reset at new finds the defaults already: one
+.. rebuild of the graph per scalar made, the price of the case above.
 */
 static void grid_scalar_new (scalar s)
 {
@@ -32,7 +42,8 @@ static void grid_scalar_new (scalar s)
 
 /*
 .. used as the destructor that frees blocks of scalar 's'. It will be
-.. hooked to the destructor that deallocate 's' (libc-pp/srs/scalar.c)
+.. hooked to the destructor that deallocate 's' (libc-pp/srs/scalar.c).
+.. See above for the reset.
 */
 static void grid_scalar_free (scalar s)
 {
