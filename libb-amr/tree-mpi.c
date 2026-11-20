@@ -8,6 +8,8 @@
 # include <mpi.h>
 #endif
 
+#include <cwrap/cache.h>
+
 #include "bamr-error.h"
 #include "block-ghosts.h"
 #include "tree-mpi.h"
@@ -153,6 +155,17 @@ static int leaf_pid (int npe, long g, long n, double before, double w,
   return pid < 0 ? 0 : pid >= npe ? npe - 1 : pid;
 }
 
+/*
+.. Cut the whole tree (one process holds it) into npe pieces of the curve:
+.. 1. each leaf to the process whose share of the total weight holds the
+..    middle of the leaf (leaf_pid ());
+.. 2. each family of leaves whole to the process of its child 0
+..    (unit_at ()), so the next coarsening stays on one process;
+.. 3. each parent, finest first, to the smallest pid of its children: the
+..    process of its first leaf, as tree_partition_owner () finds it;
+.. 4. the first keys and the loads recorded (partition_record ()).
+.. Nothing changes if npe < 1, a weight is not > 0 or the tree is pruned.
+*/
 int tree_partition (int npe, const double * weight)
 {
   if (npe < 1 || tree_pruned ())
@@ -257,6 +270,12 @@ static int index_dir (Index p, int dir, Index * b)
   return 1;
 }
 
+/*
+.. The 3^D - 1 neighbours of p, each sorted by what is there: a node with
+.. children (fine), a leaf or pruned node of p's level (same), or no node,
+.. so the coarser leaf covering it by 2:1 balance (coarse); with the pid of
+.. that node. A direction outside the domain is in none, its pid -1.
+*/
 TreeNeighbours tree_neighbours (Index p)
 {
   TreeNeighbours m = { 0, 0, 0, { 0 } };
@@ -299,8 +318,7 @@ typedef struct
 
 typedef struct
 {
-  Need * a;
-  long n, cap;
+  cache (Need) l;         /* the needs, l.a [0 .. l.n) */
   int local;              /* receives only: the sends are asked for */
 } Needs;
 
@@ -346,15 +364,8 @@ static void need (Needs * v, int rank, int parents, int kind, int level,
     send = 1;
   else
     return;
-  if (v->n == v->cap)
-  {
-    v->cap = v->cap ? 2 * v->cap : 1024;
-    v->a = realloc (v->a, (size_t) v->cap * sizeof (Need));
-    if (!v->a)
-      BAMR_ABORT ("out of memory");
-  }
-  v->a [v->n++] = (Need) { parents, kind, level, send, send ? r : owner,
-                           { x, X } };
+  cache_push (v->l, (Need) { parents, kind, level, send, send ? r : owner,
+                             { x, X } });
 }
 
 /*
@@ -426,19 +437,19 @@ static void plan_needs (Needs * v, int rank, int depth_min)
 .. each, in the order both sides share; v freed */
 static void plan_lists (TreeMpiPlan * plan, Needs * v)
 {
-  if (v->n)
-    qsort (v->a, (size_t) v->n, sizeof (Need), need_cmp);
+  if (v->l.n)
+    qsort (v->l.a, (size_t) v->l.n, sizeof (Need), need_cmp);
   long u = 0;
-  for (long q = 0; q < v->n; q++)
-    if (!u || need_cmp (&v->a [u - 1], &v->a [q]))
-      v->a [u++] = v->a [q];
+  for (long q = 0; q < v->l.n; q++)
+    if (!u || need_cmp (&v->l.a [u - 1], &v->l.a [q]))
+      v->l.a [u++] = v->l.a [q];
   for (long q = 0; q < u; )
   {
     long e = q;
-    const Need * f = &v->a [q];
-    while (e < u && v->a [e].parents == f->parents
-           && v->a [e].kind == f->kind && v->a [e].level == f->level
-           && v->a [e].send == f->send && v->a [e].peer == f->peer)
+    const Need * f = &v->l.a [q];
+    while (e < u && v->l.a [e].parents == f->parents
+           && v->l.a [e].kind == f->kind && v->l.a [e].level == f->level
+           && v->l.a [e].send == f->send && v->l.a [e].peer == f->peer)
       e++;
     TreeMpiExchange * ex = &plan->ex [f->parents][f->kind][f->level];
     int * n = f->send ? &ex->nsend : &ex->nrecv;
@@ -448,12 +459,11 @@ static void plan_lists (TreeMpiPlan * plan, Needs * v)
     if (!*list || !item)
       BAMR_ABORT ("out of memory");
     for (long k = q; k < e; k++)
-      item [k - q] = v->a [k].it;
+      item [k - q] = v->l.a [k].it;
     (*list) [(*n)++] = (TreeMpiList) { f->peer, (int) (e - q), item };
     q = e;
   }
-  free (v->a);
-  *v = (Needs) { NULL, 0, 0, 0 };
+  cache_free (v->l);
 }
 
 TreeMpiPlan * tree_mpi_plan_new (int rank)
@@ -467,7 +477,7 @@ TreeMpiPlan * tree_mpi_plan_new (int rank)
   plan->rank = rank, plan->npe = part.npe;
   plan->depth = tc->depth, plan->depth_min = tree_get_depth_min ();
   plan->generation = tree_generation;
-  Needs v = { NULL, 0, 0, 0 };
+  Needs v = { .local = 0 };
   plan_needs (&v, rank, plan->depth_min);
   plan_lists (plan, &v);
   return plan;
@@ -620,20 +630,13 @@ static Index get_index (const int * a)
   return p;
 }
 
-/* a growing array of bytes */
-typedef struct { char * a; size_t n, cap; } Bytes;
-
-static void bytes_push (Bytes * v, const void * x, size_t n)
+/* n bytes of x appended to the message v (a cache aborts beyond INT_MAX
+.. bytes, which MPI's int counts could not send anyway) */
+static void bytes_push (cache (char) * v, const void * x, size_t n)
 {
-  if (v->n + n > v->cap)
-  {
-    v->cap = v->n + n > 2 * v->cap ? v->n + n : 2 * v->cap;
-    v->a = realloc (v->a, v->cap);
-    if (!v->a)
-      BAMR_ABORT ("out of memory");
-  }
+  cache_reserve (*v, v->n + (long) n);
   memcpy (v->a + v->n, x, n);
-  v->n += n;
+  v->n += (int) n;
 }
 
 /*
@@ -732,22 +735,14 @@ static void mark_needed (Index x, void * arg)
 }
 
 /* the ranks of the related nodes, other than this one's, gathered */
-typedef struct { int * a; int n, cap, me; } Ranks;
+typedef struct { cache (int) l; int me; } Ranks;
 
 static void add_rank (Index x, void * arg)
 {
   Ranks * v = arg;
   int r = index_node (x)->pid;
-  if (r == v->me)
-    return;
-  if (v->n == v->cap)
-  {
-    v->cap = v->cap ? 2 * v->cap : 64;
-    v->a = realloc (v->a, (size_t) v->cap * sizeof (int));
-    if (!v->a)
-      BAMR_ABORT ("out of memory");
-  }
-  v->a [v->n++] = r;
+  if (r != v->me)
+    cache_push (v->l, r);
 }
 
 static int int_cmp (const void * a, const void * b)
@@ -868,15 +863,15 @@ static TreeMpiPlan * skeleton_and_plan (void)
   prune_unneeded ();
 
   /* 2. */
-  Ranks rs = { NULL, 0, 0, me };
+  Ranks rs = { .me = me };
   for (int k = 0; k < nown; k++)
     related (own [k].p, index_node (own [k].p), add_rank, &rs);
-  if (rs.n)
-    qsort (rs.a, (size_t) rs.n, sizeof (int), int_cmp);
+  if (rs.l.n)
+    qsort (rs.l.a, (size_t) rs.l.n, sizeof (int), int_cmp);
   int u = 0;
-  for (int k = 0; k < rs.n; k++)
-    if (!u || rs.a [u - 1] != rs.a [k])
-      rs.a [u++] = rs.a [k];
+  for (int k = 0; k < rs.l.n; k++)
+    if (!u || rs.l.a [u - 1] != rs.l.a [k])
+      rs.l.a [u++] = rs.l.a [k];
   free (own);
 
   /* 3. */
@@ -884,7 +879,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
   if (!plan)
     BAMR_ABORT ("out of memory");
   plan->rank = me, plan->npe = npe;
-  plan->npeers = u, plan->peers = rs.a;
+  plan->npeers = u, plan->peers = rs.l.a;   /* the plan's now */
   tc = tree_caches ();
   int lv [2] = { 0, -(BAMR_MAX_DEPTH + 1) }, all [2];
   for (int q = 0; q < tc->nowned; q++)
@@ -896,19 +891,19 @@ static TreeMpiPlan * skeleton_and_plan (void)
   MPI_Allreduce (lv, all, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   plan->depth = all [0], plan->depth_min = -all [1];
 
-  Needs v = { NULL, 0, 0, 1 };
+  Needs v = { .local = 1 };
   plan_needs (&v, me, plan->depth_min);
   int m = u ? u : 1;
-  Bytes * ask = calloc ((size_t) m, sizeof (Bytes));
+  cache (char) * ask = calloc ((size_t) m, sizeof * ask);
   char ** out = malloc ((size_t) m * sizeof (char *));
   char ** in = malloc ((size_t) m * sizeof (char *));
   int * nout = calloc ((size_t) m, sizeof (int));
   int * nin = calloc ((size_t) m, sizeof (int));
   if (!ask || !out || !in || !nout || !nin)
     BAMR_ABORT ("out of memory");
-  for (long q = 0; q < v.n; q++)
+  for (int q = 0; q < v.l.n; q++)
   {
-    const Need * f = &v.a [q];
+    const Need * f = &v.l.a [q];
     int k = peer_slot (plan, f->peer);
     if (k < 0)
     {
@@ -921,7 +916,7 @@ static TreeMpiPlan * skeleton_and_plan (void)
     bytes_push (&ask [k], a, sizeof (a));
   }
   for (int k = 0; k < u; k++)
-    out [k] = ask [k].a, nout [k] = (int) ask [k].n;
+    out [k] = ask [k].a, nout [k] = ask [k].n;
   exchange_with (u, plan->peers, out, nout, u, plan->peers, in, nin, 203);
   for (int k = 0; k < u; k++)
     for (int b = 0; b + 7 * (int) sizeof (int) <= nin [k];
@@ -937,19 +932,12 @@ static TreeMpiPlan * skeleton_and_plan (void)
                  "not own\n", me, plan->peers [k]);
         abort ();
       }
-      if (v.n == v.cap)
-      {
-        v.cap = v.cap ? 2 * v.cap : 1024;
-        v.a = realloc (v.a, (size_t) v.cap * sizeof (Need));
-        if (!v.a)
-          BAMR_ABORT ("out of memory");
-      }
-      v.a [v.n++] = (Need) { a [0], a [1], a [2], 1, plan->peers [k],
-                             { p, X } };
+      cache_push (v.l, (Need) { a [0], a [1], a [2], 1, plan->peers [k],
+                                { p, X } });
     }
   plan_lists (plan, &v);
   for (int k = 0; k < u; k++)
-    free (ask [k].a), free (in [k]);
+    cache_free (ask [k]), free (in [k]);
   free (ask), free (out), free (in), free (nout), free (nin);
 
   /* 4. */
@@ -975,19 +963,13 @@ void tree_mpi_redistribute (void)
 /* adapting the distributed tree                                          */
 /* ---------------------------------------------------------------------- */
 
-/* a growing array of indices */
-typedef struct { Index * a; int n, cap; } Indices;
-
-static void indices_push (Indices * v, Index p)
+/* x and y swap their arrays: cwrap refuses to assign a cache */
+static void indices_swap (cache (Index) * x, cache (Index) * y)
 {
-  if (v->n == v->cap)
-  {
-    v->cap = v->cap ? 2 * v->cap : 64;
-    v->a = realloc (v->a, (size_t) v->cap * sizeof (Index));
-    if (!v->a)
-      BAMR_ABORT ("out of memory");
-  }
-  v->a [v->n++] = p;
+  Index * a = x->a;
+  int n = x->n, cap = x->cap;
+  x->a = y->a, x->n = y->n, x->cap = y->cap;
+  y->a = a, y->n = n, y->cap = cap;
 }
 
 static int index_order (const void * a, const void * b)
@@ -996,7 +978,7 @@ static int index_order (const void * a, const void * b)
 }
 
 /* v sorted, coarsest first, each once */
-static void indices_unique (Indices * v)
+static void indices_unique (cache (Index) * v)
 {
   if (v->n)
     qsort (v->a, (size_t) v->n, sizeof (Index), index_order);
@@ -1013,16 +995,16 @@ static void indices_unique (Indices * v)
 .. changed); from each, the same, into asked and done. 4 ints an index,
 .. after the two counts
 */
-static void peer_round (const TreeMpiPlan * plan, Indices * ask,
-                        const Indices * made, Indices * asked,
-                        Indices * done, int tag)
+static void peer_round (const TreeMpiPlan * plan, cache (Index) * ask,
+                        const cache (Index) * made, cache (Index) * asked,
+                        cache (Index) * done, int tag)
 {
   int np = plan->npeers, m = np ? np : 1;
   char ** out = malloc ((size_t) m * sizeof (char *));
   char ** in = malloc ((size_t) m * sizeof (char *));
   int * nout = calloc ((size_t) m, sizeof (int));
   int * nin = calloc ((size_t) m, sizeof (int));
-  Bytes * box = calloc ((size_t) m, sizeof (Bytes));
+  cache (char) * box = calloc ((size_t) m, sizeof * box);
   if (!out || !in || !nout || !nin || !box)
     BAMR_ABORT ("out of memory");
   for (int k = 0; k < np; k++)
@@ -1033,7 +1015,7 @@ static void peer_round (const TreeMpiPlan * plan, Indices * ask,
       put_index (a, ask [k].a [q]), bytes_push (&box [k], a, sizeof (a));
     for (int q = 0; q < made->n; q++)
       put_index (a, made->a [q]), bytes_push (&box [k], a, sizeof (a));
-    out [k] = box [k].a, nout [k] = (int) box [k].n;
+    out [k] = box [k].a, nout [k] = box [k].n;
   }
   exchange_with (np, plan->peers, out, nout, np, plan->peers, in, nin, tag);
   for (int k = 0; k < np; k++)
@@ -1042,10 +1024,10 @@ static void peer_round (const TreeMpiPlan * plan, Indices * ask,
     memcpy (head, in [k], sizeof (head));
     const int * a = (const int *) (in [k] + sizeof (head));
     for (int q = 0; q < head [0]; q++, a += 4)
-      indices_push (asked, get_index (a));
+      cache_push (*asked, get_index (a));
     for (int q = 0; q < head [1]; q++, a += 4)
-      indices_push (done, get_index (a));
-    free (in [k]), free (box [k].a);
+      cache_push (*done, get_index (a));
+    free (in [k]), cache_free (box [k]);
   }
   free (out), free (in), free (nout), free (nin), free (box);
 }
@@ -1058,15 +1040,31 @@ static int any_left (int left)
   return any;
 }
 
+/*
+.. Divide the leaves of list on the distributed tree, with 2:1 balance
+.. kept across processes. Rounds, until no process has work left:
+.. 1. here, sweeps until nothing changes: a leaf of this process is
+..    divided once every same-level index around it holds a node; else
+..    the coarser leaf covering a missing one is divided first, by this
+..    process if it owns it, else asked of its owner, and the leaf waits;
+.. 2. one round with every peer (peer_round ()): the requests to the
+..    owners, and every leaf divided here, which the peers graft
+..    (structure only: tree_graft ());
+.. 3. the requests received join the waiting leaves; any_left () decides.
+.. A cascade crosses a process per round, and the coarsest waiting leaf is
+.. divided each round: at most a few rounds a level (the cap aborts).
+.. Returns the leaves this process divided. The skeleton and plan are left
+.. to the caller (tree_mpi_redistribute ()).
+*/
 int tree_mpi_refine (int n, const Index * list)
 {
   assert (applied);
   const TreeMpiPlan * plan = applied;
   int me = tree_rank (), np = plan->npeers, divided = 0;
-  Indices pending = { NULL, 0, 0 };
+  cache (Index) pending;
   for (int q = 0; q < n; q++)
-    indices_push (&pending, list [q]);
-  Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
+    cache_push (pending, list [q]);
+  cache (Index) * ask = calloc ((size_t) (np ? np : 1), sizeof * ask);
   if (!ask)
     BAMR_ABORT ("out of memory");
   for (int round = 0; ; round++)
@@ -1085,13 +1083,13 @@ int tree_mpi_refine (int n, const Index * list)
     .. node; a coarser leaf covering one is divided first, here if this
     .. process's, else asked of its owner, and the leaf waits
     */
-    Indices made = { NULL, 0, 0 };
+    cache (Index) made;               /* freed at the end of the round */
     for (int k = 0; k < np; k++)
-      ask [k].n = 0;
+      cache_clear (ask [k]);
     for (;;)
     {
       indices_unique (&pending);
-      Indices next = { NULL, 0, 0 };
+      cache (Index) next;
       int progress = 0, before = pending.n;
       for (int q = 0; q < pending.n; q++)
       {
@@ -1112,27 +1110,27 @@ int tree_mpi_refine (int n, const Index * list)
           assert (cover && (cover->flags & BAMR_NODE_LEAF));
           blocked = 1;
           if (cover->pid == me)
-            indices_push (&next, c);
+            cache_push (next, c);
           else
-            indices_push (&ask [peer_slot (plan, cover->pid)], c);
+            cache_push (ask [peer_slot (plan, cover->pid)], c);
         }
         if (blocked)
-          indices_push (&next, p);
+          cache_push (next, p);
         else if (tree_divide (p))
         {
           divided++, progress = 1;
-          indices_push (&made, p);
+          cache_push (made, p);
         }
       }
-      free (pending.a);
-      pending = next;
+      indices_swap (&pending, &next);   /* the old list goes with next */
       indices_unique (&pending);
       if (!progress && pending.n <= before)
         break;
     }
 
     /* the requests to the owners, what was divided to every peer */
-    Indices asked = { NULL, 0, 0 }, done = { NULL, 0, 0 };
+    cache (Index) asked;
+    cache (Index) done;
     int sent = made.n;
     for (int k = 0; k < np; k++)
     {
@@ -1148,14 +1146,13 @@ int tree_mpi_refine (int n, const Index * list)
         tree_graft (p);
     }
     for (int q = 0; q < asked.n; q++)
-      indices_push (&pending, asked.a [q]);
-    free (made.a), free (asked.a), free (done.a);
+      cache_push (pending, asked.a [q]);
     if (!any_left (pending.n > 0 || sent > 0))
       break;
   }
   for (int k = 0; k < np; k++)
-    free (ask [k].a);
-  free (ask), free (pending.a);
+    cache_free (ask [k]);
+  free (ask);
   return divided;
 }
 
@@ -1181,6 +1178,17 @@ static int may_merge (Index p)
   return 1;
 }
 
+/*
+.. Merge the families of list (their parents) on the distributed tree,
+.. level by level from the finest any process has (one MPI_Allreduce), as
+.. one process would: a merge at one level may let a coarser one happen.
+.. At each level a family of this process is merged if no neighbour has a
+.. touching child with children (may_merge (), the exact 2:1 rule); then
+.. one round with the peers, which ungraft what was merged here. No
+.. request goes to other processes: a family is never split (the
+.. family-aware cut), so its owner decides alone. Returns the families
+.. merged here; the skeleton and plan are left to the caller.
+*/
 int tree_mpi_coarsen (int n, const Index * list)
 {
   assert (applied);
@@ -1189,22 +1197,23 @@ int tree_mpi_coarsen (int n, const Index * list)
   for (int q = 0; q < n; q++)
     top = list [q].level > top ? list [q].level : top;
   MPI_Allreduce (&top, &all, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-  Indices * ask = calloc ((size_t) (np ? np : 1), sizeof (Indices));
+  cache (Index) * ask = calloc ((size_t) (np ? np : 1), sizeof * ask);
   if (!ask)
     BAMR_ABORT ("out of memory");
   /* level by level, finest first, as one process does: what is merged
    * at a level may let a coarser family merge */
   for (int l = all; l >= 0; l--)
   {
-    Indices made = { NULL, 0, 0 }, asked = { NULL, 0, 0 },
-      done = { NULL, 0, 0 };
+    cache (Index) made;               /* each freed at the scope's end */
+    cache (Index) asked;
+    cache (Index) done;
     for (int q = 0; q < n; q++)
       if (list [q].level == l && index_is_allocated (list [q])
           && index_node (list [q])->pid == me && may_merge (list [q])
           && tree_merge (list [q]))
       {
         merged++;
-        indices_push (&made, list [q]);
+        cache_push (made, list [q]);
       }
     peer_round (plan, ask, &made, &asked, &done, 207);
     for (int q = 0; q < done.n; q++)
@@ -1214,7 +1223,6 @@ int tree_mpi_coarsen (int n, const Index * list)
           && (index_node (p)->flags & BAMR_NODE_HAS_CHILDREN))
         tree_ungraft (p);
     }
-    free (made.a), free (asked.a), free (done.a);
   }
   free (ask);
   return merged;
@@ -1244,6 +1252,24 @@ static void pack_structure (Index x, void * arg)
   bytes_push (arg, head, sizeof (head));
 }
 
+/*
+.. Cut the distributed tree again and move every node that changes hands,
+.. in one pass; no process holds the whole tree. weight [q] is the cost of
+.. own leaf q (tree_caches ()->owned order), or NULL for 1 each.
+.. 1. the cut: the leaves and the weight before this process's
+..    (MPI_Exscan) and the totals; each own leaf by its middle, as
+..    tree_partition () would give it; a family of leaves whole to the
+..    process of its child 0, told to the peers if it is split; the new
+..    first keys, loads and counts of every process (MPI_Allreduce);
+.. 2. the move: each node of this process whose new owner is another,
+..    sent there with the blocks of every scalar in use and N () of it,
+..    structure only (related ()); senders and receivers known from the
+..    new and old first keys, one round (exchange_with ());
+.. 3. every node's pid from the new keys, then the skeleton, peers, plan
+..    and blocks again (distribute_again ()).
+.. Returns the nodes this process sent, or -1 on every process (nothing
+.. changed) if a weight is not > 0 or no partition was made.
+*/
 int tree_mpi_repartition (const double * weight)
 {
   int me = tree_rank (), npe = tree_npe ();
@@ -1302,7 +1328,7 @@ int tree_mpi_repartition (const double * weight)
   */
   const TreeMpiPlan * plan = applied;
   int np = plan ? plan->npeers : 0;
-  Bytes tell = { NULL, 0, 0 };
+  cache (char) tell;                  /* freed as the function ends */
   for (int q = 0; q < n; )
   {
     Index p = tc->owned [q].p;
@@ -1340,7 +1366,7 @@ int tree_mpi_repartition (const double * weight)
     if (!out || !in || !nout || !nin)
       BAMR_ABORT ("out of memory");
     for (int k = 0; k < np; k++)
-      out [k] = tell.a, nout [k] = (int) tell.n;
+      out [k] = tell.a, nout [k] = tell.n;
     exchange_with (np, plan ? plan->peers : NULL, out, nout,
                    np, plan ? plan->peers : NULL, in, nin, 209);
     for (int k = 0; k < np; k++)
@@ -1359,7 +1385,7 @@ int tree_mpi_repartition (const double * weight)
       }
       free (in [k]);
     }
-    free (out), free (in), free (nout), free (nin), free (tell.a);
+    free (out), free (in), free (nout), free (nin);
   }
   for (int q = 0; q < n; q++)
   {
@@ -1434,7 +1460,7 @@ int tree_mpi_repartition (const double * weight)
       if (o != me && old [o] < old [o + 1])
         from [nfrom++] = o;
   int mt = nto ? nto : 1, mf = nfrom ? nfrom : 1;
-  Bytes * box = calloc ((size_t) mt, sizeof (Bytes));
+  cache (char) * box = calloc ((size_t) mt, sizeof * box);
   char ** out = malloc ((size_t) mt * sizeof (char *));
   int * nout = calloc ((size_t) mt, sizeof (int));
   char ** in = malloc ((size_t) mf * sizeof (char *));
@@ -1463,10 +1489,7 @@ int tree_mpi_repartition (const double * weight)
     sent++;
   }
   for (int k = 0; k < nto; k++)
-  {
-    assert (box [k].n <= INT_MAX);
-    out [k] = box [k].a, nout [k] = (int) box [k].n;
-  }
+    out [k] = box [k].a, nout [k] = box [k].n;
   exchange_with (nto, to, out, nout, nfrom, from, in, nin, 204);
   /* the nodes received made here; those with data active, and filled */
   for (int k = 0; k < nfrom; k++)
@@ -1494,7 +1517,7 @@ int tree_mpi_repartition (const double * weight)
   part.generation = tree_generation;  /* the partition of the tree now */
 
   for (int k = 0; k < nto; k++)
-    free (box [k].a);
+    cache_free (box [k]);
   for (int k = 0; k < nfrom; k++)
     free (in [k]);
   free (box), free (out), free (nout), free (in), free (nin);
@@ -1503,6 +1526,14 @@ int tree_mpi_repartition (const double * weight)
   return sent;
 }
 
+/*
+.. The first partition, of a tree every process made alike (tree ()):
+.. rank 0 cuts it (tree_partition ()) and broadcasts every node's pid, in
+.. Morton order, and the loads; the others check they hold the same tree
+.. (its size, nothing pruned) and record the same partition. Then each
+.. process keeps its skeleton only (distribute_again ()). Returns -1 on
+.. every process if rank 0 could not cut it.
+*/
 int tree_mpi_partition (const double * weight)
 {
   int rank = tree_rank (), npe = tree_npe ();
@@ -1564,6 +1595,13 @@ static void pack (const TreeMpiList * list, int n, const int * s, char * buf,
     }
 }
 
+/*
+.. One exchange of the plan applied: the blocks of the n scalars s, for the
+.. nodes of the lists of (parents, kind, level), with every peer that has
+.. one. A buffer a list, the receives posted with the sends, one
+.. MPI_Waitall, then unpacked. The tag is unique to (parents, kind,
+.. level), so exchanges of different lists never match each other.
+*/
 void tree_mpi_exchange (int parents, int kind, int level, int n, const int * s)
 {
   if (!applied || n <= 0 || level < 0 || level > BAMR_MAX_DEPTH + 1)

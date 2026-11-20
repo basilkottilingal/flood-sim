@@ -59,6 +59,13 @@ int tree_rank (void)
   return G(rank);
 }
 
+/*
+.. *v, of type (TREE_INT ... TREE_DOUBLE), replaced by op (TREE_SUM,
+.. TREE_PROD, TREE_MIN, TREE_MAX) over every process: one MPI_Allreduce.
+.. A no-op on one process. cwrap's reduction clause calls it after a
+.. foreach (); the value is copied first, as MPI forbids the same buffer
+.. for input and output.
+*/
 void tree_reduce (void * v, int type, int op)
 {
   assert (type >= TREE_INT && type <= TREE_DOUBLE);
@@ -131,6 +138,12 @@ static void terminal_add (int l, int n)
     G(level_bits) &= ~((uint32_t) 1 << l);
 }
 
+/*
+.. The tree gone, back to the state before tree (): the MPI plan first (it
+.. points into the tree), the caches, the level index, then every node and
+.. block with their pools; the domain and the counts reset. MPI itself
+.. stays up: a new tree () may follow.
+*/
 void tree_destroy (void)
 {
   #ifdef _MPI
@@ -174,6 +187,14 @@ static BAMRNode * allocate_root (void)
   return node;
 }
 
+/*
+.. The family of children of the leaf at IJKL made, below depth max: one
+.. object for the 2^D nodes, one for each scalar's blocks (not zeroed:
+.. the caller fills them), the pid the parent's. The leaf counts and the
+.. LEAF flags are the caller's (divide_leaf_ghosts ()). 0 at depth max;
+.. below it a split that fails (no memory, a child already there or not
+.. in the level index) aborts, with the line (BAMR_ABORT ()).
+*/
 static int add_children (int IJKLargs)
 {
   assert (level >= tree_get_depth_min ());
@@ -191,19 +212,29 @@ static int add_children (int IJKLargs)
   .. divide_leaf () fills every cell.
   */
   BAMRNode * family = pool_alloc (pool_family);     /* zeroed: flags 0 */
+  if (!family)
+    BAMR_ABORT ("add_children (): no memory for a family of nodes");
   void *** t [TREE_NCHILDREN];
   for (int c = 0; c < TREE_NCHILDREN; c++)
   {
     t [c] = family [c].s = grid_scalar_table_new ();
+    if (!t [c])
+      BAMR_ABORT ("add_children (): no memory for a scalar table");
     family [c].pid = node->pid;       /* the owner's, until partitioned */
   }
   grid_scalar_family_new (t, 1);
   int c = 0;
   children_of ((Index) {IJKL})
   {
-    assert (!node);
+    if (node)
+      BAMR_ABORT ("add_children (): a child exists already");
     lidx_assign (m, IJK, len, &family [c++]);
   }
+  /* below depth max a split must succeed: no silent 0 from here */
+  Index p = {IJKL};                   /* not in the loop: IJKL holds k */
+  for (int q = 0; q < TREE_NCHILDREN; q++)
+    if (!index_is_allocated (index_child (p, q)))
+      BAMR_ABORT ("add_children (): a child is not in the level index");
   G (nb) += TREE_NCHILDREN;
   return 1;
 }
@@ -283,14 +314,6 @@ static int inside (Index q)
   return in;
 }
 
-/* the node covering q, q or one of its ancestors: the root covers all */
-static Index covering (Index q)
-{
-  while (!index_is_allocated (q))
-    q = index_parent (q);
-  return q;
-}
-
 /* refining and coarsening read the whole tree around a node */
 static void not_pruned (const char * f)
 {
@@ -307,6 +330,9 @@ static void not_pruned (const char * f)
 .. p. Each index of level l around p must therefore hold a node already, or
 .. the coarser leaf covering it would touch leaves two levels finer: that
 .. leaf is refined first, which may in turn refine others, coarser still.
+.. By 2:1 balance (faces, edges and corners) the leaf covering a missing
+.. index is its parent, one level up, and refining it makes the index: one
+.. step, no search (asserted).
 */
 int tree_refine (Index p)
 {
@@ -318,10 +344,14 @@ int tree_refine (Index p)
   neighbors_of (p, 1)
   {
     Index q = {IJKL};
-    while (inside (q) && !index_is_allocated (q))
+    if (inside (q) && !index_is_allocated (q))
     {
-      int n = tree_refine (covering (q));
+      Index c = index_parent (q);     /* the covering leaf, by 2:1 */
+      assert (index_is_allocated (c)  /* else the tree is not 2:1 */
+              && (index_node (c)->flags & BAMR_NODE_LEAF));
+      int n = tree_refine (c);
       assert (n);                     /* coarser than p: below depth max */
+      assert (index_is_allocated (q));
       count += n;
     }
   }
@@ -343,6 +373,11 @@ static int touches (Index p, Index q)
   return t;
 }
 
+/*
+.. Does child c of b, a neighbour of p at p's level, touch p? Along each
+.. axis where b is beside p, the child must sit in the half of b towards
+.. p; along the others, either half. Exact for faces, edges and corners.
+*/
 int tree_child_touches (Index p, Index b, int c)
 {
   /* along each axis where b is beside p, the half of b towards p */
@@ -358,6 +393,18 @@ int tree_child_touches (Index p, Index b, int c)
   return touch;
 }
 
+/*
+.. The family below p merged, on one process (a pruned tree aborts):
+.. 1. every child must be a leaf;
+.. 2. the exact 2:1 rule: no neighbour of p has a child touching p
+..    (tree_child_touches ()) that has children of its own, which would
+..    touch p two levels finer;
+.. 3. p gets the restriction of its children, which are freed;
+.. 4. the ghosts again of p and of the finer leaves touching it, which
+..    read p's children before and prolong p now.
+.. Returns 1 if merged, 0 if not. No cascade: coarsening never breaks 2:1
+.. elsewhere.
+*/
 int tree_coarsen (Index p)
 {
   not_pruned ("tree_coarsen");
@@ -412,6 +459,13 @@ static void mpi_finalize (void)
 }
 #endif
 
+/*
+.. The tree made, depthmax and blockdepth already clamped (tree_replicated
+.. ()): MPI started if the program did not (FUNNELED, finalised at exit),
+.. npe and rank read; the pools of nodes, families and blocks; the root,
+.. a leaf, divided once, so the tree starts at level 1. Aborts if a tree
+.. exists already.
+*/
 static int grid_init (int depthmax, int blockdepth)
 {
   if (pool_node)
@@ -456,6 +510,14 @@ static int grid_init (int depthmax, int blockdepth)
   return 0;
 }
 
+/*
+.. The tree, the one entry point: on one process a tree of level 1. On
+.. several, every process makes the same tree and refines it uniformly to
+.. the first level with at least 4 npe families of leaves (so the cut,
+.. which keeps families whole, gives every process some), then rank 0
+.. partitions it and each process keeps its skeleton only
+.. (tree_mpi_partition ()). Every process must call it.
+*/
 int tree (int depthmax, int blockdepth)
 {
   tree_replicated (depthmax, blockdepth);
@@ -489,6 +551,12 @@ int tree (int depthmax, int blockdepth)
   return 1;
 }
 
+/*
+.. The tree as on one process, also under MPI: every process holds all of
+.. it, nothing partitioned (tests, and tree () before its cut). depthmax
+.. clamped to 1 ... BAMR_MAX_DEPTH, blockdepth to 4 ... the largest block
+.. the dimension allows.
+*/
 int tree_replicated (int depthmax, int blockdepth)
 {
   depthmax = depthmax > BAMR_MAX_DEPTH ? BAMR_MAX_DEPTH :
@@ -543,6 +611,12 @@ static int free_below (Index p)
   return n;
 }
 
+/*
+.. Hold less: p's subtree freed here, nodes and blocks; p stays, flagged
+.. PRUNED (no children here: none, or held by other processes). The tree
+.. itself does not change, only what this process holds of it. Returns
+.. the nodes freed, 0 if p has no children here.
+*/
 int tree_prune (Index p)
 {
   if (!index_is_allocated (p))
@@ -563,6 +637,12 @@ int tree_pruned (void)
   return G(npruned);
 }
 
+/*
+.. A real refinement of this process's leaf p: children made and their
+.. interiors prolonged from p. Unlike tree_refine (), no 2:1 cascade and
+.. no ghosts: the caller (tree_mpi_refine ()) sees to both. 0 if p is not
+.. a leaf here or is at depth max.
+*/
 int tree_divide (Index p)
 {
   if (!index_is_allocated (p) || p.level >= G(depthmax)
@@ -572,6 +652,12 @@ int tree_divide (Index p)
   return divide_leaf_ghosts (IJKL, 0);
 }
 
+/*
+.. A real coarsening of this process's family below p: p gets the
+.. restriction of its children, which are freed. Unlike tree_coarsen (),
+.. no 2:1 check and no ghosts: the caller (tree_mpi_coarsen ()) sees to
+.. both. 0 if a child is not a leaf.
+*/
 int tree_merge (Index p)
 {
   if (!index_is_allocated (p)
@@ -587,6 +673,12 @@ int tree_merge (Index p)
   return 1;
 }
 
+/*
+.. Know less: the leaf p, of another process and out of this one's
+.. skeleton, is no longer claimed a leaf: PRUNED, its structure unknown,
+.. since no one will tell this process when it changes. Its blocks stay
+.. (the family's). Nothing if p is not a leaf.
+*/
 void tree_forget (Index p)
 {
   BAMRNode * node = index_node (p);
@@ -599,6 +691,12 @@ void tree_forget (Index p)
   terminal_add (p.level, -1);
 }
 
+/*
+.. Catch up with another process's division: the leaf p, held here but
+.. owned elsewhere, gets children, structure only (inactive, no blocks,
+.. the owner's pid). The owner divided it (tree_divide ()) and told this
+.. process (tree_mpi_refine ()).
+*/
 void tree_graft (Index p)
 {
   BAMRNode * node = index_node (p);
@@ -622,6 +720,11 @@ void tree_graft (Index p)
   G(nlb) += TREE_NCHILDREN - 1;
 }
 
+/*
+.. Catch up with another process's merge: the family below p, held here
+.. but owned elsewhere, freed; p a leaf again. The owner merged it
+.. (tree_merge ()) and told this process (tree_mpi_coarsen ()).
+*/
 void tree_ungraft (Index p)
 {
   BAMRNode * node = index_node (p);
@@ -634,6 +737,14 @@ void tree_ungraft (Index p)
   terminal_add (p.level, 1);
 }
 
+/*
+.. Hold more: p made a node of this process's tree, because a message
+.. named it (a node moved here, or the skeleton around one). Its missing
+.. ancestors are made first, each with its whole family, the new
+.. children PRUNED, inactive, without blocks and with pid -1 (the caller
+.. sets pids). If leaf and p is pruned, p becomes a leaf. Returns the
+.. nodes made.
+*/
 int tree_insert (Index p, int leaf)
 {
   int made = 0;
@@ -762,21 +873,57 @@ void tree_caches_changed (void)
   caches_changed ();
 }
 
+/*
+.. The bits of x spread apart, dimension - 1 zeros between two: bit b to
+.. bit dimension * b. Each step moves half of the groups left of the last
+.. step, so the bits are placed in log2 (bits) steps, not one at a time
+.. ("binary magic numbers"; libhmesh's spread () is the same). 2D: the
+.. low 32 bits, 3D: the low 21, the most BAMR_MAX_DEPTH allows (the
+.. checks at the top).
+*/
+#if dimension == 2
+static inline uint64_t spread (uint64_t x)
+{
+  x &= UINT64_C (0xffffffff);
+  x = (x | x << 16) & UINT64_C (0x0000ffff0000ffff);
+  x = (x | x << 8)  & UINT64_C (0x00ff00ff00ff00ff);
+  x = (x | x << 4)  & UINT64_C (0x0f0f0f0f0f0f0f0f);
+  x = (x | x << 2)  & UINT64_C (0x3333333333333333);
+  x = (x | x << 1)  & UINT64_C (0x5555555555555555);
+  return x;
+}
+#elif dimension == 3
+static inline uint64_t spread (uint64_t x)
+{
+  x &= UINT64_C (0x1fffff);
+  x = (x | x << 32) & UINT64_C (0x001f00000000ffff);
+  x = (x | x << 16) & UINT64_C (0x001f0000ff0000ff);
+  x = (x | x << 8)  & UINT64_C (0x100f00f00f00f00f);
+  x = (x | x << 4)  & UINT64_C (0x10c30c30c30c30c3);
+  x = (x | x << 2)  & UINT64_C (0x1249249249249249);
+  return x;
+}
+#endif
+
+/*
+.. The position of p on the Morton curve: the bits of its lower corner at
+.. the finest level, interleaved (x lowest). A node and its first leaf
+.. share the key, and a subtree's keys are one interval, so the key of
+.. any index says which process's piece holds it (tree_partition_owner
+.. ()).
+*/
 uint64_t tree_morton_key (Index p)
 {
   assert (p.level >= 0 && p.level <= BAMR_MAX_DEPTH);
   int s = BAMR_MAX_DEPTH - p.level;
-  uint64_t key = 0, x [3] = { (uint64_t) p.i << s, 0, 0 };
-  #if dimension > 1
-  x [1] = (uint64_t) p.j << s;
+  #if dimension == 1
+  return (uint64_t) p.i << s;         /* nothing to interleave */
+  #elif dimension == 2
+  return spread ((uint64_t) p.i << s) | spread ((uint64_t) p.j << s) << 1;
+  #else
+  return spread ((uint64_t) p.i << s) | spread ((uint64_t) p.j << s) << 1
+         | spread ((uint64_t) p.k << s) << 2;
   #endif
-  #if dimension > 2
-  x [2] = (uint64_t) p.k << s;
-  #endif
-  for (int b = 0; b < BAMR_MAX_DEPTH; b++)
-    for (int a = 0; a < dimension; a++)
-      key |= ((x [a] >> b) & 1) << (dimension * b + a);
-  return key;
 }
 
 void tree_changed_under (const char * loop)

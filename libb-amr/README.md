@@ -846,6 +846,18 @@ hashes every cell of every block; `TIMING=1` also times
 
 - `test_partition.c` and `test_mpi.c` (`-D_MPI`, on 1 and 3 processes of
   `tests/mpi-fork`): see "MPI: partition, plans, pruning".
+- `test_morton.c`: `tree_morton_key ()`, interleaved by masks (log2 of
+  the bits in steps, as libhmesh's `spread ()`), against the reference
+  one bit at a time: every value of each axis at the finest level (the key
+  is the OR of one part an axis), every index of the levels with at most
+  2^18 cells, 10^6 random indices, and a child's key from its parent's
+  (`key (p) | c << dimension (BAMR_MAX_DEPTH - level - 1)`). Deliberate
+  bugs caught: a wrong mask in 2D and in 3D, a wrong shift in 1D.
+
+  | key at -O2, ns | 1D | 2D | 3D |
+  |---|---|---|---|
+  | one bit at a time | 17.5 | 41.2 | 68.2 |
+  | masks | 1.5 | 9.0 | 9.9 |
 - `test_index.c`: the three level indices side by side (memindex,
   voxel-memindex, nano-vdb, dense and compact) against a reference hash
   map: random assigns, overwrites and frees, clustered and scattered; every
