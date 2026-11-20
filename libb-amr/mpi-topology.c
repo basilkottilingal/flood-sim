@@ -28,13 +28,13 @@
 
 #ifdef _MPI
 
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 #ifndef _GNU_SOURCE
 #   define _GNU_SOURCE
 #endif
 #include <sched.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <glob.h>
@@ -529,4 +529,13 @@ int mpi_topology (int argc, char **argv)
   MPI_Finalize ();
   return 0;
 }
+
+#if 0
+int main (int argc, char **argv)
+{
+  mpi_topology (argc, argv);
+  return 0;
+}
+#endif
+
 #endif
