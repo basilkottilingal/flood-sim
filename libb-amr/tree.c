@@ -41,6 +41,7 @@ static int G(blockdepth) = 1; /* 2^blockdepth cells per block side */
 static int G(nleaves) [BAMR_MAX_DEPTH + 1];
 static uint32_t G(level_bits) = 0;
 static int G(npruned) = 0;    /* pruned nodes: tree_prune ()      */
+static int G(depth0) = 0;     /* tree ()'s level, 0: its default  */
 
 /* the processes (tree.h): MPI_COMM_WORLD's, read by tree (); or constants */
 #ifdef _MPI
@@ -191,15 +192,13 @@ static BAMRNode * allocate_root (void)
 .. The family of children of the leaf at IJKL made, below depth max: one
 .. object for the 2^D nodes, one for each scalar's blocks (not zeroed:
 .. the caller fills them), the pid the parent's. The leaf counts and the
-.. LEAF flags are the caller's (divide_leaf_ghosts ()). 0 at depth max;
-.. below it a split that fails (no memory, a child already there or not
-.. in the level index) aborts, with the line (BAMR_ABORT ()).
+.. LEAF flags are the caller's (divide_leaf_ghosts ()), and so is depth
+.. max. 0 if the split fails: no memory, a child already there or not in
+.. the level index.
 */
 static int add_children (int IJKLargs)
 {
-  assert (level >= tree_get_depth_min ());
-  if (level >= G(depthmax))
-    return 0;
+  assert (level >= tree_get_depth_min () && level < G(depthmax));
   BAMR_NODE_ENV ();
   assert (node && !is_parent ());
   caches_changed ();
@@ -213,13 +212,13 @@ static int add_children (int IJKLargs)
   */
   BAMRNode * family = pool_alloc (pool_family);     /* zeroed: flags 0 */
   if (!family)
-    BAMR_ABORT ("add_children (): no memory for a family of nodes");
+    return 0;
   void *** t [TREE_NCHILDREN];
   for (int c = 0; c < TREE_NCHILDREN; c++)
   {
     t [c] = family [c].s = grid_scalar_table_new ();
     if (!t [c])
-      BAMR_ABORT ("add_children (): no memory for a scalar table");
+      return 0;
     family [c].pid = node->pid;       /* the owner's, until partitioned */
   }
   grid_scalar_family_new (t, 1);
@@ -227,24 +226,27 @@ static int add_children (int IJKLargs)
   children_of ((Index) {IJKL})
   {
     if (node)
-      BAMR_ABORT ("add_children (): a child exists already");
+      return 0;
     lidx_assign (m, IJK, len, &family [c++]);
   }
-  /* below depth max a split must succeed: no silent 0 from here */
   Index p = {IJKL};                   /* not in the loop: IJKL holds k */
   for (int q = 0; q < TREE_NCHILDREN; q++)
     if (!index_is_allocated (index_child (p, q)))
-      BAMR_ABORT ("add_children (): a child is not in the level index");
+      return 0;
   G (nb) += TREE_NCHILDREN;
   return 1;
 }
 
 /* the leaf at IJKL divided, its children's interiors prolonged from it;
-.. their ghosts made too if ghosts (else the caller's, as tree_divide ()) */
+.. their ghosts made too if ghosts (else the caller's, as tree_divide ()).
+.. 0 at depth max; below it the split must succeed, or the run stops */
 static int divide_leaf_ghosts (int IJKLargs, int ghosts)
 {
-  if (!add_children (IJKL))
+  if (level >= G(depthmax))
     return 0;
+  if (!add_children (IJKL))
+    BAMR_ABORT ("divide_leaf_ghosts (): the split failed (no memory, or a "
+                "child already there or not in the level index)");
   BAMR_NODE_ENV ();
   assert (is_leaf ());
   node->flags &= ~BAMR_NODE_LEAF;
@@ -510,44 +512,56 @@ static int grid_init (int depthmax, int blockdepth)
   return 0;
 }
 
+void tree_initial_depth (int level)
+{
+  G(depth0) = level > 0 ? level : 0;
+}
+
+/* every leaf refined, level after level, until level L: a uniform tree */
+static void refine_uniform (int L)
+{
+  for (int l = tree_get_depth_min (); l < L; l++)
+  {
+    const TreeCaches * tc = tree_caches ();
+    int n = tc->nleaves;
+    Index * leaves = malloc ((size_t) n * sizeof (Index));
+    if (!leaves)
+      BAMR_ABORT ("out of memory");
+    for (int q = 0; q < n; q++)
+      leaves [q] = tc->leaves [q].p;
+    for (int q = 0; q < n; q++)
+      tree_refine (leaves [q]);
+    free (leaves);
+  }
+}
+
 /*
-.. The tree, the one entry point: on one process a tree of level 1. On
-.. several, every process makes the same tree and refines it uniformly to
-.. the first level with at least 4 npe families of leaves (so the cut,
-.. which keeps families whole, gives every process some), then rank 0
-.. partitions it and each process keeps its skeleton only
-.. (tree_mpi_partition ()). Every process must call it.
+.. The tree, the one entry point: uniform at level L, the level of
+.. tree_initial_depth () (below depth max), by default 1 on one process
+.. and on several the first level with at least 4 npe families of leaves
+.. (the cut keeps families whole: so every process gets some). On several
+.. processes each makes only its part and the skeleton around it, from
+.. the cut of a uniform level, a formula (tree_mpi_start ()): no process
+.. holds the whole level, none sends its tree. Every process must call it.
 */
 int tree (int depthmax, int blockdepth)
 {
   tree_replicated (depthmax, blockdepth);
+  int L = G(depth0) ? G(depth0) : 1;
   #ifdef _MPI
-  /*
-  .. on several processes: refined to the first level with 4 npe families
-  .. of leaves at least (below depth max), as the cut never splits one,
-  .. then distributed
-  */
-  if (G(npe) > 1)
-  {
-    int L = 1;
+  if (G(npe) > 1 && !G(depth0))
     while (L < G(depthmax) && (1L << (dimension * (L - 1))) < 4L * G(npe))
       L++;
-    for (int l = 1; l < L; l++)
-    {
-      const TreeCaches * tc = tree_caches ();
-      int n = tc->nleaves;
-      Index * leaves = malloc ((size_t) n * sizeof (Index));
-      if (!leaves)
-        BAMR_ABORT ("out of memory");
-      for (int q = 0; q < n; q++)
-        leaves [q] = tc->leaves [q].p;
-      for (int q = 0; q < n; q++)
-        tree_refine (leaves [q]);
-      free (leaves);
-    }
-    tree_mpi_partition (NULL);
+  #endif
+  L = L < G(depthmax) ? L : G(depthmax);
+  #ifdef _MPI
+  if (G(npe) > 1)
+  {
+    tree_mpi_start (L);
+    return 1;
   }
   #endif
+  refine_uniform (L);
   return 1;
 }
 

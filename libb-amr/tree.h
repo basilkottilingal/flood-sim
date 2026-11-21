@@ -366,17 +366,22 @@
   .. API (s)
   */
   /*
-  .. tree (depthmax, blockdepth): the tree, from level 1 (2^dimension
-  .. leaves). On several processes (-D_MPI), refined at once to the first
-  .. level with 4 npe families of leaves at least (the cut never splits a
-  .. family), and distributed (tree_mpi_partition
-  .. (), tree-mpi.h): each process its own leaves and a layer around them.
-  .. Such a tree cannot be refined or coarsened yet.
-  .. tree_replicated (depthmax, blockdepth): the same, not distributed: the
+  .. tree (depthmax, blockdepth): the tree, uniform at the level of
+  .. tree_initial_depth (), by default level 1 (2^dimension leaves) on one
+  .. process, and on several (-D_MPI) the first level with 4 npe families
+  .. of leaves at least (the cut never splits a family). Distributed on
+  .. several processes: each makes its own leaves and a layer around them
+  .. only (tree_mpi_start (), tree-mpi.h). Such a tree is adapted by
+  .. adapt_wavelet (), not by tree_refine () or tree_coarsen ().
+  .. tree_initial_depth (level): tree ()'s level from now on, the same on
+  .. any number of processes (clamped to depthmax); 0 for the default.
+  .. Every block of a new tree is 0.
+  .. tree_replicated (depthmax, blockdepth): level 1, not distributed: the
   .. whole tree on every process, as on one, to refine as wanted before
   .. tree_mpi_partition () (an initial mesh, the tests).
   */
   int  tree (int depthmax, int blockdepth);
+  void tree_initial_depth (int level);
   int  tree_replicated (int depthmax, int blockdepth);
   void tree_shift_resize (double x0, double y0, double z0, double h0);
   double tree_get_origin (int axis); /* x0, y0, z0: the domain's corner  */

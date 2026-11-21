@@ -13,6 +13,7 @@
 #include "bamr-error.h"
 #include "block-ghosts.h"
 #include "tree-mpi.h"
+#include "grid-scalar.h"
 
 /* a node needed by the process being pruned for, and the root of a
 .. subtree with nothing needed: set only during tree_mpi_prune (), bits no
@@ -1228,6 +1229,26 @@ int tree_mpi_coarsen (int n, const Index * list)
   return merged;
 }
 
+/* what one process contributes to another's entry of the partition: the
+.. smallest key of the leaves it gives, their weight and number */
+typedef struct { uint64_t key; double load; long count; } PartEntry;
+
+/* MPI's user op: inout [k] = in [k] merged, the key the smaller, load and
+.. count summed */
+static void part_merge (void * in, void * inout, int * len,
+                        MPI_Datatype * type)
+{
+  (void) type;
+  const PartEntry * a = in;
+  PartEntry * b = inout;
+  for (int k = 0; k < *len; k++)
+  {
+    b [k].key = a [k].key < b [k].key ? a [k].key : b [k].key;
+    b [k].load += a [k].load;
+    b [k].count += a [k].count;
+  }
+}
+
 /* the owner of key in a partition's first keys k [0 .. npe] */
 static int owner_of_key (const uint64_t * k, int npe, uint64_t key)
 {
@@ -1299,16 +1320,12 @@ int tree_mpi_repartition (const double * weight)
     before = 0, wbefore = 0;          /* Exscan leaves rank 0's undefined */
   MPI_Allreduce (&cnt, &total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce (&wsum, &wtotal, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  uint64_t * kmin = malloc ((size_t) npe * sizeof (uint64_t));
-  uint64_t * kall = malloc ((size_t) npe * sizeof (uint64_t));
-  double * load = calloc ((size_t) npe, sizeof (double));
-  double * lall = malloc ((size_t) npe * sizeof (double));
-  long * count = calloc ((size_t) npe, sizeof (long));
-  long * call = malloc ((size_t) npe * sizeof (long));
-  if (!kmin || !kall || !load || !lall || !count || !call)
+  PartEntry * mine = malloc ((size_t) npe * sizeof (PartEntry));
+  PartEntry * all = malloc ((size_t) npe * sizeof (PartEntry));
+  if (!mine || !all)
     BAMR_ABORT ("out of memory");
   for (int r = 0; r < npe; r++)
-    kmin [r] = UINT64_MAX;
+    mine [r] = (PartEntry) { UINT64_MAX, 0, 0 };
   /* each leaf by its middle, as tree_partition () */
   int * pid_of = malloc ((size_t) (n ? n : 1) * sizeof (int));
   if (!pid_of)
@@ -1391,30 +1408,41 @@ int tree_mpi_repartition (const double * weight)
   {
     double w = weight ? weight [q] : 1;
     uint64_t key = tree_morton_key (tc->owned [q].p);
-    kmin [pid_of [q]] = key < kmin [pid_of [q]] ? key : kmin [pid_of [q]];
-    load [pid_of [q]] += w;
-    count [pid_of [q]]++;
+    PartEntry * e = &mine [pid_of [q]];
+    e->key = key < e->key ? key : e->key;
+    e->load += w;
+    e->count++;
   }
   free (pid_of);
-  /* every process's first key, load and leaves, everywhere */
-  MPI_Allreduce (kmin, kall, npe, MPI_UNSIGNED_LONG_LONG, MPI_MIN,
-                 MPI_COMM_WORLD);
-  MPI_Allreduce (load, lall, npe, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce (count, call, npe, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  /* every process's first key, load and leaves, everywhere: one
+   * MPI_Allreduce, of a PartEntry a process (part_merge ()) */
+  MPI_Datatype type;
+  MPI_Op op;
+  MPI_Type_contiguous ((int) sizeof (PartEntry), MPI_BYTE, &type);
+  MPI_Type_commit (&type);
+  MPI_Op_create (part_merge, 1, &op);
+  MPI_Allreduce (mine, all, npe, type, op, MPI_COMM_WORLD);
+  MPI_Op_free (&op);
+  MPI_Type_free (&type);
   int * first = malloc ((size_t) (npe + 1) * sizeof (int));
   uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
-  if (!first || !key)
+  double * lall = malloc ((size_t) npe * sizeof (double));
+  if (!first || !key || !lall)
     BAMR_ABORT ("out of memory");
   first [0] = 0;
   for (int r = 0; r < npe; r++)
-    first [r + 1] = first [r] + (int) call [r];
+    first [r + 1] = first [r] + (int) all [r].count;
   key [npe] = UINT64_MAX;
   for (int r = npe - 1; r >= 0; r--)
-    key [r] = call [r] ? kall [r] : key [r + 1];
+    key [r] = all [r].count ? all [r].key : key [r + 1];
   key [0] = 0;
   double most = 0;
   for (int r = 0; r < npe; r++)
+  {
+    lall [r] = all [r].load;
     most = lall [r] > most ? lall [r] : most;
+  }
+  free (mine), free (all);
   uint64_t * old = part.key_first;    /* the old partition's, kept here */
   free (part.leaf_first), free (part.load);
   part = (TreePartition) {
@@ -1432,12 +1460,16 @@ int tree_mpi_repartition (const double * weight)
   .. old owners of its new piece of the curve
   */
   int ns = 0, ids [NSCALAR_MAX];
-  for (int s = 0; s < NSCALAR_MAX; s++)
-    if (scalar_in_use (s))
-      ids [ns++] = s;
+  foreach_scalar (s)                  /* ascending: both sides' order */
+    ids [ns++] = s;
   size_t bytes = (size_t) tree_block_shape ().cells * sizeof (Real);
   int * to = malloc ((size_t) (tc->nall + 1) * sizeof (int)), nto = 0;
-  int * from = malloc ((size_t) npe * sizeof (int)), nfrom = 0;
+  /* the old owners of the new piece: a range of processes */
+  int lo = 0, hi = -1;
+  if (key [me] < key [me + 1])
+    lo = owner_of_key (old, npe, key [me]),
+    hi = owner_of_key (old, npe, key [me + 1] - 1);
+  int * from = malloc ((size_t) (hi - lo + 2) * sizeof (int)), nfrom = 0;
   if (!to || !from)
     BAMR_ABORT ("out of memory");
   for (int q = 0; q < tc->nall; q++)
@@ -1454,11 +1486,9 @@ int tree_mpi_repartition (const double * weight)
     if (!u || to [u - 1] != to [k])
       to [u++] = to [k];
   nto = u;
-  if (key [me] < key [me + 1])
-    for (int o = owner_of_key (old, npe, key [me]);
-         o <= owner_of_key (old, npe, key [me + 1] - 1); o++)
-      if (o != me && old [o] < old [o + 1])
-        from [nfrom++] = o;
+  for (int o = lo; o <= hi; o++)
+    if (o != me && old [o] < old [o + 1])
+      from [nfrom++] = o;
   int mt = nto ? nto : 1, mf = nfrom ? nfrom : 1;
   cache (char) * box = calloc ((size_t) mt, sizeof * box);
   char ** out = malloc ((size_t) mt * sizeof (char *));
@@ -1522,7 +1552,6 @@ int tree_mpi_repartition (const double * weight)
     free (in [k]);
   free (box), free (out), free (nout), free (in), free (nin);
   free (to), free (from), free (old);
-  free (kmin), free (kall), free (load), free (count), free (call);
   return sent;
 }
 
@@ -1577,6 +1606,159 @@ int tree_mpi_partition (const double * weight)
   free (pid);
   /* from here no process uses the whole tree */
   distribute_again ();
+  return 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* the start: a uniform level, distributed with no process holding it all  */
+/* ---------------------------------------------------------------------- */
+
+/* the node of Morton index m at level l (tree_morton_key (p) >> dimension
+.. (BAMR_MAX_DEPTH - l)): its bits dealt back to the axes */
+static Index index_of_morton (uint64_t m, int l)
+{
+  Index p;
+  memset (&p, 0, sizeof (p));
+  p.level = l;
+  for (int b = 0; b < l; b++)
+  {
+    p.i |= (int) ((m >> (dimension * b)) & 1) << b;
+    #if dimension > 1
+    p.j |= (int) ((m >> (dimension * b + 1)) & 1) << b;
+    #endif
+    #if dimension > 2
+    p.k |= (int) ((m >> (dimension * b + 2)) & 1) << b;
+    #endif
+  }
+  return p;
+}
+
+/*
+.. The process of family f of a uniform level of n leaves, as
+.. tree_partition () cuts it with unit weights: the process whose share of
+.. the curve holds the middle of the family's child 0, leaf f 2^D. Exact
+.. in integers: npe (2 g + 1) < 2^63 for n <= 2^30, npe < 2^31.
+*/
+static int start_pid (uint64_t f, uint64_t n, int npe)
+{
+  uint64_t g = f * TREE_NCHILDREN;
+  return (int) ((uint64_t) npe * (2 * g + 1) / (2 * n));
+}
+
+/* p and its same-level neighbours held here, leaves at level L: N (p) on
+.. a uniform tree, but for the parent and children, which tree_insert ()
+.. makes with every family whole */
+static void start_around (Index p, int L)
+{
+  tree_insert (p, p.level == L);
+  for (int dir = 0; dir < TREE_NDIRS; dir++)
+  {
+    Index b;
+    if (dir != TREE_DIR_CENTRE && index_dir (p, dir, &b))
+      tree_insert (b, b.level == L);
+  }
+}
+
+/*
+.. The distributed tree of a uniform level L, made by each process alone:
+.. tree () on several processes, after tree_replicated () made level 1.
+.. 1. the cut, a formula of L and npe (start_pid ()): every process's first
+..    leaf, key and load, here, no message;
+.. 2. this process's leaves and N () of each, its parents (those whose
+..    first leaf is its) and N () of each (tree_insert () makes the
+..    ancestors, every family whole); every node's pid by the formula;
+.. 3. the skeleton, peers, plan and blocks (distribute_again (): one
+..    MPI_Allreduce of the levels, one round with the peers); every block
+..    0, as the one-process tree's.
+.. The same tree, pids, plan and blocks as tree_replicated (), a uniform
+.. refinement to L and tree_mpi_partition (), in O(own + halo) memory and
+.. work instead of O(2^(D L)) on every process. At most 2^30 leaves.
+*/
+int tree_mpi_start (int L)
+{
+  int me = tree_rank (), npe = tree_npe ();
+  assert (L >= 1 && L <= tree_get_depth_max ());
+  assert (tree_get_depth () == 1 && !tree_pruned ());
+  if (dimension * L > 30)
+    BAMR_ABORT ("tree_mpi_start (): more than 2^30 leaves at that level");
+  tree_mpi_end ();
+
+  /* 1. */
+  uint64_t n = (uint64_t) 1 << (dimension * L), nf = n / TREE_NCHILDREN;
+  int shift = dimension * (BAMR_MAX_DEPTH - L);   /* a key to a leaf's q */
+  int * first = malloc ((size_t) (npe + 1) * sizeof (int));
+  uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
+  double * load = malloc ((size_t) npe * sizeof (double));
+  if (!first || !key || !load)
+    BAMR_ABORT ("out of memory");
+  for (int r = 0; r < npe; r++)
+  {
+    uint64_t lo = 0, hi = nf;         /* the first family of r or after */
+    while (lo < hi)
+    {
+      uint64_t mid = lo + (hi - lo) / 2;
+      if (start_pid (mid, n, npe) >= r)
+        hi = mid;
+      else
+        lo = mid + 1;
+    }
+    first [r] = (int) (lo * TREE_NCHILDREN);
+  }
+  first [npe] = (int) n;
+  key [npe] = UINT64_MAX;
+  for (int r = npe - 1; r >= 0; r--)
+    key [r] = first [r] < first [r + 1] ? (uint64_t) first [r] << shift
+                                        : key [r + 1];
+  key [0] = 0;
+  double most = 0;
+  for (int r = 0; r < npe; r++)
+  {
+    load [r] = first [r + 1] - first [r];
+    most = load [r] > most ? load [r] : most;
+  }
+  part = (TreePartition) {
+    .npe = npe, .nleaves = (int) n, .leaf_first = first, .load = load,
+    .key_first = key, .imbalance = most / ((double) n / npe),
+  };
+  made = 1;
+
+  /* 2. the level 1 leaves tree_replicated () made: parents now, or unknown */
+  if (L > 1)
+    for (int c = 0; c < TREE_NCHILDREN; c++)
+      tree_forget (index_child (TREE_ROOT_INDEX, c));
+  for (int q = first [me]; q < first [me + 1]; q++)
+  {
+    start_around (index_of_morton ((uint64_t) q, L), L);
+    /* the parents whose first leaf is q, coarser and coarser; their
+     * children, the rest of N (), are there: families are whole, and at
+     * level L they are this process's leaves (a family is never split) */
+    uint64_t m = (uint64_t) q;
+    for (int l = L - 1; l >= 0 && !(m & (TREE_NCHILDREN - 1)); l--)
+    {
+      m >>= dimension;
+      start_around (index_of_morton (m, l), L);
+    }
+  }
+  const TreeCaches * tc = tree_caches ();
+  for (int q = 0; q < tc->nall; q++)
+    tc->all [q].node->pid =
+      start_pid ((tree_morton_key (tc->all [q].p) >> shift) / TREE_NCHILDREN,
+                 n, npe);
+  tree_caches_changed ();             /* the owners changed: owned */
+
+  /* 3. */
+  distribute_again ();
+  size_t bytes = (size_t) tree_block_shape ().cells * sizeof (Real);
+  tc = tree_caches ();
+  for (int q = 0; q < tc->nall; q++)
+  {
+    void *** t = tc->all [q].node->s;
+    foreach_scalar (s)
+      if (t [s / SCALAR_ARRAY_WIDTH]
+          && t [s / SCALAR_ARRAY_WIDTH][s % SCALAR_ARRAY_WIDTH])
+        memset (block_data (t, s), 0, bytes);
+  }
+  part.generation = tree_generation;
   return 0;
 }
 

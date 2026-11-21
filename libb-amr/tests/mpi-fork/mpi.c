@@ -232,9 +232,20 @@ int MPI_Waitall (int n, MPI_Request * req, MPI_Status * status)
   }
 }
 
+/* the types made by MPI_Type_contiguous (): ids from TYPE_FIRST on, their
+ * sizes; the ops by MPI_Op_create (): ids from OP_FIRST on, the functions */
+#define TYPE_FIRST 100
+#define TYPE_MAX   32
+#define OP_FIRST   100
+#define OP_MAX     32
+static size_t types [TYPE_MAX];
+static MPI_User_function * ops [OP_MAX];
+
 /* the size of one item of type, 0 if not one of the stand-in's */
 static size_t type_size (MPI_Datatype type)
 {
+  if (type >= TYPE_FIRST && type < TYPE_FIRST + TYPE_MAX)
+    return types [type - TYPE_FIRST];
   switch (type)
   {
   case MPI_BYTE:               return 1;
@@ -355,14 +366,74 @@ int MPI_Exscan (const void * in, void * out, int count, MPI_Datatype type,
   return 0;
 }
 
+int MPI_Type_contiguous (int count, MPI_Datatype old, MPI_Datatype * type)
+{
+  size_t size = type_size (old);
+  int t = 0;
+  while (t < TYPE_MAX && types [t])
+    t++;
+  if (!size || count < 1 || t == TYPE_MAX)
+    fail ("Type_contiguous: of a type of the stand-in's, and room");
+  types [t] = (size_t) count * size;
+  *type = TYPE_FIRST + t;
+  return 0;
+}
+
+int MPI_Type_commit (MPI_Datatype * type)
+{
+  if (!type_size (*type))
+    fail ("Type_commit: a type made");
+  return 0;
+}
+
+int MPI_Type_free (MPI_Datatype * type)
+{
+  if (*type < TYPE_FIRST || *type >= TYPE_FIRST + TYPE_MAX
+      || !types [*type - TYPE_FIRST])
+    fail ("Type_free: a type made");
+  types [*type - TYPE_FIRST] = 0;
+  *type = 0;
+  return 0;
+}
+
+int MPI_Op_create (MPI_User_function * f, int commute, MPI_Op * op)
+{
+  int o = 0;
+  while (o < OP_MAX && ops [o])
+    o++;
+  if (!f || !commute || o == OP_MAX)
+    fail ("Op_create: a commutative function, and room");
+  ops [o] = f;
+  *op = OP_FIRST + o;
+  return 0;
+}
+
+int MPI_Op_free (MPI_Op * op)
+{
+  if (*op < OP_FIRST || *op >= OP_FIRST + OP_MAX || !ops [*op - OP_FIRST])
+    fail ("Op_free: an op made");
+  ops [*op - OP_FIRST] = NULL;
+  *op = 0;
+  return 0;
+}
+
+/* out = in op out for a user's op, MPI's order of the arguments */
+static void combine_user (void * out, void * in, int count,
+                          MPI_Datatype type, MPI_Op op)
+{
+  ops [op - OP_FIRST] (in, out, &count, &type);
+}
+
 /* every rank's to rank 0, combined in rank order, sent back */
 int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
                    MPI_Op op, MPI_Comm comm)
 {
   size_t size = type_size (type);
-  if (op < MPI_SUM || op > MPI_MAX || !size || type == MPI_BYTE || count < 0)
+  int user = op >= OP_FIRST && op < OP_FIRST + OP_MAX && ops [op - OP_FIRST];
+  if ((!user && (op < MPI_SUM || op > MPI_MAX || type >= TYPE_FIRST))
+      || !size || type == MPI_BYTE || count < 0)
     fail ("Allreduce: MPI_SUM, MPI_PROD, MPI_MIN or MPI_MAX of a type of "
-          "the stand-in's");
+          "the stand-in's, or a user's op");
   int bytes = (int) ((size_t) count * size), tag = -1;
   memcpy (out, in, (size_t) bytes);
   char * buf = malloc ((size_t) bytes + 1);
@@ -373,7 +444,10 @@ int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
     {
       MPI_Irecv (buf, bytes, MPI_BYTE, r, tag, comm, &q);
       MPI_Waitall (1, &q, MPI_STATUSES_IGNORE);
-      combine (out, buf, count, type, op);
+      if (user)
+        combine_user (out, buf, count, type, op);
+      else
+        combine (out, buf, count, type, op);
     }
     for (int r = 1; r < np; r++)
     {

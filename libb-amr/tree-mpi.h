@@ -208,6 +208,13 @@
   ..                                finest first, each level's merges sent
   ..                                to the peers (tree_ungraft ()). The
   ..                                families merged here
+  ..   tree_mpi_start (level)       collective, what tree () calls on several
+  ..                                processes: the tree uniform at level,
+  ..                                made by each process alone, its part
+  ..                                and the skeleton around it, from the
+  ..                                cut of a uniform level (a formula): the
+  ..                                result of tree_mpi_partition () on the
+  ..                                whole level, without it on any process
   ..   tree_mpi_redistribute ()     the skeleton and plan made again, after
   ..                                the tree changed
   ..   (adapt_wavelet () calls the three, then tree_mpi_repartition ())
@@ -297,6 +304,7 @@
   /* 5. MPI */
   #ifdef _MPI
   int                 tree_mpi_partition (const double * weight);
+  int                 tree_mpi_start (int level);
   int                 tree_mpi_repartition (const double * weight);
   int                 tree_mpi_refine (int n, const Index * list);
   int                 tree_mpi_coarsen (int n, const Index * list);

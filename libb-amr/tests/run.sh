@@ -4,7 +4,7 @@
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap).
 # JOBS: the tests built and run at once (default: the processors).
 # QUICK=1: the pool, then tree, blocks, ghosts, adapt, stencil, faces,
-# vertices, partition (tree-mpi.h), morton (keys) and mpi (-D_MPI, on 1 and 3 processes
+# vertices, partition (tree-mpi.h), morton (keys) and mpi (with tree_start) (-D_MPI, on 1 and 3 processes
 # forked by tests/mpi-fork) in 1, 2
 # and 3 dimensions, double and float, only: no OpenMP, alignment, other
 # level indices or MADV_FREE. After each change; the whole before a commit,
@@ -162,6 +162,8 @@ for prec in "" "-DBAMR_SINGLE"; do
       run tree_mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_tree_mpi.c \
         "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
       run adapt_mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_adapt_mpi.c \
+        "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
+      run tree_start $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_tree_start.c \
         "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
       runenv=
     done

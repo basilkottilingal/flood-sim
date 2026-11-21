@@ -23,7 +23,12 @@
   ..                                       of MPI_INT, MPI_LONG, MPI_LONG_LONG,
   ..                                       MPI_UNSIGNED, MPI_UNSIGNED_LONG,
   ..                                       MPI_UNSIGNED_LONG_LONG, MPI_FLOAT,
-  ..                                       MPI_DOUBLE
+  ..                                       MPI_DOUBLE; MPI_Allreduce also a
+  ..                                       user's op (MPI_Op_create) of a
+  ..                                       contiguous type
+  ..   MPI_Type_contiguous, MPI_Type_commit, MPI_Type_free
+  ..                                       count items of a type above, as one
+  ..   MPI_Op_create, MPI_Op_free          a user's function, commutative
   */
 
   typedef int MPI_Comm;
@@ -72,5 +77,13 @@
                   MPI_Op op, MPI_Comm comm);
   int MPI_Allreduce (const void * in, void * out, int count,
                      MPI_Datatype type, MPI_Op op, MPI_Comm comm);
+
+  typedef void MPI_User_function (void * in, void * inout, int * len,
+                                  MPI_Datatype * type);
+  int MPI_Type_contiguous (int count, MPI_Datatype old, MPI_Datatype * type);
+  int MPI_Type_commit (MPI_Datatype * type);
+  int MPI_Type_free (MPI_Datatype * type);
+  int MPI_Op_create (MPI_User_function * f, int commute, MPI_Op * op);
+  int MPI_Op_free (MPI_Op * op);
 
 #endif

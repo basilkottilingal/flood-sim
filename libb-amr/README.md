@@ -315,13 +315,15 @@ tested in one process for any number of processes. With `-D_MPI`,
   only. A family whose one child is needed keeps all its children (they
   are allocated together). It cannot be undone; refining or coarsening a
   pruned tree stops the run.
-- **`tree ()` distributes at once** (milestone 2). On several processes it
-  refines to the first level with 4 npe leaves at least (below depth max)
-  and calls `tree_mpi_partition (NULL)`; on one process it is as before.
-  `tree_replicated ()` builds the tree without distributing: the whole
-  tree on every process, to refine as wanted before `tree_mpi_partition
-  ()` (the tests, an initial mesh), since a distributed tree cannot be
-  refined yet.
+- **`tree ()` starts distributed**, each process making its part alone
+  (`tree_mpi_start ()`, below: "The start"). The tree is uniform at the
+  level of `tree_initial_depth (level)`, the same on any number of
+  processes; by default level 1 on one process and on several the first
+  level with 4 npe families of leaves at least (below depth max). Every
+  block is 0. `tree_replicated ()` builds level 1 without distributing:
+  the whole tree on every process, to refine as wanted before
+  `tree_mpi_partition ()` (the tests, an irregular initial mesh), since a
+  distributed tree is adapted only by `adapt_wavelet ()`.
 - **`tree_mpi_partition (weight)`.** Rank 0 partitions, with its weights,
   and sends every node's pid (in Morton order) and the loads to ranks 1 to
   npe - 1 by `MPI_Bcast`; the others set the pids and record the same
@@ -356,7 +358,9 @@ tested in one process for any number of processes. With `-D_MPI`,
      process's (`MPI_Exscan`), the totals (`MPI_Allreduce`); each leaf to
      the process `tree_partition ()` would give it on the whole tree (in
      integers for unit weights). Each process's first key, load and leaves
-     by one `MPI_Allreduce` each (min of the keys of its leaves).
+     by one `MPI_Allreduce` of npe `{key, load, count}` (an
+     `MPI_Type_contiguous` and a user's op, `part_merge ()`: the smallest
+     key, load and count summed).
   2. **Migration:** every node of this process that changes hands (by the
      new keys), sent to its new owner, whole: its index, whether a leaf,
      the block of every scalar in use, and N () of it as structure only,
@@ -711,6 +715,66 @@ whole tree's: `test_partition`, 0.51 (2D) and 0.51, 0.47 (3D) with 4 and
 7 processes; `test_mpi`, 2D 0.72, 0.69, 0.51, 0.51 with 2, 3, 4, 7
 processes, 3D (521 nodes) 0.82, 0.82, 0.66, 0.65.
 
+### The start: a uniform level made by each process (`tree_mpi_start ()`)
+
+On a uniform level L of n = 2^(D L) leaves the cut is a formula: with unit
+weights family f goes to the process holding the middle of its child 0,
+`npe (2 f 2^D + 1) / 2n` (what `tree_partition ()` gives, families whole
+since every family of the level is one of leaves), and a parent to its
+first leaf's. So every process knows the owner of every node of the level,
+every process's first leaf and key, with no message. `tree ()` on several
+processes then makes, from the level 1 tree of `tree_replicated ()`:
+
+1. the partition, from the formula (`key_first`, `leaf_first`, `load`);
+2. its own leaves and their same-level neighbours, its own parents (those
+   whose first leaf is its) and theirs; `tree_insert ()` adds the
+   ancestors, every family whole, so the parents and children of N () are
+   there; every node's pid from the formula;
+3. the skeleton, peers, plan and blocks as after any change
+   (`distribute_again ()`): one `MPI_Allreduce` of the levels and one
+   round with the peers, the only messages; every block 0.
+
+No process holds the whole level, and none sends its tree: memory and
+work O(own + halo + ancestors), against O(2^(D L)) on every process before
+(the whole level, then rank 0's cut and `MPI_Bcast` of every node's pid).
+At most 2^30 leaves (`leaf_first` is int).
+
+`tests/test_tree_start.c` (`-D_MPI`): for the default level and every
+level from 1 to 8 (1D), 5 (2D), 3 (3D), and one above depth max
+(clamped), `tree ()` against the old way (`tree_replicated ()`, refined
+uniformly, `tree_mpi_partition ()`): every node held, in order, with its
+index, flags, pid and which scalars have blocks; the partition; the plan,
+list for list and entry for entry, and the peers; the depths; every block
+0 (a scalar made before `tree ()`, one after); every leaf owned once over
+the processes. 1-3D on 1, 2, 3, 4, 5, 7, 8, 12, 13, 16 processes, double
+and float: all pass.
+
+| Deliberate bug | caught by |
+|---|---|
+| the cut by a leaf's start, not its middle | 1D np 13 (394 checks) |
+| no same-level neighbours | a crash (1-3D) |
+| no N () of own parents | 2D np 5 (22), a crash in 1D |
+| first keys shifted | 1D, 2D, 3D (117, 30, 12) |
+| the caches not marked changed (`owned` stale) | 1D, 2D, 3D (326, 89, 36); `test_tree_mpi` too |
+| a pid by its leaf, no family rule | a crash (1-3D) |
+| the loads off by one | 1D, 2D, 3D (130, 35, 15) |
+| the children of own parents not made | nothing: they are made with every family (the line went) |
+| the blocks not zeroed | nothing: fresh pool memory is 0 (the `memset` guards reuse) |
+
+The repartition's single `MPI_Allreduce`: the smallest key taken as the
+largest, a count off by one, the loads not summed: `test_mpi` 2D np 3
+(19, 6, 6 checks).
+
+Measured (`-O2`, the stand-in `tests/mpi-fork`, a loaded laptop), the
+nodes a process holds (fewest..most) and the slowest process's time:
+
+| | 2D level 7 (21 845 nodes) | 3D level 5 (37 449 nodes) |
+|---|---|---|
+| 4 processes, old | 5993, 0.056 s | 12 329, 1.76 s |
+| 4 processes, new | 5993, 0.015 s | 12 329, 0.36 s |
+| 16 processes, old | 1641..1961, 0.19 s | out of memory |
+| 16 processes, new | 1641..1961, 0.018 s | 4025..4977, 0.58 s |
+
 ### Not done yet
 
 What the distributed tree cannot do yet, most important first.
@@ -750,13 +814,16 @@ What the distributed tree cannot do yet, most important first.
 
 **Scale and speed**
 
-9. **The start needs the whole tree on every process:** `tree ()`'s
-   coarse uniform level, or a `tree_replicated ()` mesh refined first. An
-   initial mesh too large for one process must be grown after
-   distributing, by `adapt_wavelet ()`.
-10. **O(npe) on each process:** the first keys (`key_first`), and the
-    repartition's `MPI_Allreduce` of npe-long arrays (an `MPI_Allgather` of
-    one key and one load per process would do).
+9. **An irregular start needs the whole tree on every process:**
+   `tree ()` makes a uniform level distributed (`tree_mpi_start ()`), but
+   a mesh refined before distributing is `tree_replicated ()` and
+   `tree_mpi_partition ()` (rank 0 cuts, `MPI_Bcast` of every node's
+   pid). Grow it after distributing instead, by `adapt_wavelet ()`.
+10. **O(npe) on each process:** the partition table (`key_first`,
+    `leaf_first`, `load`: 20 (npe + 1) bytes, kept, as p4est's
+    `global_first_quadrant`: the owner of any index with no message), and
+    the repartition's one `MPI_Allreduce` of npe `{key, load, count}`,
+    O(npe) per process however gathered (an `MPI_Allgather` too).
 11. **Communication rounds:** one exchange per level in a ghost update,
     and no computation overlapping it. See "MPI" in "Future plans"
     (dummy children for the halo, coarse buffers).
@@ -846,6 +913,9 @@ hashes every cell of every block; `TIMING=1` also times
 
 - `test_partition.c` and `test_mpi.c` (`-D_MPI`, on 1 and 3 processes of
   `tests/mpi-fork`): see "MPI: partition, plans, pruning".
+- `test_tree_start.c` (`-D_MPI`, on 1 and 3 processes, 1D on 13 too):
+  `tree ()` made by each process alone against the whole level cut and
+  pruned: see "The start".
 - `test_morton.c`: `tree_morton_key ()`, interleaved by masks (log2 of
   the bits in steps, as libhmesh's `spread ()`), against the reference
   one bit at a time: every value of each axis at the finest level (the key
