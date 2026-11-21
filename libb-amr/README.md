@@ -775,6 +775,100 @@ nodes a process holds (fewest..most) and the slowest process's time:
 | 16 processes, old | 1641..1961, 0.19 s | out of memory |
 | 16 processes, new | 1641..1961, 0.018 s | 4025..4977, 0.58 s |
 
+### Scalability: what each part costs
+
+Analysis of 2026-11-21, of the code at `4465ae3` (2026-11-21), with
+`tree_mpi_start ()` and the repartition's single `MPI_Allreduce`. From reading every MPI call of `tree-mpi.c`, `tree.c`,
+`adapt.c` and `block-ghosts-impl.h`; not measured beyond 16 processes of
+the stand-in.
+
+Notation: P processes; n = |Leaf|, a process's own leaves; d the depth;
+k its peers (O(1) on average for compact Morton pieces, bounded by the
+geometry, not a hard constant); h its halo nodes (about n^((D-1)/D) for a
+compact piece, O(n) at worst); n_h the nodes it holds, O(n + h + 2^D d);
+B = m^D the cells of a block; s the scalars.
+
+**Communication, by class**
+
+O(1) data, O(log P) latency (collectives of a few values):
+
+| call | where | how often |
+|---|---|---|
+| `tree_reduce ()` (`MPI_Allreduce`) | each `foreach (reduction (...))` | per reduction loop: many a step |
+| `MPI_Allreduce` of the levels | `skeleton_and_plan ()` | per skeleton rebuild |
+| `any_left ()` (`MPI_Allreduce`) | `tree_mpi_refine ()` | per round, up to 4 (BAMR_MAX_DEPTH + 1) |
+| `MPI_Allreduce` of the top level | `tree_mpi_coarsen ()` | once an adaptation |
+| `MPI_Allreduce` of the counts | `adapt_wavelet ()` | once an adaptation |
+| the weight check, 2 totals, 2 `MPI_Exscan` | `tree_mpi_repartition ()` | once an adaptation |
+
+Point to point with the k peers (the halo):
+
+| exchange | rounds | volume a process |
+|---|---|---|
+| ghost update (`tree_mpi_exchange ()`) | about 3d an update: restriction a level (d - 1 to the lowest), ghosts and faces a level (0 to d) | O(h B s) |
+| `skeleton_and_plan ()` | 1 | O(h 3^D) indices |
+| `peer_round ()` in `tree_mpi_refine ()` | 1 a round, up to O(d) | O(changed) |
+| `peer_round ()` in `tree_mpi_coarsen ()` | 1 a level: d | O(merged) |
+| the families in `tree_mpi_repartition ()` | 1 | O(split families) |
+
+Up to O(P) messages, O(1) typical: the migration of
+`tree_mpi_repartition ()`, to the new owners of a process's nodes and
+from the old owners of its new piece; 1 or 2 after a small change, O(P)
+for one process after a concentrated one (rank 0 refining everything).
+Its volume is the data that must move, O(moved B s).
+
+O(P) data, O(log P) latency: the repartition's `MPI_Allreduce` of npe
+`{key, load, count}` (24 P bytes; an `MPI_Allgather` is the same order),
+and the table kept (`key_first`, `leaf_first`, `load`: 20 (P + 1)
+bytes), built locally in O(P log N) by `tree_mpi_start ()`.
+
+O(N) data, only for an irregular start: `tree_mpi_partition ()`, rank 0's
+cut of the whole tree and an `MPI_Bcast` of every node's pid. The stand-in
+`tests/mpi-fork` does its collectives through rank 0, O(P): tests only.
+
+**Local computation a process**
+
+| routine | cost | dominant |
+|---|---|---|
+| ghost update, a scalar | O(n_h B) | O(\|Leaf\| m^D), the work of every step |
+| `tree_caches ()` rebuilt | O(n_h) lookups | O(\|Leaf\|) |
+| `adapt_wavelet ()`, local | O(n B s), the lists sorted O(r log r) | O(\|Leaf\| m^D) |
+| `tree_mpi_refine ()` | up to d rounds, sweeps up to d over r pending, 3^D each | O(r \|depth\|^2) at worst, r << \|Leaf\| |
+| `tree_mpi_coarsen ()` | the whole list scanned a level: O(r d), 3^D 2^D a family | O(\|Leaf\| \|depth\|) |
+| `skeleton_and_plan ()` | `related ()` O(n_h 3^D), the needs sorted O(E log E), E = O(n_h 3^D), `activate ()` O(n_h) | O(\|Leaf\| log \|Leaf\|) |
+| `tree_mpi_repartition ()`, the cut | O(n), owners O(n_h log P), `to` sorted O(n_h log n_h) | O(\|Leaf\| log \|Leaf\|) |
+| `tree_mpi_repartition ()`, families received | O(\|R\| n): each scans the own leaves | O(k \|Leaf\|) |
+| `tree_mpi_repartition ()`, migration | O(moved (B s + 3^D)) | the data moved |
+| `tree_mpi_start ()` | table O(P log N), own leaves O(n d), pids O(n_h), zeroing O(n_h B s), then the skeleton | O(\|Leaf\| \|depth\| + P log N) |
+| `tree_partition ()` (irregular start, rank 0) | O(N) | |
+
+Every term is at most O(|Leaf| |depth|) or O(|Leaf| log |Leaf|), with
+O(P) for the table: none quadratic in |Leaf|.
+
+**The bottlenecks, worst first**
+
+1. **Ghost update latency:** about 3d rounds an update, each closed by an
+   `MPI_Waitall`, at every step and every operator, with no computation
+   overlapping: strong scaling meets it first. Every level's ghosts in one
+   round where the dependencies allow (dummy children for the halo, in
+   "Future plans", "MPI"), and the interior computed during the exchange.
+2. **Adapting:** up to O(d) refinement rounds of a peer round and an
+   `MPI_Allreduce` each, d coarsening rounds, and the skeleton made twice
+   (`adapt_wavelet ()` calls `tree_mpi_redistribute ()`, then
+   `tree_mpi_repartition ()` calls `distribute_again ()` again; the first
+   only so the families' round has valid peers): about 2d + 6
+   collectives and as many peer rounds an adaptation.
+3. **The repartition:** the O(P) table (inherent, as p4est's, fine to
+   10^5-10^6 processes) and the migration's fan-out after a concentrated
+   change.
+4. **Local, cheap to fix:** the families received, O(|R| n) (a binary
+   search by key: `owned` is in Morton order); coarsening's O(r d)
+   rescans (the list sorted by level once).
+
+Next: measure 1 and 2 on OpenMPI ranks (the time in `tree_mpi_exchange
+()` against the computation of a step; one `adapt_wavelet ()` phase by
+phase), then reduce the ghost rounds first.
+
 ### Not done yet
 
 What the distributed tree cannot do yet, most important first.
