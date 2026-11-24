@@ -27,6 +27,9 @@
 
 static TreePartition part;
 static int made = 0;
+#ifdef _MPI
+double tree_mpi_imbalance_max = 1;
+#endif
 
 void tree_partition_free (void)
 {
@@ -88,9 +91,9 @@ static void partition_record (int npe, double * load)
       q++;
     first [r] = q;
   }
-  for (int r = npe; r >= 0; r--)
-    key [r] = r == npe ? UINT64_MAX
-            : first [r] < first [r + 1]
+  key [npe] = UINT64_MAX;
+  for (int r = npe - 1; r > 0; r--)
+    key [r] = first [r] < first [r + 1]
             ? tree_morton_key (tc->leaves [first [r]].p)
             : key [r + 1];
   key [0] = 0;                        /* the curve starts with process 0 */
@@ -342,11 +345,14 @@ static int index_cmp (Index a, Index b)
 static int need_cmp (const void * pa, const void * pb)
 {
   const Need * a = pa, * b = pb;
-  int ka [5] = { a->parents, a->kind, a->level, a->send, a->peer };
-  int kb [5] = { b->parents, b->kind, b->level, b->send, b->peer };
-  for (int q = 0; q < 5; q++)
-    if (ka [q] != kb [q])
-      return ka [q] < kb [q] ? -1 : 1;
+  /* written out: gcc -O2 keeps a loop over arrays (and a stack check) */
+  #define NEED_CMP(f) if (a->f != b->f) return a->f < b->f ? -1 : 1
+  NEED_CMP (parents);
+  NEED_CMP (kind);
+  NEED_CMP (level);
+  NEED_CMP (send);
+  NEED_CMP (peer);
+  #undef NEED_CMP
   return index_cmp (a->it.p, b->it.p);
 }
 
@@ -1229,25 +1235,9 @@ int tree_mpi_coarsen (int n, const Index * list)
   return merged;
 }
 
-/* what one process contributes to another's entry of the partition: the
-.. smallest key of the leaves it gives, their weight and number */
-typedef struct { uint64_t key; double load; long count; } PartEntry;
-
-/* MPI's user op: inout [k] = in [k] merged, the key the smaller, load and
-.. count summed */
-static void part_merge (void * in, void * inout, int * len,
-                        MPI_Datatype * type)
-{
-  (void) type;
-  const PartEntry * a = in;
-  PartEntry * b = inout;
-  for (int k = 0; k < *len; k++)
-  {
-    b [k].key = a [k].key < b [k].key ? a [k].key : b [k].key;
-    b [k].load += a [k].load;
-    b [k].count += a [k].count;
-  }
-}
+/* process s's entry of the new partition, from the one process holding
+.. its first leaf: that leaf's key, the weight and the leaves before it */
+typedef struct { uint64_t key; double before; long nbefore; } PartEntry;
 
 /* the owner of key in a partition's first keys k [0 .. npe] */
 static int owner_of_key (const uint64_t * k, int npe, uint64_t key)
@@ -1281,7 +1271,10 @@ static void pack_structure (Index x, void * arg)
 ..    (MPI_Exscan) and the totals; each own leaf by its middle, as
 ..    tree_partition () would give it; a family of leaves whole to the
 ..    process of its child 0, told to the peers if it is split; the new
-..    first keys, loads and counts of every process (MPI_Allreduce);
+..    first key of each process from the one holding its first leaf,
+..    with the weight and leaves before it (MPI_Allgather of each
+..    process's last pid, then MPI_Allgatherv of the entries): no
+..    reduction, the loads the differences of the weights before;
 .. 2. the move: each node of this process whose new owner is another,
 ..    sent there with the blocks of every scalar in use and N () of it,
 ..    structure only (related ()); senders and receivers known from the
@@ -1295,7 +1288,7 @@ int tree_mpi_repartition (const double * weight)
 {
   int me = tree_rank (), npe = tree_npe ();
   const TreeCaches * tc = tree_caches ();
-  int n = tc->nowned, bad = 0, any;
+  int n = tc->nowned, bad = 0;
   double wsum = 0;
   for (int q = 0; q < n; q++)
   {
@@ -1303,29 +1296,23 @@ int tree_mpi_repartition (const double * weight)
     bad |= !(w > 0);
     wsum += w;
   }
-  MPI_Allreduce (&bad, &any, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-  if (any || !made)
-    return -1;
 
   /*
-  .. 1. the new cut: the leaves before this process's, and their weight,
-  .. by prefix sums; then each leaf's process as tree_partition () gives
-  .. it (in integers for unit weights)
+  .. 1. the new cut: the leaves of the whole tree, their weight and the
+  .. processes with a weight not > 0 (one MPI_Allreduce), the leaves and
+  .. weight before this process's (one MPI_Exscan): doubles, exact for
+  .. counts below 2^53; then each leaf's process as tree_partition ()
+  .. gives it (in integers for unit weights)
   */
-  long cnt = n, before = 0, total;
-  double wbefore = 0, wtotal;
-  MPI_Exscan (&cnt, &before, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Exscan (&wsum, &wbefore, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  double sums [3] = { n, wsum, bad }, tot [3], pre [2] = { 0, 0 };
+  MPI_Allreduce (sums, tot, 3, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  if (tot [2] > 0 || !made)
+    return -1;
+  MPI_Exscan (sums, pre, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   if (me == 0)
-    before = 0, wbefore = 0;          /* Exscan leaves rank 0's undefined */
-  MPI_Allreduce (&cnt, &total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce (&wsum, &wtotal, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  PartEntry * mine = malloc ((size_t) npe * sizeof (PartEntry));
-  PartEntry * all = malloc ((size_t) npe * sizeof (PartEntry));
-  if (!mine || !all)
-    BAMR_ABORT ("out of memory");
-  for (int r = 0; r < npe; r++)
-    mine [r] = (PartEntry) { UINT64_MAX, 0, 0 };
+    pre [0] = pre [1] = 0;            /* Exscan leaves rank 0's undefined */
+  long before = (long) pre [0], total = (long) tot [0];
+  double wbefore = pre [1], wtotal = tot [1], wfirst = wbefore;
   /* each leaf by its middle, as tree_partition () */
   int * pid_of = malloc ((size_t) (n ? n : 1) * sizeof (int));
   if (!pid_of)
@@ -1404,45 +1391,75 @@ int tree_mpi_repartition (const double * weight)
     }
     free (out), free (in), free (nout), free (nin);
   }
-  for (int q = 0; q < n; q++)
+  /*
+  .. the new table. pid_of does not decrease along the curve, so K_s, the
+  .. first key of process s, is the key of the first leaf with pid_of >= s:
+  .. one process holds it. This one gives the entries s = last + 1 .. the
+  .. pid of its last leaf, last the largest pid of the leaves before its
+  .. own: every process's last pid (-1 with no leaf; MPI_Allgather) tells
+  .. each how many entries every process gives, in the order of s; the
+  .. entries themselves by MPI_Allgatherv. s past every leaf's pid: an
+  .. empty process at the end, the key UINT64_MAX
+  */
+  int lastpid = n ? pid_of [n - 1] : -1, last = -1, before_me = -1;
+  int ngot = 0, nmine = 0;
+  int * lasts = malloc ((size_t) npe * sizeof (int));
+  int * count = malloc ((size_t) npe * sizeof (int));
+  int * at = malloc ((size_t) npe * sizeof (int));
+  if (!lasts || !count || !at)
+    BAMR_ABORT ("out of memory");
+  MPI_Allgather (&lastpid, 1, MPI_INT, lasts, 1, MPI_INT, MPI_COMM_WORLD);
+  for (int r = 0; r < npe; r++)
   {
-    double w = weight ? weight [q] : 1;
-    uint64_t key = tree_morton_key (tc->owned [q].p);
-    PartEntry * e = &mine [pid_of [q]];
-    e->key = key < e->key ? key : e->key;
-    e->load += w;
-    e->count++;
+    int c = lasts [r] > last ? lasts [r] - last : 0;
+    if (r == me)
+      before_me = last, nmine = c;
+    count [r] = c * (int) sizeof (PartEntry);
+    at [r] = ngot * (int) sizeof (PartEntry);
+    ngot += c;
+    last = lasts [r] > last ? lasts [r] : last;
+  }
+  PartEntry * mine = malloc ((size_t) (nmine ? nmine : 1)
+                             * sizeof (PartEntry));
+  PartEntry * all = malloc ((size_t) (ngot ? ngot : 1) * sizeof (PartEntry));
+  if (!mine || !all)
+    BAMR_ABORT ("out of memory");
+  {
+    int s = before_me + 1, k = 0;     /* the first entry given here */
+    double w0 = wfirst;
+    for (int q = 0; q < n && k < nmine; q++)
+    {
+      for (; k < nmine && pid_of [q] >= s; s++, k++)
+        mine [k] = (PartEntry) { tree_morton_key (tc->owned [q].p), w0,
+                                 before + q };
+      w0 += weight ? weight [q] : 1;
+    }
+    assert (k == nmine);
   }
   free (pid_of);
-  /* every process's first key, load and leaves, everywhere: one
-   * MPI_Allreduce, of a PartEntry a process (part_merge ()) */
-  MPI_Datatype type;
-  MPI_Op op;
-  MPI_Type_contiguous ((int) sizeof (PartEntry), MPI_BYTE, &type);
-  MPI_Type_commit (&type);
-  MPI_Op_create (part_merge, 1, &op);
-  MPI_Allreduce (mine, all, npe, type, op, MPI_COMM_WORLD);
-  MPI_Op_free (&op);
-  MPI_Type_free (&type);
+  MPI_Allgatherv (mine, count [me], MPI_BYTE, all, count, at, MPI_BYTE,
+                  MPI_COMM_WORLD);
   int * first = malloc ((size_t) (npe + 1) * sizeof (int));
   uint64_t * key = malloc ((size_t) (npe + 1) * sizeof (uint64_t));
   double * lall = malloc ((size_t) npe * sizeof (double));
-  if (!first || !key || !lall)
+  double * wb = malloc ((size_t) (npe + 1) * sizeof (double));
+  if (!first || !key || !lall || !wb)
     BAMR_ABORT ("out of memory");
-  first [0] = 0;
-  for (int r = 0; r < npe; r++)
-    first [r + 1] = first [r] + (int) all [r].count;
-  key [npe] = UINT64_MAX;
-  for (int r = npe - 1; r >= 0; r--)
-    key [r] = all [r].count ? all [r].key : key [r + 1];
-  key [0] = 0;
+  for (int r = 0; r <= npe; r++)
+  {
+    int got = r < ngot;
+    key [r] = got ? all [r].key : UINT64_MAX;
+    first [r] = got ? (int) all [r].nbefore : (int) total;
+    wb [r] = got ? all [r].before : wtotal;
+  }
+  key [0] = 0, first [0] = 0, wb [0] = 0;   /* the curve starts with 0 */
   double most = 0;
   for (int r = 0; r < npe; r++)
   {
-    lall [r] = all [r].load;
+    lall [r] = first [r + 1] > first [r] ? wb [r + 1] - wb [r] : 0;
     most = lall [r] > most ? lall [r] : most;
   }
-  free (mine), free (all);
+  free (mine), free (all), free (lasts), free (count), free (at), free (wb);
   uint64_t * old = part.key_first;    /* the old partition's, kept here */
   free (part.leaf_first), free (part.load);
   part = (TreePartition) {

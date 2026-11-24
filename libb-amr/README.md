@@ -354,13 +354,19 @@ tested in one process for any number of processes. With `-D_MPI`,
 - **`tree_mpi_repartition (weight)`** (milestone 3), on the distributed
   tree, collective: weights for the leaves of this process
   (`tree_caches ()->owned`, NULL: 1 each).
-  1. **The new cut by prefix sums:** the leaves and the weight before this
-     process's (`MPI_Exscan`), the totals (`MPI_Allreduce`); each leaf to
-     the process `tree_partition ()` would give it on the whole tree (in
-     integers for unit weights). Each process's first key, load and leaves
-     by one `MPI_Allreduce` of npe `{key, load, count}` (an
-     `MPI_Type_contiguous` and a user's op, `part_merge ()`: the smallest
-     key, load and count summed).
+  1. **The new cut by prefix sums:** the totals and the weight check (one
+     `MPI_Allreduce` of 3 doubles: leaves, weight, weights not > 0), the
+     leaves and the weight before this process's (one `MPI_Exscan` of 2
+     doubles); each leaf to the process `tree_partition ()` would give it
+     on the whole tree (in integers for unit weights). The new table
+     without a reduction: the pids do not decrease along the curve, so
+     process s's first key is the key of the first leaf with pid >= s,
+     held by one process, which also knows the weight and the leaves
+     before it. One `MPI_Allgather` of each process's last pid tells every
+     process how many entries each gives (s from the largest pid before
+     its leaves + 1 to its last pid), then one `MPI_Allgatherv` of the
+     entries `{key, weight before, leaves before}`, 24 B each, arriving in
+     the order of s. Loads are differences of the weights before.
   2. **Migration:** every node of this process that changes hands (by the
      new keys), sent to its new owner, whole: its index, whether a leaf,
      the block of every scalar in use, and N () of it as structure only,
@@ -406,7 +412,7 @@ tested in one process for any number of processes. With `-D_MPI`,
     coarser family merge, as on one process; merges of one level do not
     interact.
   - Then the skeleton and plan again (`tree_mpi_redistribute ()`), and
-    `tree_mpi_repartition (NULL)`. A leaf out of the skeleton (a sibling
+    `tree_mpi_repartition (NULL)` if needed (below). A leaf out of the skeleton (a sibling
     a family brings) is forgotten at each skeleton (`tree_forget ()`:
     pruned, unknown): no one would tell this process when it changes, so
     it must not claim to know it.
@@ -418,6 +424,25 @@ tested in one process for any number of processes. With `-D_MPI`,
     process updates as it coarsens family after family, so its merged
     values depend on that order: on several processes they may differ in
     the last bits.
+- **Repartition only when needed** (2026-11-24). `adapt_wavelet ()` ends
+  with one `MPI_Allreduce` of five longs (a user op: three sums, two
+  maxima): the leaves divided, the families merged, the leaves, the most
+  leaves of a process, and a flag for a family of leaves split across
+  processes. It repartitions if a family is split, or if the most leaves
+  of a process exceed both `tree_mpi_imbalance_max` times the mean and
+  `ceil (mean) + TREE_NCHILDREN - 1`, what a fresh cut can leave a
+  process (the middle rule gives at most `ceil (mean)`, the family rule
+  moves a boundary past at most `TREE_NCHILDREN - 1` siblings).
+  `tree_mpi_imbalance_max` is 1 by default: repartition whenever a cut
+  would do better than that bound; 1.2: not until a process is 20 %
+  above the mean. A split family forces it: only its owner merges a
+  family, from its own flagged leaves, so a family split by merges could
+  not merge at the next adaptation, and the tree would no longer be the
+  one-process tree. A kept partition stays valid (adapting keeps every
+  first key a leaf's, the flag keeps families whole): every pid is still
+  the table's. Its loads, `leaf_first` and imbalance are those of the
+  last repartition; `tree_partition_valid ()` is 0 on the processes whose
+  tree changed.
 - **`tree_coarsen ()`'s 2:1 check, exact** (milestone 4, on one process
   too): coarsening p is refused only if a child of a neighbour that
   touches p has children (`tree_child_touches ()`). It refused before if
@@ -761,9 +786,9 @@ and float: all pass.
 | the children of own parents not made | nothing: they are made with every family (the line went) |
 | the blocks not zeroed | nothing: fresh pool memory is 0 (the `memset` guards reuse) |
 
-The repartition's single `MPI_Allreduce`: the smallest key taken as the
-largest, a count off by one, the loads not summed: `test_mpi` 2D np 3
-(19, 6, 6 checks).
+The repartition's table, then a single `MPI_Allreduce` (now gathered,
+below): the smallest key taken as the largest, a count off by one, the
+loads not summed: `test_mpi` 2D np 3 (19, 6, 6 checks).
 
 Measured (`-O2`, the stand-in `tests/mpi-fork`, a loaded laptop), the
 nodes a process holds (fewest..most) and the slowest process's time:
@@ -775,10 +800,88 @@ nodes a process holds (fewest..most) and the slowest process's time:
 | 16 processes, old | 1641..1961, 0.19 s | out of memory |
 | 16 processes, new | 1641..1961, 0.018 s | 4025..4977, 0.58 s |
 
+### The repartition's collectives, and when to repartition (2026-11-24)
+
+What changed (`tree-mpi.c`, `adapt.c`; the document `doc/partition`,
+sections "The new table, without a reduction", "When to repartition",
+"Collectives: algorithms and costs", with Rabenseifner's algorithm):
+
+| | before | now |
+|---|---|---|
+| weight check, totals | 3 `MPI_Allreduce` | 1 `MPI_Allreduce` of 3 doubles |
+| prefixes | 2 `MPI_Exscan` | 1 `MPI_Exscan` of 2 doubles |
+| the table | `MPI_Allreduce` of npe entries of 24 B, a user op | `MPI_Allgather` of an int, `MPI_Allgatherv` of at most npe entries of 24 B |
+| collectives a repartition (levels included) | 7 | 5 |
+| table, received a process | 48 npe B (Rabenseifner) or 24 npe log npe (doubling) | 28 npe B, nothing combined |
+| `adapt_wavelet ()` | repartitions every time | only for a split family or a process above max (`tree_mpi_imbalance_max` mean, ceil (mean) + 2^D - 1) |
+
+Tests. `test_mpi` checks the new table against the one-process cut (keys,
+`leaf_first`, loads, imbalance, every node's owner), unit and integer
+weights, 1D on 13 processes (empty ones), 2D and 3D on 3. `test_adapt_mpi`
+now runs the distributed adaptations three times, with
+`tree_mpi_imbalance_max` 1, 1.5 and 1e9: every count and every cell as on
+one process each time; after each step every node's pid is the table's,
+and after a repartition the table's leaves and loads are every process's;
+no process above the threshold or a cut's bound; fewer repartitions with
+a larger threshold (2D, 3D np 3: 4 and 5 of 5 steps at 1, none at 1.5).
+`split_case ()` makes a family split by a merge on purpose (a cut set by
+weights between a divided leaf and its leaf siblings, then two
+coarsenings, threshold 1e9): the first adaptation must repartition, and
+the second merges the family as one process does. The test stand-in
+`tests/mpi-fork` gained `MPI_Allgather` and `MPI_Allgatherv`. Both tests
+also pass on Open MPI 4.1.6 ranks (1D to 3D, 2, 3, 4 and 7 processes,
+ASan and UBSan), built as below.
+
+Each line below broken on purpose in a copy, the failed checks (a crash:
+an assertion, a hang or a mismatched message caught by the stand-in):
+
+| bug (one line) | mpi 1D np 13; 2D, 3D np 3 | adapt_mpi 1D np 13; 2D, 3D np 3 |
+|---|---|---|
+| the split-family flag never set | 0; 0, 0 | 78; 12, 12 |
+| never repartition | 0; 0, 0 | 52; 12, 12 |
+| `tree_mpi_imbalance_max` ignored | 0; 0, 0 | 0; 3, 3 |
+| an entry's leaf: pid > s, not >= s | crash | crash |
+| a load not a difference | 26; 6, 6 | 26; 3, 3 |
+| the leaves before off by one | 0; 3, 3 | 26; 3, 3 |
+| a process's entries start one late | crash; 0, 0 | crash |
+| the key of an empty process at the end not UINT64_MAX | 26; crash | crash |
+| the weight before not moved on (unit weights hide it) | 0; 3, 3 | 0; 0, 0 |
+
+The threshold ignored is caught in 2D and 3D only: in 1D on 13
+processes, means of 1 or 2 leaves, the cut's bound decides before the
+threshold.
+
+Measured on real ranks, Open MPI 4.1.6, one machine (8 cores, 16
+threads), `tests/bench_table.c` (plain MPI: the collectives alone, a
+barrier after each call, the slowest rank's mean in microseconds, three
+runs; the barrier alone 0.7 us at 8, 3 to 3.8 us at 16):
+
+| P | small, before (5 calls) | small, now (2) | table, before (`MPI_Allreduce`, user op) | table, now (gathers; one entry each) | table, now (all from rank 0) |
+|---|---|---|---|---|---|
+| 2 | 0.93 | 0.51 | 0.42 | 0.50 | 0.49 |
+| 4 | 2.61 | 1.33 | 1.05 | 1.69 | 1.42 |
+| 8 | 4.2 to 4.6 | 2.5 to 2.7 | 1.7 to 1.9 | 3.0 to 3.6 | 2.1 to 2.3 |
+| 16 | 26 to 31 | 17 to 23 | 12 to 19 | 15 to 33 | 13 to 16 |
+
+    mpicc -O2 -std=gnu11 tests/bench_table.c -o bench_table
+    mpirun -np 8 ./bench_table
+
+On few ranks the gathers cost one more round of latency than the one
+reduction (the model in `doc/partition` says the same); the fused small
+collectives more than make up for it, the sum per repartition about
+equal at 8 ranks. The gain is meant for many ranks, where the reduction
+of a 24 npe B vector costs twice the bytes and the user function (the
+model: at 16 384 ranks 300 us by Rabenseifner's algorithm, 74 us
+gathered). 16 ranks oversubscribe the 8 cores: noisy. Not measured on
+more than one machine.
+
 ### Scalability: what each part costs
 
 Analysis of 2026-11-21, of the code at `4465ae3` (2026-11-21), with
-`tree_mpi_start ()` and the repartition's single `MPI_Allreduce`. From reading every MPI call of `tree-mpi.c`, `tree.c`,
+`tree_mpi_start ()` and the repartition's single `MPI_Allreduce`;
+updated 2026-11-24 for the repartition's collectives (5 instead of 7, the
+table gathered without a reduction) and `adapt_wavelet ()` repartitioning
+only when needed. From reading every MPI call of `tree-mpi.c`, `tree.c`,
 `adapt.c` and `block-ghosts-impl.h`; not measured beyond 16 processes of
 the stand-in.
 
@@ -798,8 +901,8 @@ O(1) data, O(log P) latency (collectives of a few values):
 | `MPI_Allreduce` of the levels | `skeleton_and_plan ()` | per skeleton rebuild |
 | `any_left ()` (`MPI_Allreduce`) | `tree_mpi_refine ()` | per round, up to 4 (BAMR_MAX_DEPTH + 1) |
 | `MPI_Allreduce` of the top level | `tree_mpi_coarsen ()` | once an adaptation |
-| `MPI_Allreduce` of the counts | `adapt_wavelet ()` | once an adaptation |
-| the weight check, 2 totals, 2 `MPI_Exscan` | `tree_mpi_repartition ()` | once an adaptation |
+| `MPI_Allreduce` of the counts, leaves, most leaves, split flag | `adapt_wavelet ()` | once an adaptation |
+| 1 `MPI_Allreduce` (totals, weight check), 1 `MPI_Exscan` | `tree_mpi_repartition ()` | when `adapt_wavelet ()` asks |
 
 Point to point with the k peers (the halo):
 
@@ -817,10 +920,15 @@ from the old owners of its new piece; 1 or 2 after a small change, O(P)
 for one process after a concentrated one (rank 0 refining everything).
 Its volume is the data that must move, O(moved B s).
 
-O(P) data, O(log P) latency: the repartition's `MPI_Allreduce` of npe
-`{key, load, count}` (24 P bytes; an `MPI_Allgather` is the same order),
-and the table kept (`key_first`, `leaf_first`, `load`: 20 (P + 1)
-bytes), built locally in O(P log N) by `tree_mpi_start ()`.
+O(P) data, O(log P) latency: the repartition's `MPI_Allgather` of an int
+a process and `MPI_Allgatherv` of at most P entries of 24 B (28 P bytes
+received, nothing combined; it was an `MPI_Allreduce` of P entries with a
+user op, about 48 P bytes each way by Rabenseifner's algorithm, or
+24 P log P by recursive doubling), and the table kept (`key_first`,
+`leaf_first`, `load`: 20 (P + 1) bytes), built locally in O(P log N) by
+`tree_mpi_start ()`. The least a process can receive to hold the whole
+table; `doc/partition` (section "Collectives: algorithms and costs") has
+the algorithms and a cost model.
 
 O(N) data, only for an irregular start: `tree_mpi_partition ()`, rank 0's
 cut of the whole tree and an `MPI_Bcast` of every node's pid. The stand-in
@@ -854,13 +962,16 @@ O(P) for the table: none quadratic in |Leaf|.
    "Future plans", "MPI"), and the interior computed during the exchange.
 2. **Adapting:** up to O(d) refinement rounds of a peer round and an
    `MPI_Allreduce` each, d coarsening rounds, and the skeleton made twice
-   (`adapt_wavelet ()` calls `tree_mpi_redistribute ()`, then
-   `tree_mpi_repartition ()` calls `distribute_again ()` again; the first
-   only so the families' round has valid peers): about 2d + 6
-   collectives and as many peer rounds an adaptation.
+   when it repartitions (`adapt_wavelet ()` calls
+   `tree_mpi_redistribute ()`, then `tree_mpi_repartition ()` calls
+   `distribute_again ()` again; the first also gives the test whether to
+   repartition its split-family flag): about 2d + 3 collectives an
+   adaptation, 2d + 7 with a repartition, and as many peer rounds.
 3. **The repartition:** the O(P) table (inherent, as p4est's, fine to
-   10^5-10^6 processes) and the migration's fan-out after a concentrated
-   change.
+   10^5-10^6 processes; gathered, not reduced) and the migration's
+   fan-out after a concentrated change. Skipped when the partition is
+   still within what a cut gives (or `tree_mpi_imbalance_max`), which
+   also saves the second skeleton.
 4. **Local, cheap to fix:** the families received, O(|R| n) (a binary
    search by key: `owned` is in Morton order); coarsening's O(r d)
    rescans (the list sorted by level once).
@@ -916,8 +1027,11 @@ What the distributed tree cannot do yet, most important first.
 10. **O(npe) on each process:** the partition table (`key_first`,
     `leaf_first`, `load`: 20 (npe + 1) bytes, kept, as p4est's
     `global_first_quadrant`: the owner of any index with no message), and
-    the repartition's one `MPI_Allreduce` of npe `{key, load, count}`,
-    O(npe) per process however gathered (an `MPI_Allgather` too).
+    the repartition's `MPI_Allgather` (4 B a process) and `MPI_Allgatherv`
+    (at most npe entries of 24 B): O(npe) received, the least for a table
+    every process keeps. Below that only by dropping the global table
+    (owners known on the skeleton only, NBX for the senders): not
+    planned.
 11. **Communication rounds:** one exchange per level in a ghost update,
     and no computation overlapping it. See "MPI" in "Future plans"
     (dummy children for the halo, coarse buffers).

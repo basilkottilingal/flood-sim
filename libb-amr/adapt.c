@@ -37,6 +37,49 @@ static Real * scratch_block (void)
   return b;
 }
 
+#ifdef _MPI
+/*
+.. MPI's user op of the step's numbers: the first ADAPT_SUMS summed, the
+.. rest the larger
+*/
+enum { ADAPT_SUMS = 3, ADAPT_NUMBERS = 5 };
+static void adapt_merge (void * in, void * inout, int * len,
+                         MPI_Datatype * type)
+{
+  (void) type;
+  const long * a = in;
+  long * b = inout;
+  for (int k = 0; k < *len; k++)
+    b [k] = k % ADAPT_NUMBERS < ADAPT_SUMS ? b [k] + a [k]
+          : a [k] > b [k] ? a [k] : b [k];
+}
+
+/* a family of leaves with a leaf of this process and one of another */
+static int family_split (void)
+{
+  const TreeCaches * tc = tree_caches ();
+  int me = tree_rank ();
+  for (int q = 0; q < tc->nowned; q++)
+  {
+    Index p = tc->owned [q].p;
+    if (!p.level)
+      continue;
+    Index up = index_parent (p);
+    int leaves = 1, other = 0;
+    for (int c = 0; c < TREE_NCHILDREN && leaves; c++)
+    {
+      Index x = index_child (up, c);
+      BAMRNode * sib = index_is_allocated (x) ? index_node (x) : NULL;
+      leaves &= sib && (sib->flags & BAMR_NODE_LEAF);
+      other |= sib && sib->pid != me;
+    }
+    if (leaves && other)
+      return 1;
+  }
+  return 0;
+}
+#endif
+
 double block_wavelet (Index p, int s)
 {
   assert (p.level > 0 && index_is_allocated (p));
@@ -163,15 +206,30 @@ AdaptStats adapt_wavelet (int n, const int * s, const double * max,
     node->flags &= ~(BAMR_NODE_REFINE | BAMR_NODE_COARSEN);
   free (scratch);
   #ifdef _MPI
-  /* 5. distributed: the skeleton and plan again, the load balanced again;
-   * the counts the whole tree's */
+  /*
+  .. 5. distributed: the skeleton and plan again; one MPI_Allreduce of the
+  .. counts, the leaves, the most leaves of a process and whether a family
+  .. of leaves is split. The load balanced again (tree_mpi_repartition ())
+  .. only if a family is split, or a process has more leaves than both
+  .. tree_mpi_imbalance_max times the mean and what a cut can leave it
+  .. (ceil (mean) + TREE_NCHILDREN - 1)
+  */
   if (mp)
   {
     tree_mpi_redistribute ();
-    tree_mpi_repartition (NULL);
-    int mine [2] = { st.refined, st.coarsened }, all [2];
-    MPI_Allreduce (mine, all, 2, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    st.refined = all [0], st.coarsened = all [1];
+    long n = tree_caches ()->nowned, all [ADAPT_NUMBERS];
+    long mine [ADAPT_NUMBERS] = { st.refined, st.coarsened, n, n,
+                                  family_split () };
+    MPI_Op op;
+    MPI_Op_create (adapt_merge, 1, &op);
+    MPI_Allreduce (mine, all, ADAPT_NUMBERS, MPI_LONG, op, MPI_COMM_WORLD);
+    MPI_Op_free (&op);
+    st.refined = (int) all [0], st.coarsened = (int) all [1];
+    double mean = (double) all [2] / tree_npe ();
+    double cut = ceil (mean) + TREE_NCHILDREN - 1;  /* what a cut gives */
+    double most = tree_mpi_imbalance_max * mean;
+    if (all [4] || all [3] > (most > cut ? most : cut))
+      tree_mpi_repartition (NULL);
   }
   #endif
   return st;

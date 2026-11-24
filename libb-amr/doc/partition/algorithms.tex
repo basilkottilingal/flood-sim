@@ -1,0 +1,444 @@
+% algorithms.tex: the pseudo-code of partition-methods.tex (\input there)
+% ======================================================================
+\clearpage
+\section{Algorithms}
+\label{sec:algorithms}
+
+The methods as pseudo-code, in the notation of section~\ref{sec:defs}:
+$n_{pe}$ processes, $me$ this one; $\mathcal{L}_{me}$ my own leaves in curve
+order, $w_q$ their weights; $\mathrm{key}(p) = M(p)$ the Morton key;
+$\mathrm{pid}(p) = \rho(p)$ the owner a node records; $N(p)$ the
+neighbourhood of definition~\ref{def:nbhd}. \textsc{Exchange} (algorithm~\ref{alg:exch})
+is the only point-to-point primitive libb-amr uses.
+
+The libb-amr algorithms follow \fn{tree-mpi.c} as it is. The Basilisk ones
+follow \fn{balance.h} and \fn{tree-mpi.h} as read for this note (through a
+web extraction), simplified where marked. The p4est one is from its paper
+\cite{p4est} and from memory of its source, not checked here. NBX is from
+\cite{nbx}.
+
+% ----------------------------------------------------------------------
+\subsection{libb-amr}
+
+\begin{algorithm}[H]
+  \caption{\fn{tree\_mpi\_repartition ($w$)}: the cut, then one move}
+  \label{alg:repart}
+  \begin{algorithmic}[1]
+    \Require my own leaves $\mathcal{L}_{me}$ (contiguous on the curve), $w_q
+      > 0$ or $w \equiv 1$; the partition table $K^{old}$
+      (\fn{key\_first})
+    \Ensure every node on its new owner; skeleton, peers and plan rebuilt
+    \State $(n, W, b) \gets \textsc{Allreduce}_{+}(|\mathcal{L}_{me}|,
+      \sum_q w_q, |\{q : w_q \le 0\}|)$ \Comment{doubles}
+    \If{$b > 0$}
+      \State \Return $-1$ \Comment{on every rank: nothing changed}
+    \EndIf
+    \State $(n_{<}, W_{<}) \gets \textsc{Exscan}_{+}(|\mathcal{L}_{me}|,
+      \sum_q w_q)$ \Comment{0 on rank 0}
+    \For{$q \in \mathcal{L}_{me}$, in curve order}
+      \State $r_q \gets \textsc{LeafRank}(W_{<}, w_q, W, n_{pe})$;\quad
+        $W_{<} \gets W_{<} + w_q$
+    \EndFor
+    \State \textsc{KeepFamilies}$(r)$ \Comment{algorithm~\ref{alg:family}}
+    \State $K \gets$ \textsc{NewTable}$(r, w)$
+      \Comment{the new \fn{key\_first}, loads, imbalance}
+    \State \textsc{Migrate}$(K^{old}, K)$ \Comment{algorithm~\ref{alg:migrate}}
+    \For{every node $p$ held here}
+      \State $\mathrm{pid}(p) \gets \textsc{Owner}(p, K)$
+        \Comment{algorithm~\ref{alg:owner}}
+    \EndFor
+    \State \textsc{SkeletonAndPlan}() \Comment{algorithm~\ref{alg:skeleton};
+      every scalar marked stale}
+    \State \Return the number of nodes sent
+    \Statex
+    \Function{LeafRank}{$W_{<}, w, W, n_{pe}$}
+      \State \Return $\min\big(n_{pe} - 1, \lfloor n_{pe}\,(W_{<} + w/2) / W \rfloor\big)$
+        \Comment{in integers for unit weights}
+    \EndFunction
+    \Statex
+    \Function{NewTable}{$r, w$} \Comment{section~\ref{sec:table}}
+      \State $z \gets \textsc{Allgather}(r_{last})$ \Comment{$r$ of my
+        last leaf, $-1$ if none}
+      \State $\ell \gets -1$
+      \For{$o = 0 \ldots n_{pe}-1$}
+        \State $c_o \gets \max(0, z_o - \ell)$;\quad \textbf{if} $o =
+          me$ \textbf{then} $\ell_{me} \gets \ell$;\quad $\ell \gets
+          \max(\ell, z_o)$
+      \EndFor
+      \For{$s = \ell_{me} + 1 \ldots r_{last}$}
+        \State $q \gets$ my first leaf with $r_q \ge s$;\quad $e_s \gets
+          (\mathrm{key}(q), W(q), n(q))$ \Comment{$W(q)$, $n(q)$: before $q$}
+      \EndFor
+      \State $e \gets \textsc{Allgatherv}(e, c)$ \Comment{in the order of
+        $s$; $\sum_o c_o \le n_{pe}$}
+      \State $(K_s, W_s, n_s) \gets e_s$ for $s < \sum_o c_o$, $(\infty, W, n)$
+        after;\quad $K_0 \gets 0$
+      \State $\lambda_s \gets W_{s+1} - W_s$;\quad \fn{leaf\_first}$_s
+        \gets n_s$
+      \State \Return $K$
+    \EndFunction
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{KeepFamilies}$(r)$: a family of leaves goes whole to
+    its child~0's rank}
+  \label{alg:family}
+  \begin{algorithmic}[1]
+    \State $T \gets \emptyset$ \Comment{what I tell my peers}
+    \For{$q \in \mathcal{L}_{me}$ that is child 0 of a parent $u$ whose
+      $2^D$ children are all leaves}
+      \For{the siblings of $q$ that follow it in $\mathcal{L}_{me}$}
+        \State $r_{sib} \gets r_q$ \Comment{mine: no message}
+      \EndFor
+      \If{a sibling of $q$ has $\mathrm{pid} \ne me$}
+        \Comment{the family is split}
+        \State $T \gets T \cup \{(u, r_q)\}$
+      \EndIf
+    \EndFor
+    \State $R \gets \textsc{Exchange}(\text{peers}, T \text{ to each},
+      \text{peers})$ \Comment{one round, peers only}
+    \For{$(u, s) \in R$}
+      \For{$q \in \mathcal{L}_{me}$ with $\mathrm{parent}(q) = u$}
+        \State $r_q \gets s$
+      \EndFor
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Migrate}$(K^{old}, K)$: every node to its new owner,
+    in one round}
+  \label{alg:migrate}
+  \begin{algorithmic}[1]
+    \State $to \gets \{\textsc{Owner}(p, K) : \mathrm{pid}(p) = me\} \setminus
+      \{me\}$ \Comment{sorted, unique}
+    \State $from \gets \{o : \textsc{Owner}(K_{me}, K^{old}) \le o \le
+      \textsc{Owner}(K_{me+1} - 1, K^{old}),\; o \ne me,\; K^{old}_o <
+      K^{old}_{o+1}\}$
+    \Statex \Comment{the old owners of my new piece: a contiguous range of
+      ranks}
+    \For{every node $p$ with $\mathrm{pid}(p) = me$, $s \gets
+      \textsc{Owner}(p, K) \ne me$}
+      \State append to $box_s$: index of $p$, leaf or not, the block of
+        every scalar in use
+      \For{$x \in N(p)$}
+        \State append to $box_s$: index of $x$, leaf or not
+          \Comment{structure only}
+      \EndFor
+    \EndFor
+    \State $in \gets \textsc{Exchange}(to, box, from)$
+    \For{each record $(x, \text{leaf}, \text{data?})$ in $in$}
+      \State \fn{tree\_insert}$(x, \text{leaf})$ \Comment{with its missing
+        ancestors and their families}
+      \If{data}
+        \State \fn{activate\_one}$(x)$; copy the blocks in
+      \EndIf
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Owner}$(p, K)$ (\fn{tree\_partition\_owner}): the
+    rank whose piece holds $p$, no message}
+  \label{alg:owner}
+  \begin{algorithmic}[1]
+    \State $k \gets \mathrm{key}(p)$;\quad $lo \gets 0$;\quad $hi \gets n_{pe}$
+      \Comment{invariant $K_{lo} \le k < K_{hi}$}
+    \While{$hi - lo > 1$}
+      \State $mid \gets \lfloor (lo + hi)/2 \rfloor$
+      \If{$K_{mid} \le k$} $lo \gets mid$ \Else\ $hi \gets mid$ \EndIf
+    \EndWhile
+    \State \Return $lo$ \Comment{an empty rank has $K_s = K_{s+1}$: passed
+      over}
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Exchange}$(to, out, from)$ (\fn{exchange\_with}): point
+    to point, both sides name each other}
+  \label{alg:exch}
+  \begin{algorithmic}[1]
+    \For{$f \in from$} \State \textsc{Irecv}(size $n_f$ from $f$) \EndFor
+    \For{$t \in to$} \State \textsc{Isend}(size $|out_t|$ to $t$)
+      \Comment{0 too: the receiver waits for it} \EndFor
+    \State \textsc{Waitall}
+    \For{$f \in from$ with $n_f > 0$} \State \textsc{Irecv}($in_f$, $n_f$
+      bytes, from $f$) \EndFor
+    \For{$t \in to$ with $|out_t| > 0$} \State \textsc{Isend}($out_t$ to
+      $t$) \EndFor
+    \State \textsc{Waitall};\quad \Return $in$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{SkeletonAndPlan}() (\fn{skeleton\_and\_plan}): what a
+    rank keeps and exchanges}
+  \label{alg:skeleton}
+  \begin{algorithmic}[1]
+    \State $O \gets \{p : \mathrm{pid}(p) = me\}$
+    \State mark $O$, the ancestors of $O$, and $N(p)$ for every $p \in O$
+      \Comment{1. the skeleton}
+    \State \fn{tree\_forget} every unmarked leaf;\; prune every unmarked
+      subtree
+    \State $peers \gets \{\mathrm{pid}(x) : x \in N(p), p \in O\} \setminus
+      \{me\}$ \Comment{2. symmetric, by 2:1 balance}
+    \State $(depth, depth_{min}) \gets \textsc{Allreduce}_{\max}$ of my own
+      leaves' levels
+    \State $recv \gets$ for each kind (restrict, ghosts, faces) and level:
+      the nodes of $N(O)$ owned by a peer \Comment{3. the plan}
+    \State $asked \gets \textsc{Exchange}(peers, recv, peers)$;\quad
+      $send \gets asked$ \Comment{I send what my peers ask}
+    \State give blocks to every family with an active member
+      \Comment{4. the blocks}
+  \end{algorithmic}
+\end{algorithm}
+
+\textbf{Collectives in one repartition:} 1 \textsc{Allreduce} of the
+totals with the weight check, 1 \textsc{Exscan}, 1 \textsc{Allgather} and
+1 \textsc{Allgatherv} (\textsc{NewTable}), 1 \textsc{Allreduce} of the
+levels; then 3 point-to-point rounds (families, migration, plan).
+
+\begin{algorithm}[H]
+  \caption{The end of \fn{adapt\_wavelet ()} on a distributed tree: when
+    to repartition (section~\ref{sec:when})}
+  \label{alg:when}
+  \begin{algorithmic}[1]
+    \State \textsc{SkeletonAndPlan}() \Comment{after refining and coarsening}
+    \State $split \gets [\exists$ a family of leaves with a leaf of mine and
+      one of another rank$]$
+    \State $(a, b, N, n_{\max}, split) \gets \textsc{Allreduce}(a, b,
+      |\mathcal{L}_{me}|, |\mathcal{L}_{me}|, split)$ \Comment{3 sums, 2
+      maxima}
+    \If{$split$ \textbf{or} $n_{\max} > \max(\eta_{\max} N / n_{pe},\;
+      \lceil N / n_{pe} \rceil + 2^D - 1)$}
+      \State \fn{tree\_mpi\_repartition}(1) \Comment{algorithm~\ref{alg:repart}}
+    \EndIf
+    \State \Return $(a, b)$ \Comment{divided, merged: the whole tree's}
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{Rabenseifner's allreduce \cite{rabenseifner, thakur}, $p =
+    2^k$ ranks, a vector $x$ of $n$ bytes}
+  \label{alg:rabenseifner}
+  \begin{algorithmic}[1]
+    \State $[a, b) \gets [0, n)$ \Comment{the window this rank works on}
+    \For{$d = p/2, p/4, \ldots, 1$} \Comment{reduce-scatter, recursive halving}
+      \State $m \gets (a + b)/2$;\quad $t \gets r \oplus d$
+      \If{$r \mathbin{\&} d = 0$}
+        \State send $x[m, b)$ to $t$, receive $y$ for $[a, m)$;\quad $b
+          \gets m$
+      \Else
+        \State send $x[a, m)$ to $t$, receive $y$ for $[m, b)$;\quad $a
+          \gets m$
+      \EndIf
+      \State $x[a, b) \gets x[a, b) \oplus y$ \Comment{$n d / p$ bytes
+        combined}
+    \EndFor
+    \Statex \Comment{$x[a, b)$ is block $r$, reduced over all $p$ ranks}
+    \For{$d = 1, 2, \ldots, p/2$} \Comment{allgather, recursive doubling}
+      \State $t \gets r \oplus d$;\quad send $x[a, b)$ to $t$, receive the
+        partner's window next to it
+      \State $[a, b) \gets$ the union, twice as long
+    \EndFor
+    \State \Return $x$ \Comment{$2\log_2 p\,\alpha + 2\frac{p-1}{p}n\beta +
+      \frac{p-1}{p}n\gamma$}
+  \end{algorithmic}
+\end{algorithm}
+
+% ----------------------------------------------------------------------
+\subsection{Basilisk}
+
+Simplified: the pseudo-code keeps the order of the steps and the
+messages, not every flag. \fn{NEWPID} is a per-cell field holding the
+target (1-based, 0 for none).
+
+\begin{algorithm}[H]
+  \caption{\fn{mpi\_boundary\_update ()}: balance by repeated passes}
+  \label{alg:bas-update}
+  \begin{algorithmic}[1]
+    \State \fn{mpi\_boundary\_update\_buffers ()}
+      \Comment{the \fn{RcvPid} lists, algorithm~\ref{alg:bas-buffers}}
+    \While{\textsc{Balance}$(w)$} \Comment{each pass moves cells by one rank
+      at most}
+    \EndWhile
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Balance}$(w)$ (\fn{balance ()}): one pass, cells to
+    $\mathrm{pid} \pm 1$}
+  \label{alg:bas-balance}
+  \begin{algorithmic}[1]
+    \State $(n_{max}, n_{min}) \gets \textsc{Allreduce}_{\max,\min}$(my
+      leaf count)
+    \If{the counts are balanced enough}
+      \State \Return false
+    \EndIf
+    \State $(cw, tl) \gets \textsc{ZWeights}(w)$
+      \Comment{algorithm~\ref{alg:zweights}; $tl$ by one
+      \textsc{Allreduce}}
+    \For{each local cell $c$}
+      \State $t \gets \min\big(\lfloor cw_c / (tl / n_{pe}) \rfloor, n_{pe} - 1\big)$
+        \Comment{\fn{balanced\_pid}: from the cell's start}
+      \State $t \gets \mathrm{clamp}(t, \mathrm{pid}(c) - 1, \mathrm{pid}(c)
+        + 1)$
+      \If{$t \ne \mathrm{pid}(c)$} \State $\fn{NEWPID}(c) \gets t + 1$ \EndIf
+    \EndFor
+    \State halo exchange of \fn{NEWPID}, level by level
+      \Comment{\fn{boundary\_iterate (level, ...)}}
+    \State \fn{send\_tree} (cells for $me - 1$) to $me - 1$;\;
+      \fn{send\_tree} (cells for $me + 1$) to $me + 1$
+    \State \fn{receive\_tree} from $me - 1$ and from $me + 1$
+      \Comment{the cells, their data and new pids}
+    \For{each cell $c$ with a \fn{NEWPID}} \State $\mathrm{pid}(c) \gets
+      \fn{NEWPID}(c) - 1$ \EndFor
+    \State coarse cells without one: the pid of their parent
+    \State flag border cells again
+    \State $changed \gets \textsc{Allreduce}_{\max}$(a pid changed here)
+    \If{$changed$} \State \fn{mpi\_boundary\_update\_buffers ()} \EndIf
+    \State \Return $changed$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{ZWeights}$(w)$ (\fn{z\_weights}): the weight before each
+    cell, through the tree}
+  \label{alg:zweights}
+  \begin{algorithmic}[1]
+    \For{level $l = depth \ldots 0$} \Comment{up: subtree weights}
+      \For{each local cell $c$ at level $l$}
+        \State $sw_c \gets (c \text{ a leaf} \; ? \; w_c : \sum_{\text{children
+          } h} sw_h)$
+      \EndFor
+      \State halo exchange of $sw$ at level $l$
+        \Comment{\fn{boundary\_iterate (restriction, ...)}}
+    \EndFor
+    \State $tl \gets \textsc{Allreduce}_{\max}(me = 0 \; ? \; sw_{root} :
+      -1)$ \Comment{the only collective}
+    \State $cw_{root} \gets 0$
+    \For{level $l = 0 \ldots depth - 1$} \Comment{down: offsets}
+      \For{each local cell $c$ at level $l$ with children $h_0 \ldots
+        h_{2^D-1}$}
+        \State $cw_{h_i} \gets cw_c + \sum_{j<i} sw_{h_j}$
+      \EndFor
+      \State halo exchange of $cw$ at level $l+1$
+    \EndFor
+    \State \Return $(cw, tl)$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\fn{mpi\_boundary\_update\_buffers ()}: the send and receive
+    lists, from the pids}
+  \label{alg:bas-buffers}
+  \begin{algorithmic}[1]
+    \State free the \fn{RcvPid} lists (\fn{mpi\_level},
+      \fn{mpi\_level\_root}, \fn{restriction})
+    \For{each cell $c$ (\fn{foreach\_cell})}
+      \If{$c$ is local and has a neighbour with pid $s \ne me$}
+        \State add $c$ to the send list for $s$ at $c$'s level
+      \EndIf
+      \If{$c$ is remote (pid $s \ne me$) and next to a local cell}
+        \State add $c$ to the receive list from $s$
+          \Comment{\fn{rcv\_pid\_pointer}: one \fn{Rcv} per pid seen}
+      \EndIf
+    \EndFor
+    \State coarsen away the remote cells no list uses
+      \Comment{``we remove unused cells''}
+  \end{algorithmic}
+\end{algorithm}
+
+% ----------------------------------------------------------------------
+\subsection{p4est}
+
+From the paper \cite{p4est} and memory of the source, not checked here.
+p4est keeps \fn{global\_first\_quadrant} ($G$, $n_{pe}+1$ counts, the global
+index of each rank's first quadrant) on every rank.
+
+\begin{algorithm}[H]
+  \caption{\fn{p4est\_partition ($w$, for\_coarsening)}}
+  \label{alg:p4est}
+  \begin{algorithmic}[1]
+    \State $\omega \gets \textsc{Allgather}(\sum_{q \in \mathcal{L}_{me}} w_q)$
+      \Comment{$n_{pe}$ local sums, on every rank}
+    \State $\Omega_s \gets \sum_{t < s} \omega_t$ \Comment{prefix, computed
+      locally}
+    \State for each rank $s$: its new first quadrant is the first $q$ with
+      prefix weight $\ge s\,\Omega_{n_{pe}} / n_{pe}$
+    \Statex \Comment{each rank finds the cuts that fall in its own piece and
+      shares them}
+    \If{for\_coarsening}
+      \State move each cut off a family of siblings
+        \Comment{\fn{p4est\_partition\_for\_coarsening}: a family whole on
+        one rank}
+    \EndIf
+    \State $G' \gets$ the new first quadrants \Comment{$n_{pe}+1$ entries}
+    \State \textsc{PartitionGiven}$(G, G')$
+    \State \fn{p4est\_ghost\_new ()} \Comment{the ghost layer again}
+    \Statex
+    \Function{PartitionGiven}{$G, G'$}
+      \Comment{\fn{p4est\_partition\_given}}
+      \For{each rank $s$ with $[G'_s, G'_{s+1}) \cap [G_{me}, G_{me+1}) \ne
+        \emptyset$, $s \ne me$}
+        \State \textsc{Isend} the quadrants of that intersection to $s$
+      \EndFor
+      \For{each rank $o$ with $[G_o, G_{o+1}) \cap [G'_{me}, G'_{me+1}) \ne
+        \emptyset$, $o \ne me$}
+        \State \textsc{Irecv} that intersection from $o$
+          \Comment{sizes known from $G, G'$: no size round}
+      \EndFor
+      \State \textsc{Waitall};\; assemble the new local range in order;\;
+        $G \gets G'$
+    \EndFunction
+  \end{algorithmic}
+\end{algorithm}
+
+Compared with algorithm~\ref{alg:repart}: the same cut and the same single
+move. p4est counts quadrants, so $G, G'$ give every message's size and
+the size round of \textsc{Exchange} is not needed; libb-amr also sends
+$N(p)$ with each node, whose size only the sender knows.
+
+% ----------------------------------------------------------------------
+\subsection{NBX: a sparse exchange without knowing the senders}
+
+Hoefler, Siebert and Lumsdaine \cite{nbx}. It replaces \textsc{Exchange}
+when a rank knows whom it sends to but not who sends to it, so no table
+and no \textsc{Alltoall} of sizes is needed.
+
+\begin{algorithm}[H]
+  \caption{\textsc{NBX}$(to, out)$: receive from whoever sends}
+  \label{alg:nbx}
+  \begin{algorithmic}[1]
+    \For{$t \in to$}
+      \State \textsc{Issend}$(out_t \to t)$ \Comment{synchronous: completes
+        only once matched by a receive}
+    \EndFor
+    \State $in \gets \emptyset$;\quad $barrier \gets$ none
+    \Loop
+      \If{\textsc{Iprobe}(ANY\_SOURCE) finds a message from $s$}
+        \State $in_s \gets \textsc{Recv}$(its size, from $s$)
+      \EndIf
+      \If{$barrier = $ none}
+        \If{\textsc{Testall}(my \textsc{Issend}s)}
+          \Comment{all my messages are received}
+          \State $barrier \gets \textsc{Ibarrier}()$
+        \EndIf
+      \ElsIf{\textsc{Test}$(barrier)$}
+        \State \Return $in$ \Comment{every rank's sends are matched:
+          nothing in flight}
+      \EndIf
+    \EndLoop
+  \end{algorithmic}
+\end{algorithm}
+
+\textbf{Why it is correct.} A rank enters the barrier only when every
+message it sent has been received. So when the barrier completes, every
+message of every rank has been received, and none can still arrive. The
+cost is the messages themselves plus one non-blocking barrier,
+$O(\log n_{pe})$.
+
+\textbf{In libb-amr} it would replace the $from$ set of \textsc{Migrate}
+(algorithm~\ref{alg:migrate}, found from $K^{old}$) and so allow dropping
+the table, with the pids then told by the senders as in Basilisk.

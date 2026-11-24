@@ -1,0 +1,595 @@
+% definitions.tex: the sets and maps of a distributed tree (\input in
+% partition-methods.tex). The names follow tree.c and tree-mpi.c.
+% ======================================================================
+\section{Definitions}
+\label{sec:defs}
+
+This section names the sets and maps that the rest of the note, and
+\fn{tree-mpi.c}, work with. Each definition says where it lives in the
+code. Each statement has a short proof, so the code can rely on it.
+Table~\ref{tab:notation} at the end of the section lists the symbols.
+
+% ----------------------------------------------------------------------
+\subsection{Indices and the tree}
+
+$D \in \{1, 2, 3\}$ is the dimension, $\Omega = x_0 + [0, h_0)^D$ the
+domain, $\ell_{\max}$ the deepest level an index can have
+(\fn{BAMR\_MAX\_DEPTH}, 20 by default, so that $D\,\ell_{\max} \le 64$).
+A node is a block of $m^D$ cells; the partition deals only with nodes,
+never with the cells inside a block.
+
+\begin{definition}[indices]
+  The set of indices is
+  \[
+    \mathcal{I} = \big\{\, p = (\ell, \mathbf{i}) \;:\; 0 \le \ell \le
+      \ell_{\max},\ \mathbf{i} \in \{0, \ldots, 2^\ell - 1\}^D \,\big\},
+  \]
+  with $\ell(p)$ the level and $\mathbf{i}(p) = (i_0, \ldots, i_{D-1})$ the
+  position (\fn{Index}: \fn{i}, \fn{j}, \fn{k}, \fn{level}). The box of $p$
+  is $\Omega(p) = x_0 + h_0\, 2^{-\ell} (\mathbf{i} + [0,1)^D)$.
+\end{definition}
+
+\begin{definition}[parent, children, family, ancestors]
+  For $\ell(p) > 0$ the parent is $\pi(p) = (\ell - 1, \lfloor \mathbf{i}/2
+  \rfloor)$. For $\ell(p) < \ell_{\max}$ and $c \in \{0, \ldots, 2^D - 1\}$
+  the child is $\chi_c(p) = (\ell + 1, 2\mathbf{i} + \beta(c))$, where
+  $\beta(c)_a$ is bit $a$ of $c$ (\fn{index\_child}: bit 0 is $i$). The
+  family of $p$ is $F(p) = \{\chi_c(\pi(p))\}_c$, the root's family the
+  root. The ancestors are
+  \[
+    A(p) = \{\pi^k(p) : 1 \le k \le \ell(p)\}, \qquad
+    A(S) = \bigcup_{p \in S} A(p), \qquad \bar A(S) = S \cup A(S).
+  \]
+  $q \preceq p$ ($q$ lies below $p$) when $p \in \{q\} \cup A(q)$, that is,
+  when $\Omega(q) \subseteq \Omega(p)$.
+\end{definition}
+
+\begin{definition}[tree, leaves]
+  \label{def:tree}
+  A tree is a finite $T \subset \mathcal{I}$ with
+  \begin{enumerate}[label=(T\arabic*)]
+    \item the root $(0, \mathbf{0}) \in T$;
+    \item closed under parents: $p \in T,\ \ell(p) > 0 \Rightarrow \pi(p)
+      \in T$;
+    \item whole families: $p \in T \Rightarrow F(p) \subseteq T$ (families
+      are allocated together);
+    \item 2:1 balanced: two leaves whose closed boxes meet (by a face, an
+      edge or a corner) differ by at most one level.
+  \end{enumerate}
+  Its leaves are $\mathcal{L} = \mathcal{L}(T) = \{p \in T : \chi_0(p)
+  \notin T\}$; the boxes of the leaves partition $\Omega$. $N = |\mathcal{L}|$.
+\end{definition}
+
+$T$ is the whole tree, as one process holding everything would have it.
+With MPI no rank holds $T$; each holds the part of section
+\ref{sec:skel-def}.
+
+% ----------------------------------------------------------------------
+\subsection{The Morton map}
+
+\begin{definition}[Morton map]
+  Interleave the bits of a position at the finest level,
+  $\mathbf{i} \in \{0, \ldots, 2^{\ell_{\max}} - 1\}^D$:
+  \[
+    Z(\mathbf{i}) = \sum_{b=0}^{\ell_{\max}-1} \sum_{a=0}^{D-1}
+      \mathrm{bit}_b(i_a)\, 2^{D b + a}.
+  \]
+  The Morton map is $M : \mathcal{I} \to \mathbb{N}$, $M(p) =
+  Z\big(2^{\ell_{\max} - \ell(p)}\, \mathbf{i}(p)\big)$: the key of the
+  first finest cell of $p$ (\fn{tree\_morton\_key}). The key interval of
+  $p$ is
+  \[
+    J(p) = \big[\, M(p),\; M(p) + 2^{D(\ell_{\max} - \ell(p))} \big)
+      \cap \mathbb{N}.
+  \]
+\end{definition}
+
+\textbf{The key interval in words.} Divide the whole domain into the
+finest cells, at level $\ell_{\max}$, and number them along the Morton
+curve: these numbers are the keys. A node $p$ covers $2^{D(\ell_{\max} -
+\ell(p))}$ finest cells, and the curve visits them one after the other,
+without leaving $p$ in between. So their keys are consecutive numbers: the
+first is $M(p)$, and there are as many as cells. $J(p)$ is that set of
+keys, the stretch of the curve inside $p$. A finest cell has one key, $J =
+\{M\}$; the root has them all.
+
+\textbf{Example} (figure~\ref{fig:keyint}), $D = 2$ and $\ell_{\max} = 2$:
+a $4 \times 4$ grid of finest cells, keys 0 to 15. The node $p = (1, (1,
+0))$ is the lower right quarter. $M(p) = Z(2, 0) = 4$ and it covers $2^{2(2
+- 1)} = 4$ cells, so $J(p) = [4, 8) = \{4, 5, 6, 7\}$: the keys written in
+its cells. Its children are the cells with keys 4, 5, 6 and 7, one key
+each. The quarter above it, $(1, (1, 1))$, has $J = \{12, \ldots, 15\}$.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}
+    \fill[r2!30] (1.6,0) rectangle (3.2,1.6);
+    \foreach \k in {0,...,15} {
+      \pgfmathtruncatemacro{\i}{mod(\k,2) + 2*mod(int(\k/4),2)}
+      \pgfmathtruncatemacro{\j}{mod(int(\k/2),2) + 2*int(\k/8)}
+      \draw[black!35] (\i*0.8,\j*0.8) rectangle ++(0.8,0.8);
+      \node[font=\scriptsize, anchor=north west, inner sep=1.5pt]
+        at (\i*0.8,\j*0.8+0.8) {\k};
+    }
+    \draw[black!60, line width=0.5pt, line join=round, -{Stealth[length=3pt]}]
+      (0.4,0.4) -- (1.2,0.4) -- (0.4,1.2) -- (1.2,1.2) -- (2.0,0.4) --
+      (2.8,0.4) -- (2.0,1.2) -- (2.8,1.2) -- (0.4,2.0) -- (1.2,2.0) --
+      (0.4,2.8) -- (1.2,2.8) -- (2.0,2.0) -- (2.8,2.0) -- (2.0,2.8) --
+      (2.8,2.8);
+    \draw[black, line width=1.1pt] (1.6,0) rectangle (3.2,1.6);
+    \draw[black, line width=0.6pt] (0,0) rectangle (3.2,3.2);
+    \node[font=\footnotesize] at (2.4,-0.3) {$p = (1, (1,0))$};
+    % the keys on a line
+    \begin{scope}[xshift=4.2cm, yshift=1.4cm]
+      \foreach \k in {0,...,15} {
+        \pgfmathsetmacro{\c}{(\k >= 4 && \k < 8) ? 1 : 0}
+        \ifdim \c pt > 0.5pt
+          \filldraw[fill=r2!30, draw=black!40] (\k*0.5,0) rectangle ++(0.5,0.4);
+        \else
+          \draw[black!40] (\k*0.5,0) rectangle ++(0.5,0.4);
+        \fi
+        \node[font=\scriptsize] at (\k*0.5+0.25,0.2) {\k};
+      }
+      \draw[decorate, decoration={brace, amplitude=4pt, mirror},
+        line width=0.6pt] (2.0,-0.08) -- (4.0,-0.08)
+        node[midway, below=5pt, font=\footnotesize]
+        {$J(p) = [M(p),\, M(p) + 4) = [4, 8)$};
+      \draw[decorate, decoration={brace, amplitude=4pt},
+        line width=0.6pt] (0,0.48) -- (8.0,0.48)
+        node[midway, above=5pt, font=\footnotesize]
+        {$J(\text{root}) = [0, 16)$};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{Keys of the finest cells ($D = 2$, $\ell_{\max} = 2$), written in
+    each cell; the grey line is the Morton curve. The node $p$ (outlined)
+    holds the keys 4 to 7, a stretch of the curve: its key interval.}
+  \label{fig:keyint}
+\end{figure}
+
+Two facts follow and are used all through: a node $q$ lies inside $p$
+exactly when $J(q) \subseteq J(p)$, and the owner of $p$ is decided by
+where $M(p)$, the start of its stretch, falls among the cuts $K_r$
+(definition~\ref{def:owner}).
+
+\begin{proposition}[the curve]
+  \label{prop:morton}
+  For $p, q \in \mathcal{I}$:
+  \begin{enumerate}[label=(\alph*)]
+    \item $q \preceq p \iff J(q) \subseteq J(p)$, and two key intervals are
+      nested or disjoint;
+    \item $J(\chi_0(p)), \ldots, J(\chi_{2^D-1}(p))$ follow each other in
+      this order and partition $J(p)$; so $M(p) = M(\chi_0(p))$, and a node
+      has the key of its first leaf;
+    \item for a tree $T$, $\{J(q)\}_{q \in \mathcal{L}}$ partitions $[0,
+      2^{D \ell_{\max}})$: $M$ is injective on $\mathcal{L}$.
+  \end{enumerate}
+\end{proposition}
+
+\begin{proof}
+  The top $D\ell(p)$ bits of $M(p)$ are $Z$ of $\mathbf{i}(p)$ at level
+  $\ell(p)$; the low $D(\ell_{\max} - \ell(p))$ bits are zero. A node below
+  $p$ has the same top bits and any low bits, which is (a); bits $D(\ell_{
+  \max} - \ell - 1)$ to $D(\ell_{\max} - \ell) - 1$ of a child's key are its
+  $c$, which is (b). The leaf boxes partition $\Omega$, so the leaf
+  intervals partition the finest keys: (c).
+\end{proof}
+
+$M$ is not injective on $T$ ($p$ and $\chi_0(p)$ share a key), but $(\ell,
+M)$ is. The \emph{curve} is $\mathcal{L}$ sorted by key, $q_0, \ldots,
+q_{N-1}$; $\sigma(q)$ is the position of $q$ on it (\fn{tree\_caches
+()->leaves}).
+
+% ----------------------------------------------------------------------
+\subsection{Ranks, ownership, local sets}
+
+\begin{definition}[ranks, weights]
+  The ranks are $\mathcal{P} = \{0, 1, \ldots, n_{pe} - 1\}$. A weight is
+  $w : \mathcal{L} \to \mathbb{R}_{>0}$; $W(q) = \sum_{\sigma(q') <
+  \sigma(q)} w(q')$ is the weight before $q$ on the curve (the $W_q$ of
+  section~\ref{sec:cut}), $W = \sum_{q} w(q)$ the total, $w_{\max} =
+  \max_q w(q)$.
+\end{definition}
+
+\begin{definition}[partition table, ownership]
+  \label{def:owner}
+  A partition table is $K = (K_0, \ldots, K_{n_{pe}})$, $0 = K_0 \le K_1 \le
+  \cdots \le K_{n_{pe}} = \infty$ (\fn{key\_first}). It defines the
+  ownership map
+  \[
+    \rho = \rho_K : \mathcal{I} \to \mathcal{P}, \qquad
+    \rho(p) = \max\{\, r \in \mathcal{P} : K_r \le M(p) \,\},
+  \]
+  the one $r$ with $K_r \le M(p) < K_{r+1}$ (so $K_r < K_{r+1}$: an empty
+  rank owns nothing). $\rho$ is defined on every index, in $T$ or not,
+  held here or not: a binary search, $O(\log n_{pe})$, no message
+  (\fn{owner\_of\_key}, algorithm~\ref{alg:owner}). The pid a node stores
+  is $\rho$ of it (\fn{node->pid}).
+\end{definition}
+
+\begin{definition}[local sets]
+  \label{def:local}
+  For $r \in \mathcal{P}$,
+  \[
+    \Lambda_r = \rho^{-1}(r) = \{p \in \mathcal{I} : K_r \le M(p) <
+      K_{r+1}\}, \qquad
+    T_r = T \cap \Lambda_r, \qquad
+    \mathcal{L}_r = \mathcal{L} \cap \Lambda_r,
+  \]
+  the index piece, own nodes and own leaves of $r$ (\fn{tree\_caches
+  ()->owned} is $\mathcal{L}_{me}$). The $\Lambda_r$ partition
+  $\mathcal{I}$, so the $T_r$ partition $T$ and the $\mathcal{L}_r$
+  partition $\mathcal{L}$. Each $\mathcal{L}_r$ is one run of the curve:
+  $\sigma(\mathcal{L}_r)$ is an interval of integers. By
+  proposition~\ref{prop:morton}(b) a node is owned by the owner of its
+  first leaf. The load of $r$ is $\lambda_r = \sum_{q \in \mathcal{L}_r}
+  w(q)$ and the imbalance $\eta = n_{pe} \max_r \lambda_r / W \ge 1$.
+\end{definition}
+
+\begin{definition}[valid table]
+  \label{def:valid}
+  $K$ is valid for $T$ when
+  \begin{enumerate}[label=(V\arabic*)]
+    \item each $K_r$ with $K_r < K_{r+1}$ is the key of a leaf (the first
+      of $\mathcal{L}_r$);
+    \item families of leaves are whole: if all children of $u \in T$ are
+      leaves, $\rho$ is constant on them.
+  \end{enumerate}
+\end{definition}
+
+\begin{proposition}[the cut]
+  \label{prop:cut}
+  Let $r(q) = \min\big(n_{pe} - 1, \lfloor n_{pe}(W(q) + w(q)/2)/W
+  \rfloor\big)$ (section~\ref{sec:cut}), then $r(q) \gets r(\chi_0(\pi(q)))$
+  for each $q$ in a family of leaves (algorithm~\ref{alg:family}). Then
+  \begin{enumerate}[label=(\alph*)]
+    \item $r$ is non-decreasing along the curve, and $K_s = \min\{M(q) :
+      r(q) \ge s\}$ ($\min \emptyset = \infty$; \textsc{NewTable}) is a
+      valid table with $\rho_K = r$ on $\mathcal{L}$;
+    \item $\lambda_s \le W/n_{pe} + w_{\max}$ without the family rule, and
+      $\lambda_s \le W/n_{pe} + 2^D w_{\max}$ with it.
+  \end{enumerate}
+\end{proposition}
+
+\begin{proof}
+  (a) $W(q) + w(q)/2$ grows along the curve, so the first $r$ does. A
+  family of leaves is a run of the curve beginning with child~0
+  (proposition~\ref{prop:morton}(b)); giving the whole run the value of
+  its first element keeps a non-decreasing sequence non-decreasing. A
+  non-decreasing $r$ cuts the curve into runs, and $K_s$ is the first key
+  of run $s$ (or of the next non-empty one), which is (V1) and $\rho_K =
+  r$; (V2) holds by construction. (b) The leaves of $s$ have their middles
+  in $[sW/n_{pe}, (s+1)W/n_{pe})$, so they lie in that interval widened by
+  $w_{\max}/2$ on each side. The family rule adds at most the $2^D - 1$
+  siblings that follow the last child~0 of $s$.
+\end{proof}
+
+\begin{proposition}[adaptation keeps the table]
+  \label{prop:adapt}
+  Let $K$ be valid for $T$. If $T'$ is made from $T$ by dividing leaves,
+  $K$ is valid for $T'$, and a new child has its parent's owner. If $T'$
+  is made by merging families of leaves, (V1) still holds and the parent
+  has its children's owner, but (V2) can fail.
+\end{proposition}
+
+\begin{proof}
+  Let $p \in \mathcal{L}_r$. $K_{r+1}$ is $\infty$ or the key of a leaf $q
+  \ne p$ with $M(q) > M(p)$; $J(q)$ and $J(p)$ are disjoint, so $K_{r+1} \ge
+  \max J(p) + 1$ and $J(p) \subseteq [K_r, K_{r+1})$: every child of $p$ is
+  in $\Lambda_r$. The children form a family of leaves on one rank: (V2).
+  If $K_r = M(p)$, it is the key of $\chi_0(p)$ too: (V1). Merging: the
+  children are on one rank by (V2), and the parent has child~0's key. If
+  $K_r$ was a merged child's key, it was child~0's (a later sibling's key
+  would come after child~0's, on the same rank), so it is the parent's.
+  But the merge can make a new family of leaves, the parent and its
+  siblings, whose members sit on different ranks (figure~\ref{fig:family}).
+\end{proof}
+
+So between two repartitions the table does not change: refining needs no
+message about owners, and the next repartition puts back (V2).
+
+% ----------------------------------------------------------------------
+\subsection{Neighbourhood, halos, edge cut, communication graph}
+
+\begin{definition}[neighbourhood]
+  \label{def:nbhd}
+  For $p \in T$ and $\delta \in \{-1, 0, 1\}^D \setminus \{\mathbf{0}\}$
+  let $b_\delta = (\ell(p), \mathbf{i}(p) + \delta)$, taken only when it is
+  in $\mathcal{I}$ (no periodicity). $N(p)$ is the set of
+  \begin{itemize}
+    \item $b_\delta$ when $b_\delta \in T$ (same level: ghosts);
+    \item $\pi(b_\delta)$ when $b_\delta \notin T$ (a coarser leaf, by
+      (T2) and (T4));
+    \item when $p \in \mathcal{L}$ and $b_\delta \in T \setminus
+      \mathcal{L}$: the children $\chi_c(b_\delta)$ that touch $p$,
+      $\beta(c)_a = [\delta_a < 0]$ for each $a$ with $\delta_a \ne 0$
+      (reflux, and the far side of a coarse neighbour);
+    \item $\pi(p)$ and the children of $p$ (restriction).
+  \end{itemize}
+  This is \fn{related ()} in \fn{tree-mpi.c}. $N^*(p) = N(p) \cup \{p\}$
+  and $N(S) = \bigcup_{p \in S} N(p)$.
+\end{definition}
+
+\begin{proposition}[symmetry]
+  \label{prop:sym}
+  For $p, x \in T$: $x \in N(p) \iff p \in N(x)$.
+\end{proposition}
+
+\begin{proof}
+  Same level, and parent with child: symmetric as written. A coarse
+  neighbour: $x = \pi(b_\delta)$ is a leaf one level above $p$, touching
+  $p$. Seen from $x$, the node of its level across that side is $\pi(p)$
+  ($\ne x$, since siblings come together), in $T$ with children, and $x$
+  is a leaf; so $N(x)$ holds the children of $\pi(p)$ that touch $x$, $p$
+  among them. A fine neighbour is the same case seen from the other side.
+\end{proof}
+
+\begin{definition}[graphs, edge cut]
+  The node graph is $G_N = (T, E_N)$, $E_N = \{\{p, x\} : x \in N(p)\}$,
+  undirected by proposition~\ref{prop:sym}. The leaf graph is $G_L =
+  (\mathcal{L}, E_L)$, $E_L = \{\{p, q\} \subseteq \mathcal{L} : p \ne q,\
+  \overline{\Omega(p)} \cap \overline{\Omega(q)} \ne \emptyset\}$, the graph
+  usual in graph partitioning. The edge cut of $\rho$ is
+  \[
+    C(\rho) = \{\{p, x\} \in E_N : \rho(p) \ne \rho(x)\}, \qquad
+    C_L(\rho) = \{\{p, q\} \in E_L : \rho(p) \ne \rho(q)\}.
+  \]
+  $C$ is what the plans exchange (ghosts, restriction, reflux); $C_L$
+  counts only the ghosts of the leaves.
+\end{definition}
+
+\begin{definition}[halo]
+  \label{def:halo}
+  The halo of $r$ is the part of its neighbourhood it does not own, and
+  its part from $s$:
+  \[
+    H_r = N(T_r) \setminus T_r = \{x : \{p, x\} \in C(\rho),\ \rho(p) = r,
+      \ \rho(x) \ne r\}, \qquad
+    H_r^s = H_r \cap \Lambda_s .
+  \]
+  $H_r \cap \mathcal{L}$ is the leaf halo (figure~\ref{fig:skeleton}).
+\end{definition}
+
+\begin{definition}[communication graph]
+  \label{def:comm}
+  $G_C = (\mathcal{P}, E_C)$, $E_C = \{\{r, s\} : r \ne s,\ H_r^s \ne
+  \emptyset\}$: the image of $C(\rho)$ under $\rho \times \rho$, a quotient
+  of $G_N$. The peers of $r$ are its neighbours in $G_C$, $Q_r = \rho(H_r)$.
+  The edge $\{r, s\}$ carries $V_{rs} = |H_r^s|$ nodes from $s$ to $r$ and
+  $V_{sr}$ back, in general $V_{rs} \ne V_{sr}$.
+\end{definition}
+
+By proposition~\ref{prop:sym}, $H_r^s \ne \emptyset \iff H_s^r \ne
+\emptyset$: $s \in Q_r \iff r \in Q_s$. Each rank can therefore make its
+receive lists alone and send them to its peers, who learn what to send
+(algorithm~\ref{alg:skeleton}); there is no message to all ranks. Writing
+$b$ for the bytes sent per node and $\alpha_{rs}$, $\beta_{rs}$ for the
+latency and inverse bandwidth between $r$ and $s$ (what
+\fn{mpi-topology.c} measures between nodes), one exchange takes about
+\[
+  t_{ex} \approx \max_{r \in \mathcal{P}} \sum_{s \in Q_r} \big(\alpha_{rs}
+    + \beta_{rs}\, b\, V_{rs}\big).
+\]
+The degree $|Q_r|$ sets the latency term, the halo $|H_r|$ the volume.
+The curve cut makes $\lambda_r$ even (proposition~\ref{prop:cut}) and
+gives no bound on $|C(\rho)|$; it relies on a run of the curve being a
+compact region (section~\ref{sec:problem}).
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.40\textwidth}
+    \centering
+    \begin{tikzpicture}[scale=0.62]\input{fig-family.tex}\end{tikzpicture}
+    \caption{The partition $\rho$ of figure~\ref{fig:curve}b.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.28\textwidth}
+    \centering
+    \begin{tikzpicture}\input{fig-commgraph.tex}\end{tikzpicture}
+    \caption{$G_C$; near $r$ on edge $\{r,s\}$: $V_{rs}$.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.28\textwidth}
+    \centering\small
+    \begin{tabular}{@{}lr@{}}
+      \toprule
+      $|\mathcal{L}|$ & \nleaves \\
+      $|E_L|$ & \nedges \\
+      $|C_L(\rho)|$ & \ncut \\
+      $|E_C|$ & \ncommedges \\
+      $|H_r \cap \mathcal{L}|$ & \halocounts \\
+      $|Q_r|$ & \degrees \\
+      \bottomrule
+    \end{tabular}
+    \caption{Measured on (a), $r = 0 \ldots 3$.}
+  \end{subfigure}
+  \caption{The edge cut and the communication graph of the example,
+    computed by \fn{figures.py} on the leaf graph $G_L$ (leaves touching by
+    a face or a corner), so $V_{rs}$ counts leaves of the halo. Rank~1's
+    halo is the one of figure~\ref{fig:skeleton}. Ranks 0 and 3 touch
+    nowhere: no edge.}
+  \label{fig:comm}
+\end{figure}
+
+% ----------------------------------------------------------------------
+\subsection{Ancestors and the skeleton}
+\label{sec:skel-def}
+
+\begin{definition}[skeleton]
+  \label{def:skeleton}
+  With $\mathrm{Fam}(S) = \bigcup_{p \in S} F(p)$, the skeleton of $r$ is
+  \[
+    S_r = \mathrm{Fam}\big(\bar A(T_r \cup N(T_r))\big) :
+  \]
+  own nodes, their neighbourhood, the ancestors of both, and the families
+  of all of them (\fn{tree\_insert} adds missing ancestors with their
+  families). $S_r$ satisfies (T1) to (T3). Its leaves that are not leaves
+  of $T$ are the pruned nodes $\Pi_r = \mathcal{L}(S_r) \setminus
+  \mathcal{L}$. The active nodes, with blocks, are $T_r \cup H_r$ (and the
+  families with an active member); the rest of $S_r$ is inactive: flags
+  and pid only.
+\end{definition}
+
+\begin{proposition}[ancestors of a piece]
+  \label{prop:anc}
+  $A(T_r) \setminus T_r \subseteq \{p \in T : M(p) < K_r < M(p) +
+  |J(p)|\}$, which has at most one node on each level. So a rank holds at
+  most $\ell_{\max}$ (in fact the depth of $T$) ancestors it does not own.
+\end{proposition}
+
+\begin{proof}
+  Let $p$ be an ancestor of $q \in T_r$ with $p \notin \Lambda_r$. $J(q)
+  \subseteq J(p)$, so $M(p) \le M(q) < K_{r+1}$, hence $M(p) < K_r \le M(q)
+  < M(p) + |J(p)|$: $K_r$ is inside $J(p)$ and not its first key. The nodes
+  of one level have disjoint intervals, and only one can hold $K_r$.
+\end{proof}
+
+The ancestors cost a rank a chain of nodes from the root down to its first
+key, whatever $n_{pe}$ and the size of its piece. In
+figure~\ref{fig:skeleton} the grey pruned nodes are most of what is held
+beyond $T_r \cup H_r$.
+
+% ----------------------------------------------------------------------
+\subsection{Migration}
+
+\begin{definition}[migration sets]
+  Let $K^{old}$ and $K$ be the tables before and after a repartition,
+  $\rho^{old}$ and $\rho$ their owners. For $r \ne s$,
+  \[
+    X_{r \to s} = \{p \in T : \rho^{old}(p) = r,\ \rho(p) = s\},
+  \]
+  what $r$ sends to $s$ (with $N(p)$, as structure, for each $p$:
+  algorithm~\ref{alg:migrate}). The send and receive sets of $r$ are
+  $\mathit{To}_r = \{s : X_{r \to s} \ne \emptyset\}$ and
+  $\mathit{From}_r = \{o : X_{o \to r} \ne \emptyset\}$.
+\end{definition}
+
+\begin{proposition}[senders from the tables]
+  \label{prop:from}
+  If $K^{old}$ and $K$ satisfy (V1), then
+  \[
+    \mathit{From}_r = \{\, o \ne r : K^{old}_o < K^{old}_{o+1},\
+      [K^{old}_o, K^{old}_{o+1}) \cap [K_r, K_{r+1}) \ne \emptyset \,\},
+  \]
+  a range of consecutive ranks from $\rho^{old}(K_r)$ to
+  $\rho^{old}(K_{r+1} - 1)$ when the new piece of $r$ is not empty (empty
+  ranks left out), known without a message.
+  Every $o$ in it sends $r$ at least one leaf.
+\end{proposition}
+
+\begin{proof}
+  $\subseteq$: a node sent from $o$ to $r$ has its key in both intervals.
+  $\supseteq$: the left end of the intersection is $K^{old}_o$ or $K_r$,
+  by (V1) the key of a leaf, and that leaf is in both pieces: $o$ owned it,
+  $r$ owns it now. The intersection with $[K_r, K_{r+1})$ of a partition
+  of the keys into consecutive intervals is a run of consecutive intervals.
+\end{proof}
+
+So \textsc{Exchange} (algorithm~\ref{alg:exch}) never waits for a message
+nobody sends. One pass sends each node whose owner changes exactly once,
+$\sum_{r \ne s} |X_{r \to s}|$ nodes in all, which is the least possible.
+Moves to rank $\pm 1$ (Basilisk, figure~\ref{fig:iterate}) carry $p$ at
+least $|\rho(p) - \rho^{old}(p)|$ times and take at least $\max_p |\rho(p)
+- \rho^{old}(p)|$ passes.
+
+% ----------------------------------------------------------------------
+\subsection{AMR with MPI}
+\label{sec:amr-mpi}
+
+\begin{definition}[distributed state]
+  \label{def:state}
+  A distributed AMR state is $\mathfrak{S} = \big(T, K, (S_r, u_r)_{r \in
+  \mathcal{P}}\big)$, where $u_r$ gives each active node of $S_r$ its
+  blocks, one per scalar. It satisfies
+  \begin{enumerate}[label=(I\arabic*)]
+    \item $T$ is a tree: (T1) to (T4);
+    \item $K$ is valid for $T$: (V1) always, (V2) after each step (a merge
+      that breaks it forces a repartition);
+    \item rank $r$ holds exactly $S_r$, and the pid of each node of $S_r$ is
+      $\rho_K$ of it; every $K$ is on every rank;
+    \item $u_r(p)$ is the value of $p$ for $p \in T_r$; for $x \in H_r$,
+      $u_r(x)$ is a copy, current when $u_r(x) = u_{\rho(x)}(x)$.
+  \end{enumerate}
+  Nothing of $T \setminus \bigcup_r S_r$ is held anywhere, and no rank
+  stores anything of size $|T|$; only $K$ has size $n_{pe}$.
+\end{definition}
+
+A step of a simulation is a composition of four operations on
+$\mathfrak{S}$:
+\begin{description}[leftmargin=1.4em, font=\normalfont\itshape]
+  \item[Exchange $E$] (\fn{ghosts\_update}, \fn{ghosts\_update\_levels}):
+    $u_r(x) \gets u_{\rho(x)}(x)$ for $x \in H_r$, or for the part a plan
+    names (ghosts, restriction, faces; by level). Messages go only along
+    the edges of $G_C$, both ways.
+  \item[Compute $F$]: $u_r(p) \gets f\big(u_r|_{N^*(p)}\big)$ for each $p
+    \in T_r$.
+  \item[Adapt $A$] (\fn{tree\_mpi\_refine}, coarsening): $T \to T'$, own
+    leaves divided or merged, the 2:1 closure across ranks by rounds
+    between peers; $K$ unchanged (proposition~\ref{prop:adapt}); $S_r$ and
+    $H_r$ made again.
+  \item[Repartition $R$] (\fn{tree\_mpi\_repartition}): new $K$ by
+    proposition~\ref{prop:cut}, migration by proposition~\ref{prop:from},
+    then $S_r$, $Q_r$ and the plans (algorithm~\ref{alg:skeleton}).
+\end{description}
+\[
+  \mathfrak{S}^{n+1} = \begin{cases}
+    R \circ A \circ F \circ E\,(\mathfrak{S}^n) & \text{if, after } A,
+      \text{ (V2) fails or } \max_r |\mathcal{L}_r| > \max\big(
+      \eta_{\max} N/n_{pe},\, \lceil N/n_{pe} \rceil + 2^D - 1\big),\\
+    A \circ F \circ E\,(\mathfrak{S}^n) & \text{otherwise}
+  \end{cases}
+\]
+(unit weights, \fn{adapt\_wavelet ()}: section~\ref{sec:when},
+algorithm~\ref{alg:when}).
+
+\begin{proposition}[the same as on one rank]
+  \label{prop:serial}
+  Let $f$ read, for a node $p$, only nodes of $N^*(p)$. After $E$, $F$ on
+  the distributed state gives on every $p \in T_r$ the value that $F$ on
+  the whole tree $T$ held by one process gives.
+\end{proposition}
+
+\begin{proof}
+  $N^*(p) \subseteq T_r \cup H_r$ for $p \in T_r$, by
+  definition~\ref{def:halo}. After $E$ every value there equals the
+  owner's (I4), which is the one-process value by induction on the steps.
+\end{proof}
+
+With $\mathrm{GHOSTS} = 2 \le m$, a stencil of radius 2 about any cell of
+$p$'s block stays in the boxes of $N^*(p)$, so the solvers' stencils meet
+the condition. The tests compare the distributed fields with the
+one-process ones bit for bit.
+
+\begin{table}[h]
+  \centering\small
+  \begin{tabular}{@{}l l l@{}}
+    \toprule
+    symbol & meaning & in the code \\
+    \midrule
+    $\mathcal{I}$, $p = (\ell, \mathbf{i})$ & indices & \fn{Index} \\
+    $\pi$, $\chi_c$, $F$ & parent, child $c$, family & \fn{index\_parent},
+      \fn{index\_child} \\
+    $A$, $\bar A$ & ancestors, with the set itself & \\
+    $T$, $\mathcal{L}$ & the whole tree, its leaves & \\
+    $M$, $J(p)$ & Morton key, key interval & \fn{tree\_morton\_key} \\
+    $\sigma$ & position on the curve & \fn{tree\_caches ()->leaves} \\
+    $\mathcal{P}$, $n_{pe}$, $me$ & ranks, their number, this one &
+      \fn{tree\_npe}, \fn{tree\_rank} \\
+    $w$, $W(q)$, $W$ & weights, weight before $q$, total & \fn{weight} \\
+    $K$ & partition table & \fn{key\_first} \\
+    $\rho = \rho_K$ & ownership $\mathcal{I} \to \mathcal{P}$ &
+      \fn{owner\_of\_key}, \fn{node->pid} \\
+    $\Lambda_r$, $T_r$, $\mathcal{L}_r$ & index piece, own nodes, own leaves
+      & \fn{tree\_caches ()->owned} \\
+    $\lambda_r$, $\eta$ & load, imbalance & \\
+    $N(p)$, $N^*(p)$ & neighbourhood, with $p$ & \fn{related} \\
+    $E_N$, $E_L$ & node graph, leaf graph & \\
+    $C(\rho)$, $C_L(\rho)$ & edge cuts & \\
+    $H_r$, $H_r^s$ & halo, its part from $s$ & the receive lists \\
+    $G_C$, $Q_r$, $V_{rs}$ & communication graph, peers, volume &
+      \fn{TreeMpiPlan} \\
+    $S_r$, $\Pi_r$ & skeleton, pruned nodes & \fn{skeleton\_and\_plan} \\
+    $X_{r\to s}$ & migration set & \textsc{Migrate} \\
+    $\mathfrak{S}$ & distributed state & \\
+    \bottomrule
+  \end{tabular}
+  \caption{The notation of section~\ref{sec:defs}.}
+  \label{tab:notation}
+\end{table}

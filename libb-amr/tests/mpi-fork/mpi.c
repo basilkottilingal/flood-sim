@@ -465,3 +465,42 @@ int MPI_Allreduce (const void * in, void * out, int count, MPI_Datatype type,
   free (buf);
   return 0;
 }
+
+/* block r of rbuf (rcounts [r] items at displs [r]) from rank r, one's
+ * own copied: every rank's to every other, in turn */
+int MPI_Allgatherv (const void * sbuf, int scount, MPI_Datatype stype,
+                    void * rbuf, const int * rcounts, const int * displs,
+                    MPI_Datatype rtype, MPI_Comm comm)
+{
+  size_t size = type_size (stype);
+  if (!size || stype != rtype || scount < 0 || scount != rcounts [me])
+    fail ("Allgatherv: the same type both ways, this rank's count");
+  int tag = -5, nr = 0;
+  MPI_Request q [2 * NP_MAX];
+  memcpy ((char *) rbuf + (size_t) displs [me] * size, sbuf,
+          (size_t) scount * size);
+  for (int r = 0; r < np; r++)
+    if (r != me)
+    {
+      MPI_Irecv ((char *) rbuf + (size_t) displs [r] * size,
+                 (int) ((size_t) rcounts [r] * size), MPI_BYTE, r, tag, comm,
+                 &q [nr++]);
+      MPI_Isend (sbuf, (int) ((size_t) scount * size), MPI_BYTE, r, tag,
+                 comm, &q [nr++]);
+    }
+  MPI_Waitall (nr, q, MPI_STATUSES_IGNORE);
+  return 0;
+}
+
+/* MPI_Allgatherv () with count items from each rank, in rank order */
+int MPI_Allgather (const void * sbuf, int scount, MPI_Datatype stype,
+                   void * rbuf, int rcount, MPI_Datatype rtype, MPI_Comm comm)
+{
+  int counts [NP_MAX], displs [NP_MAX];
+  if (scount != rcount)
+    fail ("Allgather: the same count both ways");
+  for (int r = 0; r < np; r++)
+    counts [r] = rcount, displs [r] = r * rcount;
+  return MPI_Allgatherv (sbuf, scount, stype, rbuf, counts, displs, rtype,
+                         comm);
+}

@@ -1,0 +1,967 @@
+% partition-methods.tex: how a distributed tree is cut and moved, drawn.
+% Build with make (figures.py writes the fig-*.tex files first).
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds, patterns,
+  decorations.pathreplacing, calc, shapes.misc}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\algrenewcommand\algorithmicrequire{\textbf{In:}}
+\algrenewcommand\algorithmicensure{\textbf{Out:}}
+\algrenewcommand\algorithmiccomment[1]{\hfill{\footnotesize\color{black!60}\(\triangleright\) #1}}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=1.4em}
+\captionsetup{font=small, labelfont=bf}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+
+% the four ranks (Okabe-Ito, safe for colour blindness)
+\definecolor{r0}{HTML}{0072B2}
+\definecolor{r1}{HTML}{E69F00}
+\definecolor{r2}{HTML}{009E73}
+\definecolor{r3}{HTML}{CC79A7}
+
+\newcommand{\fn}[1]{\texttt{#1}}
+\input{fig-counts.tex}
+\input{fig-skelcounts.tex}
+\input{fig-migcounts.tex}
+\input{fig-zcounts.tex}
+\input{fig-wcounts.tex}
+\input{fig-cutcounts.tex}
+\input{fig-entcounts.tex}
+\input{fig-costs.tex}
+
+\tikzset{
+  box/.style={draw=black!60, rounded corners=2pt, fill=#1, align=center,
+    font=\footnotesize, inner sep=3pt, minimum height=8mm, text width=25mm},
+  box/.default=white,
+  flow/.style={-{Stealth[length=4pt]}, line width=0.6pt, black!70},
+}
+
+\title{Partitioning a distributed block-AMR tree\\[2pt]
+  \large the methods compared, in pictures}
+\author{libb-amr notes}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent
+This note draws the methods discussed for \fn{tree\_mpi\_repartition ()}:
+how the cut is found, how families of siblings are kept whole, how nodes
+move to their new ranks, how a rank finds the owner of a node, and what
+each rank keeps. It sets libb-amr's way beside Basilisk's \fn{balance ()}
+and names the published algorithms behind both. Every picture except the
+flow charts and the timeline is computed by \fn{figures.py}, with the
+rules the text states, not drawn by hand.
+
+\tableofcontents
+
+% ======================================================================
+\section{The problem}
+\label{sec:problem}
+
+The leaves of the tree are ordered along a space-filling curve: the Morton
+(Z-order) curve, in libb-amr and in Basilisk. Each leaf has a cost (its
+weight), here 1 per leaf. The curve is cut into $n_{pe}$ contiguous pieces
+of about equal weight, one per rank. A contiguous piece of the curve is a
+compact region of space, so a rank's boundary stays short, and the cut is
+a one-dimensional problem however many dimensions the tree has.
+Section~\ref{sec:defs} defines these objects exactly.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \begin{tikzpicture}\input{fig-middle.tex}\end{tikzpicture}
+    \caption{Each leaf to the rank whose share of the curve holds its
+      middle. The families outlined in red dashes are split across two ranks.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \begin{tikzpicture}\input{fig-family.tex}\end{tikzpicture}
+    \caption{Then each family whose children are all leaves goes whole to
+      the rank of its child~0: the outlined families are one colour now.}
+  \end{subfigure}
+  \caption{A quadtree of \nleaves{} leaves (levels 2 to 4, 2:1 balanced),
+    refined around a circle, cut for 4 ranks. The grey line is the Morton
+    curve through the leaves' centres; the thick black lines are the
+    boundaries between ranks. Leaves per rank after the family rule:
+    \famcounts{}. The plain cut splits \nsplit{} families.}
+  \label{fig:curve}
+\end{figure}
+
+\input{definitions.tex}
+
+% ======================================================================
+\section{The cut: prefix sums along the curve}
+\label{sec:cut}
+
+Let $w_q$ be the weight of leaf $q$ in curve order, $W_q = \sum_{p<q} w_p$
+the weight before it and $W$ the total. Leaf $q$ goes to rank
+\[
+  r(q) \;=\; \min\!\Big(n_{pe}-1,\;
+    \Big\lfloor n_{pe}\,\frac{W_q + w_q/2}{W} \Big\rfloor\Big),
+\]
+the rank whose share $[\,rW/n_{pe},\,(r+1)W/n_{pe})$ holds the leaf's
+middle. Figure~\ref{fig:weights} draws it.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}\input{fig-weights.tex}\end{tikzpicture}
+  \caption{Twenty leaves with weights 1 to 4 (width and number), $W =
+    \wtotal$, 4 ranks. The dashed lines are the ideal cuts at $kW/4$; a
+    dot is a leaf's middle, and the leaf's colour is the share the dot
+    falls in. The small numbers below are the prefix sums $W_q$.}
+  \label{fig:weights}
+\end{figure}
+
+\textbf{On a distributed tree} no rank sees all the weights, and each
+rank's own leaves are one contiguous run of the curve. Two collectives of
+a few doubles per rank give it all it needs:
+\begin{itemize}
+  \item \fn{MPI\_Allreduce} of (count, weight, bad), bad counting the
+    weights not $> 0$: the totals $N$ and $W$, and whether to stop
+    (on every rank, nothing changed);
+  \item \fn{MPI\_Exscan} of (count, weight): the leaves and the weight
+    before my first leaf.
+\end{itemize}
+Counts travel as doubles, exact below $2^{53}$. The weight check and the
+two totals used to be three \fn{MPI\_Allreduce}s and the two prefixes two
+\fn{MPI\_Exscan}s; each collective costs at least $\lceil\log_2
+n_{pe}\rceil$ message latencies (section~\ref{sec:collectives}), so the
+values go together.
+Every rank then applies the formula to its own leaves alone. With integer
+weights the answer is bit for bit the one a single rank holding the whole
+tree would give (\fn{tree\_partition ()}); with fractional weights a leaf
+on a tie may fall the other way, since the sums are added in another
+order.
+
+\textbf{How good is it?} Cutting a weighted sequence into $n_{pe}$
+contiguous pieces with the smallest largest piece is the
+\emph{chain-on-chains} problem \cite{pinar}. The prefix rule is within one
+leaf's weight of the optimum; \fn{test\_partition} checks this against
+the optimum found by bisection on the bound with greedy packing.
+
+\subsection{The new table, without a reduction}
+\label{sec:table}
+
+After the cut every rank must know the whole new table $K$ (the first key
+of every rank, definition~\ref{def:owner}), and with it each rank's leaves
+and load. No rank needs to \emph{add} anything up for it: since $r$ does
+not decrease along the curve (proposition~\ref{prop:cut}(a)),
+\[
+  K_s = \min\{M(q) : r(q) \ge s\}
+\]
+is the key of one leaf, the first with $r(q) \ge s$, and the one rank
+holding that leaf also knows its prefix weight $W(q)$ and its index along
+the curve (from the \fn{MPI\_Exscan}). That rank gives the entry
+$(K_s, W(K_s), n(K_s))$, 24 bytes; the others give nothing for $s$.
+
+Which rank gives which entries? Let rank $o$ hold leaves whose ranks end
+with $r_{last}(o)$ ($-1$ if it holds none), and let $\ell_o = \max_{o' <
+o} r_{last}(o')$ ($-1$ for $o = 0$). Rank $o$ gives the entries
+\[
+  s = \ell_o + 1, \ldots, r_{last}(o), \qquad c_o = \max\big(0,\;
+    r_{last}(o) - \ell_o\big) \text{ of them}.
+\]
+
+\begin{proposition}[one giver per entry]
+  \label{prop:giver}
+  The ranges $(\ell_o, r_{last}(o)]$ are disjoint, their union is
+  $[0, r_{\max}]$ with $r_{\max}$ the rank of the last leaf, and the first
+  leaf with $r(q) \ge s$, for $s$ in the range of $o$, is a leaf of $o$.
+\end{proposition}
+
+\begin{proof}
+  $\ell_{o+1} = \max(\ell_o, r_{last}(o))$, so the ranges follow each
+  other without overlap and, by telescoping, cover $[0, r_{\max}]$. For
+  $s \in (\ell_o, r_{last}(o)]$: the leaves of the ranks before $o$ have
+  $r \le \ell_o < s$, and $o$ has a leaf with $r = r_{last}(o) \ge s$;
+  the ranks own consecutive runs of the curve, so the first leaf with $r
+  \ge s$ is one of $o$'s.
+\end{proof}
+
+So the table takes two collectives, both without a reduction:
+\begin{enumerate}
+  \item \fn{MPI\_Allgather} of $r_{last}$, one int a rank: every rank
+    computes every $c_o$ and the displacements;
+  \item \fn{MPI\_Allgatherv} of the entries: they arrive in the order of
+    $s$, $\sum_o c_o = r_{\max} + 1 \le n_{pe}$ of them.
+\end{enumerate}
+Then $K_s$, $W(K_s)$ and $n(K_s)$ for $s > r_{\max}$ are $\infty$, $W$
+and $N$ (empty ranks at the end); $K_0 = 0$; the load of $s$ is
+$\lambda_s = W(K_{s+1}) - W(K_s)$ and its first leaf
+\fn{leaf\_first}$[s] = n(K_s)$. An empty rank in the middle gets the key
+of the next non-empty one, as before, because its first leaf with $r \ge
+s$ is that one's. Keys and counts are exact; with fractional weights a
+load, a difference of two prefix sums, may differ in the last bits from
+the sum of the leaves' weights (it only feeds the imbalance).
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm]\input{fig-entries.tex}\end{tikzpicture}
+  \caption{Who gives the entries of the new table. The colours are the new
+    ranks, the black frames the old pieces, the number under a frame the
+    entries that old rank gives. Top: the example of
+    figure~\ref{fig:onepass} (rank 0 refined twice): old rank 0 holds the
+    first leaf of every new piece and gives all four entries (counts
+    \entbig). Bottom: a small change (one leaf more on rank 2 after the
+    one pass): each rank gives one entry (counts \entsmall), the usual
+    case after a step.}
+  \label{fig:entries}
+\end{figure}
+
+Before, the table was one \fn{MPI\_Allreduce} of $n_{pe}$ entries
+$\{$smallest key, load, count$\}$ with a user operation (key the
+smaller, load and count summed): every rank filled $n_{pe}$ entries, all
+but one or two the identity, and the reduction combined them all.
+Section~\ref{sec:collectives} compares the two.
+
+% ======================================================================
+\section{Families stay whole}
+
+Coarsening merges a family of $2^D$ sibling leaves into their parent. If
+the siblings sit on different ranks, the merge needs their data in one
+place first. libb-amr never splits a family of leaves: after the middle
+rule, each such family goes to the rank of its child~0, the first sibling
+along the curve (figure~\ref{fig:curve}b). The cost is a small imbalance,
+less than one family per cut.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm]
+    % before: a family split by a merge elsewhere
+    \begin{scope}
+      \node[font=\footnotesize\bfseries, anchor=west] at (0,2.35)
+        {a family split};
+      \foreach \c/\k in {0/0, 1/0, 2/1, 3/1}
+        \filldraw[fill=r\k!55, draw=white, line width=0.8pt]
+          (\c*0.9, 1.2) rectangle ++(0.9, 0.7);
+      \foreach \c in {0,1,2,3}
+        \node[font=\scriptsize] at (\c*0.9+0.45, 1.55) {child \c};
+      \draw[black, line width=1.1pt] (0,1.2) rectangle (3.6,1.9);
+      \node[font=\scriptsize, align=center] at (1.8,0.55)
+        {after merges move the cut,\\children 2 and 3 are on rank 1};
+    \end{scope}
+    % the message
+    \begin{scope}[xshift=5.2cm]
+      \node[circle, fill=r0, text=white, font=\scriptsize\bfseries,
+        inner sep=2pt] (a) at (0,1.55) {0};
+      \node[circle, fill=r1, text=white, font=\scriptsize\bfseries,
+        inner sep=2pt] (b) at (3.0,1.55) {1};
+      \draw[flow] (a) to[bend left=20]
+        node[above, font=\scriptsize, align=center]
+          {(parent, rank 0)} (b);
+      \node[font=\scriptsize, align=center] at (1.5,0.55)
+        {child 0's owner tells the others:\\one round between peers};
+    \end{scope}
+    % after
+    \begin{scope}[xshift=10.0cm]
+      \node[font=\footnotesize\bfseries, anchor=west] at (0,2.35)
+        {whole again};
+      \foreach \c in {0,1,2,3}
+        \filldraw[fill=r0!55, draw=white, line width=0.8pt]
+          (\c*0.9, 1.2) rectangle ++(0.9, 0.7);
+      \foreach \c in {0,1,2,3}
+        \node[font=\scriptsize] at (\c*0.9+0.45, 1.55) {child \c};
+      \draw[black, line width=1.1pt] (0,1.2) rectangle (3.6,1.9);
+      \node[font=\scriptsize, align=center] at (1.8,0.55)
+        {the family moves with child 0;\\the next step can merge it};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{When child~0 is mine, my following siblings take my rank
+    without a message. A family split by earlier merges is settled by one
+    message from child~0's owner to the other owners; siblings are in each
+    other's neighbourhood $N()$, so their owners are always peers.}
+  \label{fig:family}
+\end{figure}
+
+p4est reaches the same goal differently: \fn{p4est\_partition\_for\_%
+coarsening ()} shifts the piece boundaries while it computes the cut
+\cite{p4est}. In the two Basilisk files read for this note
+(\fn{balance.h}, \fn{tree-mpi.h}) no such rule was found.
+
+% ======================================================================
+\section{When to repartition}
+\label{sec:when}
+
+A repartition costs its collectives, the migration and a second rebuild of
+the skeleton and plan (\fn{adapt\_wavelet ()} has just made one). After a
+small adaptation the old cut is often still as good as a new one, so
+\fn{adapt\_wavelet ()} repartitions only when it must. Its last step is
+one \fn{MPI\_Allreduce} of five numbers (a user operation: the first three
+summed, the last two the larger): the leaves divided and the families
+merged (the counts it returns), $N$, $\max_r |\mathcal{L}_r|$, and a flag,
+1 where a family of leaves has a member on another rank. Then, with unit
+weights and $\eta_{\max}$ = \fn{tree\_mpi\_imbalance\_max} (1 by
+default),
+\[
+  \text{repartition} \iff \text{a family of leaves is split}
+  \;\;\text{or}\;\; \max_r |\mathcal{L}_r| > \max\Big(\eta_{\max}
+  \frac{N}{n_{pe}},\; \Big\lceil \frac{N}{n_{pe}} \Big\rceil + 2^D -
+  1\Big).
+\]
+
+\begin{proposition}[what a cut leaves, unit weights]
+  \label{prop:unitcut}
+  With $w \equiv 1$, the cut of proposition~\ref{prop:cut} leaves every
+  rank at most $\lceil N/n_{pe} \rceil + 2^D - 1$ leaves.
+\end{proposition}
+
+\begin{proof}
+  The middle rule gives rank $s$ the leaves $g$ (their index along the
+  curve) with $s \le n_{pe}(2g+1)/(2N) < s+1$, that is $sN/n_{pe} - 1/2
+  \le g < (s+1)N/n_{pe} - 1/2$: an interval of length $N/n_{pe}$, so at
+  most $\lceil N/n_{pe} \rceil$ integers. The family rule moves a boundary
+  only later, past the siblings that follow a child~0, at most $2^D - 1$
+  leaves, and a boundary meets at most one family. Rank $s$ loses at its
+  start and gains at most $2^D - 1$ at its end.
+\end{proof}
+
+So with $\eta_{\max} = 1$ a partition is kept as long as no rank has more
+leaves than a fresh cut could leave it; with $\eta_{\max} = 1.2$, until
+some rank is 20\,\% above the mean. Only the largest piece is tested: an
+underloaded rank does not slow the step.
+
+\textbf{Why a split family forces it.} Coarsening merges a family only on
+its parent's owner, and only if every child is a leaf of that owner,
+flagged there (\fn{tree\_mpi\_coarsen ()}: a family is never split). A
+merge can leave a family of leaves across two ranks
+(figure~\ref{fig:family}, left). Kept so, the family could not merge at
+the next adaptation, though the one-process tree would merge it, and the
+distributed tree would no longer be the one-process tree. The flag sends
+it to the cut, whose family rule makes it whole again
+(\fn{test\_adapt\_mpi}: a cut set by weights between a divided leaf and
+its siblings, then two coarsenings; with the flag ignored the second
+merge is missed and the cells differ).
+
+\textbf{What a kept partition still gives.} $K$ stays valid: (V1) by
+proposition~\ref{prop:adapt}, (V2) by the flag, so every pid is still
+$\rho_K$ of its node and \fn{tree\_partition\_owner ()} still names the
+owner of any index; the state of section~\ref{sec:amr-mpi} holds. The
+partition's loads, \fn{leaf\_first} and imbalance describe the tree of the
+last repartition, and \fn{tree\_partition\_valid ()} turns 0 on the ranks
+whose tree changed.
+
+% ======================================================================
+\section{Moving the nodes}
+
+After adaptation the old pieces are out of balance. Two ways to reach the
+new cut are drawn below on one example: 4 ranks of 4 leaves each, then
+rank~0 refines its 4 leaves twice, giving \mleaves{} leaves, 64 of them on
+rank~0.
+
+\subsection{One pass, to the final rank (libb-amr, p4est)}
+
+Every rank computes the new rank of each of its nodes (section
+\ref{sec:cut}) and sends each node straight there. A rank knows whom it
+receives from too: the old owners of its new piece, a contiguous range of
+ranks found in the old table of first keys.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}\input{fig-onepass.tex}\end{tikzpicture}
+  \caption{One pass. Top: the owners after adapting; bottom: the owners
+    after the move. The numbers in the bars are the leaves per rank. The
+    graph on the right is who sends how many leaves to whom:
+    \movedonce{} leaves move once, in one round of \pairsonce{} messages,
+    some over three ranks (0 to 3).}
+  \label{fig:onepass}
+\end{figure}
+
+\subsection{Moves of one rank, repeated (Basilisk)}
+
+Basilisk's \fn{balance ()} computes each cell's target the same way (from
+the weight before the cell), then clamps it to the cell's rank $\pm 1$:
+\fn{pid = clamp (pid, cell.pid - 1, cell.pid + 1)}. Cells go only to
+\fn{pid () - 1} and \fn{pid () + 1}, and \fn{mpi\_boundary\_update ()}
+repeats \fn{while (balance (balance\_weights));} until no rank changes
+anything (one \fn{mpi\_all\_reduce} of a flag).
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}\input{fig-iterate.tex}\end{tikzpicture}
+  \caption{The same example, moves of one rank. \npasses{} passes, then a
+    fourth finds nothing to do. The leaves that end three ranks away
+    travel through ranks 1 and 2: \moveditr{} moves in all, against
+    \movedonce{} in one pass, and the halo lists are rebuilt after every
+    pass. Each pass talks only to the two neighbours on the curve. (The
+    target here is taken from a leaf's start, as Basilisk does, so the
+    final counts differ by one from figure~\ref{fig:onepass}.)}
+  \label{fig:iterate}
+\end{figure}
+
+\textbf{The trade.} A pass to $\pm 1$ needs no table of where pieces
+start: the two partners are fixed. But a shift of $k$ ranks takes $k$
+passes, and every pass carries data and rebuilds the halo. After a small
+change (the usual case, each step) both methods take one pass; after a
+large one, as a first refinement on one rank or a front crossing the
+domain, the single pass wins.
+
+% ======================================================================
+\section{The weight before a cell, without a collective}
+
+libb-amr gets $W_q$ from \fn{MPI\_Exscan}. Basilisk's \fn{z\_weights ()}
+gets it from the tree itself, with the halo exchanges it already has:
+\begin{enumerate}
+  \item bottom up, level by level: each node's subtree weight is the sum
+    of its children's (\fn{boundary\_iterate (restriction, ...)});
+  \item top down: child~$c$'s offset is its parent's plus the subtree
+    weights of children $0 \ldots c-1$.
+\end{enumerate}
+Only the total is a collective: rank~0 has it at the root and shares it
+with one \fn{mpi\_all\_reduce}.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \begin{tikzpicture}\input{fig-zup.tex}\end{tikzpicture}
+    \caption{Up: subtree weights (each leaf 1).}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \begin{tikzpicture}\input{fig-zdown.tex}\end{tikzpicture}
+    \caption{Down: the weight before each node; a leaf's is its $W_q$.}
+  \end{subfigure}
+  \caption{The two sweeps on a binary tree (the 1D case) of \zleaves{}
+    leaves. The leaves are coloured by the rank they go to on 4 ranks,
+    $\lfloor 4\,W_q / W \rfloor$. Each sweep costs one exchange per level,
+    so about twice the depth in rounds, all between neighbours.}
+  \label{fig:zweights}
+\end{figure}
+
+% ======================================================================
+\section{Who owns a node?}
+
+A rank must name the owner of a neighbour (for the halo) and, after a
+move, the new owner of every node it keeps. Three ways:
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{\textwidth}
+    \centering
+    \begin{tikzpicture}[x=1cm, y=1cm]
+      \foreach \k/\a/\b in {0/0/3.4, 1/3.4/6.4, 2/6.4/10.4, 3/10.4/13.6}
+        \filldraw[fill=r\k!50, draw=white, line width=1pt]
+          (\a,0) rectangle (\b,0.45);
+      \foreach \k/\x in {0/0, 1/3.4, 2/6.4, 3/10.4, 4/13.6} {
+        \draw[line width=0.7pt] (\x,-0.12) -- (\x,0.57);
+        \node[font=\scriptsize, below] at (\x,-0.12)
+          {\fn{key\_first[\k]}};
+      }
+      \draw[-{Stealth}, line width=0.9pt] (8.4,-0.85) node[below,
+        font=\scriptsize] {key of node $p$} -- (8.4,-0.02);
+      \draw[decorate, decoration={brace, amplitude=4pt}, line width=0.6pt]
+        (6.4,0.6) -- (10.4,0.6) node[midway, above=4pt, font=\scriptsize]
+        {binary search: rank 2};
+    \end{tikzpicture}
+    \caption{A table of first keys (libb-amr): $n_{pe}+1$ keys on every
+      rank, $8\,n_{pe}$ bytes. The owner of \emph{any} index is a binary
+      search, $O(\log n_{pe})$, with no message. Kept old and new across a
+      move, it gives each rank its senders and receivers.}
+  \end{subfigure}
+
+  \vspace{4mm}
+  \begin{subfigure}[t]{0.42\textwidth}
+    \centering
+    \begin{tikzpicture}[x=0.62cm, y=0.62cm]
+      \foreach \i in {0,...,5} \foreach \j in {0,...,3} {
+        \pgfmathtruncatemacro{\k}{\i<3 ? 0 : 1}
+        \pgfmathtruncatemacro{\h}{(\i==2 || \i==3) ? 1 : 0}
+        \ifnum\h=1
+          \filldraw[fill=r\k!25, draw=black!40] (\i,\j) rectangle ++(1,1);
+        \else
+          \filldraw[fill=r\k!60, draw=black!40] (\i,\j) rectangle ++(1,1);
+        \fi
+        \node[font=\tiny] at (\i+0.5,\j+0.5) {\k};
+      }
+      \draw[line width=1.2pt] (3,0) -- (3,4);
+      \node[font=\scriptsize, align=center] at (3,-0.9)
+        {pale: halo cells, each with its \fn{pid}};
+    \end{tikzpicture}
+    \caption{A pid on every cell the rank holds, its own and its halo
+      (Basilisk's \fn{cell.pid}, libb-amr's \fn{node->pid}). Enough for
+      neighbours, nothing beyond them. After a move the sender tells the
+      receiving neighbour the new pids.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.54\textwidth}
+    \centering
+    \begin{tikzpicture}[x=1cm, y=0.7cm]
+      \foreach \k in {0,...,3} {
+        \draw[r\k, line width=1pt] (0,-\k) -- (6.6,-\k);
+        \node[anchor=east, font=\scriptsize] at (-0.05,-\k) {rank \k};
+      }
+      % phase labels
+      \node[font=\tiny, align=center] at (0.9,0.75) {1. send\\\fn{Issend}};
+      \node[font=\tiny, align=center] at (2.7,0.75) {2. probe and\\receive};
+      \node[font=\tiny, align=center] at (4.6,0.75) {3. sends done:\\\fn{Ibarrier}};
+      \node[font=\tiny, align=center] at (6.1,0.75) {4. barrier\\done};
+      % sends: 0 -> 2, 0 -> 3, 1 -> 3
+      \draw[flow, r0] (0.4,0) -- (2.4,-2);
+      \draw[flow, r0] (0.7,0) -- (2.6,-3);
+      \draw[flow, r1] (1.1,-1) -- (3.1,-3);
+      % receives
+      \foreach \k/\x in {2/2.4, 3/2.6, 3/3.1}
+        \fill[black] (\x,-\k) circle (1.6pt);
+      % barrier entries: after own sends are matched
+      \foreach \k/\x in {0/4.0, 1/4.4, 2/4.8, 3/5.2}
+        \draw[line width=2pt, black!60] (\x,-\k+0.22) -- (\x,-\k-0.22);
+      \draw[dashed, black!50] (5.7,0.3) -- (5.7,-3.3);
+      \node[font=\tiny, anchor=north] at (5.7,-3.3) {all done};
+    \end{tikzpicture}
+    \caption{No table, with NBX \cite{nbx}: the receivers need not know
+      their senders. Each rank sends with synchronous sends, receives
+      whatever arrives, and enters a non-blocking barrier once its own
+      sends are matched; when the barrier completes, nothing is left in
+      flight. Cost: a barrier, $O(\log n_{pe})$, instead of the table.}
+  \end{subfigure}
+  \caption{Finding owners. libb-amr uses (a) and (b) together: the table
+    for any node after a move, the pid per node for the halo. Basilisk
+    uses (b) only, which is why it moves cells only to $\pm 1$.}
+  \label{fig:owners}
+\end{figure}
+
+\textbf{Arrays of size $n_{pe}$.} Outside a debugging check
+(\fn{check\_snd\_rcv\_matrix ()}), Basilisk keeps none: its send and
+receive lists (\fn{RcvPid}, one \fn{Rcv} per neighbouring rank and level)
+are sized by the neighbours. In libb-amr the table is kept (\fn{key\_first},
+\fn{leaf\_first}, \fn{load}: $20\,(n_{pe}+1)$ bytes), and the repartition
+gathers it with \fn{MPI\_Allgather} of an int a rank and
+\fn{MPI\_Allgatherv} of $n_{pe}$ entries of 24 bytes
+(section~\ref{sec:table}): $O(n_{pe})$ received, the least a rank can
+receive to hold the whole table. To drop the table too: (c) for the
+senders and receivers of a move, and a round in which senders tell their
+peers the new pids, plus one forwarding round for a node moved by a third
+rank; \fn{tree\_partition\_owner ()} would then answer only on the
+skeleton.
+
+% ======================================================================
+\section{What a rank keeps: the skeleton}
+\label{sec:skeleton}
+
+No rank holds the whole tree. libb-amr keeps the \emph{skeleton}: its own
+nodes, their ancestors, and the neighbourhood $N(p)$ of each own node $p$
+(the same-level neighbours, the coarse leaf covering an absent one, the
+touching children of a neighbour with children, $p$'s parent and
+children). The ranks owning $N()$ are the peers; the relation is
+symmetric, so every exchange is between peers. Below $N()$ a node is
+\emph{pruned}: it is kept, but its children are not.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}
+    \input{fig-skeleton.tex}
+    \begin{scope}[xshift=6.6cm, yshift=4.6cm,
+        every node/.style={font=\footnotesize, anchor=west}]
+      \filldraw[fill=r1!70, draw=black!50] (0,0) rectangle (0.4,0.3);
+      \node at (0.5,0.15) {own leaves of rank 1 (\nown)};
+      \filldraw[fill=r0!38, draw=r0!80!black] (0,-0.6) rectangle (0.4,-0.3);
+      \filldraw[fill=r2!38, draw=r2!80!black] (0.2,-0.6) rectangle (0.4,-0.3);
+      \node at (0.5,-0.45) {halo: leaves touching them (\nhalo),};
+      \node at (0.5,-0.85) {in their owner's colour};
+      \filldraw[fill=black!12, draw=black!55] (0,-1.45) rectangle (0.4,-1.15);
+      \node at (0.5,-1.3) {pruned nodes (\npruned): kept, no children};
+      \node[align=left] at (0,-2.3)
+        {\nskel{} nodes held in all: own, halo,\\ancestors and pruned};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{The tree of figure~\ref{fig:curve}b seen from rank 1.
+    Simplified: $N(p)$ is drawn as the leaves touching $p$ (by a face or a
+    corner); the real rule adds the neighbours of own parents. Halo nodes
+    received with data have blocks; a family has blocks iff it has an
+    active member. Basilisk's equivalent: local cells, the halo, and the
+    needed ancestors, unused halo cells coarsened away.}
+  \label{fig:skeleton}
+\end{figure}
+
+% ======================================================================
+\clearpage
+\section{Collectives: algorithms and costs}
+\label{sec:collectives}
+
+\subsection{The cost model}
+
+A message of $b$ bytes between two ranks costs $\alpha + b\beta$: a
+latency $\alpha$ (about 1\,\textmu s between nodes, 0.2 to 1\,\textmu s
+within one) and a time per byte $\beta$ (0.1\,ns at 10\,GB/s). Combining
+$b$ bytes in a reduction costs $b\gamma$. A rank sends and receives one
+message at a time, both at once \cite{chan, thakur}. Two lower bounds hold
+for any algorithm on $p$ ranks in which every rank's result depends on
+every rank's input (\fn{MPI\_Allreduce}, \fn{MPI\_Allgather}):
+\begin{itemize}
+  \item \textbf{latency} $\lceil\log_2 p\rceil\,\alpha$: in a round, the
+    ranks that know a given input can at most double;
+  \item \textbf{bandwidth}: an allgather of $N$ bytes in all, $m = N/p$
+    from each rank, makes every rank receive $(p-1)m$ bytes:
+    $\frac{p-1}{p}N\beta$; an allreduce of $n$ bytes needs
+    $2\frac{p-1}{p}n\beta$ \cite{patarasuk} and $\frac{p-1}{p}n\gamma$
+    (each result byte is combined from $p$ inputs, the work shared by $p$
+    ranks).
+\end{itemize}
+
+\subsection{Allreduce}
+
+Three algorithms cover most of what MPI libraries choose from. Open MPI
+4.1.6 offers basic linear, nonoverlapping, recursive doubling, ring,
+segmented ring and Rabenseifner (as \fn{ompi\_info} lists the MCA
+parameter \fn{coll\_tuned\_\allowbreak allreduce\_\allowbreak algorithm});
+MPICH
+picks between recursive doubling and Rabenseifner by size \cite{thakur}.
+On $p = 2^k$ ranks, $n$ bytes:
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright}p{6.4cm} l l l@{}}
+  \toprule
+  algorithm & latency & bandwidth & combining \\
+  \midrule
+  recursive doubling: the whole vector with rank $r \oplus 2^j$, $j < k$
+    & $\log_2 p\;\alpha$ & $\log_2 p\;n\beta$ & $\log_2 p\;n\gamma$ \\
+  binomial reduce, then broadcast & $2\log_2 p\;\alpha$ & $2\log_2 p\;n\beta$
+    & $\log_2 p\;n\gamma$ \\
+  ring: reduce-scatter, then allgather, around a ring & $2(p-1)\,\alpha$
+    & $2\frac{p-1}{p}n\beta$ & $\frac{p-1}{p}n\gamma$ \\
+  Rabenseifner: halving, then doubling & $2\log_2 p\;\alpha$ &
+    $2\frac{p-1}{p}n\beta$ & $\frac{p-1}{p}n\gamma$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Recursive doubling is the best for short vectors (one $\log_2 p$ of
+latency) and the worst for long ones (the whole vector each round). The
+ring meets both bandwidth bounds but pays $2(p-1)$ latencies.
+Rabenseifner's algorithm \cite{rabenseifner} meets the bandwidth bounds
+with $2\log_2 p$ latencies: an allreduce is a reduce-scatter followed by an
+allgather, and each is done by halving or doubling the part of the vector
+a rank works on.
+
+\textbf{Reduce-scatter by recursive halving.} Rank $r$ starts with its whole
+vector $x_r$ and a window $[0, n)$. For $d = p/2, p/4, \ldots, 1$: its
+partner is $r \oplus d$; the window is cut in two halves; the rank with
+bit $d$ clear keeps the lower half, the other the upper. Each sends the
+half it gives up and receives the partner's copy of the half it keeps,
+$\frac{n\,d}{p}$ bytes, and combines it into its own. After the step with
+distance $d$, rank $r$'s window holds the sum over the ranks that differ
+from $r$ only in the bits already done, $p/d$ of them
+(figure~\ref{fig:rabenseifner}: the darker, the more summed). After
+$\log_2 p$ steps rank $r$ holds block $r$, of $n/p$ bytes, summed over all
+$p$ ranks. Sent: $\frac{n}{2} + \frac{n}{4} + \cdots + \frac{n}{p} =
+\frac{p-1}{p}n$, and as much combined.
+
+\textbf{Allgather by recursive doubling.} The steps in reverse, $d = 1, 2,
+\ldots, p/2$: rank $r$ sends its window to $r \oplus d$ and receives the
+partner's, the window next to its own: $\frac{n\,d}{p}$ bytes, and the
+window doubles. Sent: $\frac{p-1}{p}n$ again, nothing combined. Each
+block is reduced once, on one rank, then copied, so every rank ends with
+the same bits.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm]\input{fig-rabenseifner.tex}\end{tikzpicture}
+  \caption{Rabenseifner's allreduce on 8 ranks, the vector in 8 blocks
+    (a column of small squares a rank). Empty: a block the rank does not
+    hold; the shade: 1, 2, 4 or 8 ranks' inputs summed in it. Three
+    halving steps leave rank $r$ with block $r$ complete; three doubling
+    steps copy every block everywhere. Each rank sends $\frac{7}{8}n$ in
+    each phase.}
+  \label{fig:rabenseifner}
+\end{figure}
+
+\textbf{When $p$ is not a power of two} \cite{thakur}: let $p' =
+2^{\lfloor\log_2 p\rfloor}$ and $q = p - p'$. Among the first $2q$ ranks,
+each even rank sends its vector to the odd rank after it, which combines
+the two ($\alpha + n\beta + n\gamma$) and the even ranks sit out; the $p'$
+remaining ranks, renumbered $0 \ldots p'-1$, run the algorithm; then each
+odd rank sends the result back to its even partner ($\alpha + n\beta$).
+Rabenseifner and Tr\"aff \cite{rabtraff} give schemes that remove most of
+this extra cost.
+
+\textbf{User operations.} An \fn{MPI\_Op\_create} function works with every
+algorithm (the commutative flag lets the library reorder), but it is a
+function call per piece, and hardware or offloaded reductions (switch
+reductions, collective offload libraries) take, as a rule, only the
+built-in operations on built-in types.
+
+\subsection{Allgather, Allgatherv, Exscan}
+
+An allgather of $N$ bytes in all ($m = N/p$ from each rank):
+\begin{itemize}
+  \item \textbf{recursive doubling} ($p = 2^k$): $\log_2 p\;\alpha +
+    \frac{p-1}{p}N\beta$, both bounds met;
+  \item \textbf{Bruck} \cite{bruck}, any $p$: in round $j$ rank $r$ sends
+    what it has to $r - 2^j$ and receives from $r + 2^j$ (modulo $p$), then
+    rotates the result locally: $\lceil\log_2 p\rceil\,\alpha +
+    \frac{p-1}{p}N\beta$;
+  \item \textbf{ring}: $(p-1)\,\alpha + \frac{p-1}{p}N\beta$.
+\end{itemize}
+\fn{MPI\_Allgatherv} is the same with uneven pieces. A doubling or Bruck
+round moves the pieces of $2^j$ ranks at once, so it costs at most the
+bytes of all pieces; with one rank giving everything (the concentrated
+case of figure~\ref{fig:entries}) it is a broadcast, at most
+$\lceil\log_2 p\rceil(\alpha + N\beta)$. A ring with one large piece is
+poor: the piece takes $p - 1$ hops in turn. Open MPI 4.1.6 offers Bruck,
+ring and neighbour exchange for both, and recursive doubling for
+\fn{MPI\_Allgather}.
+
+\fn{MPI\_Exscan} by recursive doubling costs $\lceil\log_2 p\rceil(\alpha +
+n\beta + n\gamma)$; by a linear chain $(p-1)(\alpha + n\beta + n\gamma)$.
+Open MPI 4.1.6's default is the chain: about 0.1\,\textmu s per extra rank
+measured on one machine. Recursive doubling is selected by
+\begin{center}
+  \fn{mpirun -{}-mca coll\_tuned\_use\_dynamic\_rules 1 -{}-mca
+  coll\_tuned\_exscan\_algorithm 2}
+\end{center}
+
+\subsection{The repartition's collectives, before and after}
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright}p{3.4cm} >{\raggedright}p{6.2cm}
+  >{\raggedright\arraybackslash}p{6.2cm}@{}}
+  \toprule
+  & before & now \\
+  \midrule
+  weight check & \fn{MPI\_Allreduce}, an int & with the totals \\
+  totals $N$, $W$ & 2 \fn{MPI\_Allreduce} & 1 \fn{MPI\_Allreduce} of 3
+    doubles \\
+  prefixes & 2 \fn{MPI\_Exscan} & 1 \fn{MPI\_Exscan} of 2 doubles \\
+  the table & \fn{MPI\_Allreduce} of $n_{pe}$ entries of 24\,B, a user
+    op & \fn{MPI\_Allgather} of an int, \fn{MPI\_Allgatherv} of $\le
+    n_{pe}$ entries of 24\,B \\
+  levels (\fn{skeleton\_and\_plan ()}) & \fn{MPI\_Allreduce}, 2 ints &
+    the same \\
+  \midrule
+  collectives & 7 & 5 \\
+  table, bytes a rank receives & $2 \cdot 24\,\frac{p-1}{p}n_{pe}$
+    (Rabenseifner) or $24\,n_{pe}\log_2 n_{pe}$ (doubling) & $28\,n_{pe}$
+    \\
+  table, combining & $24\,n_{pe}\gamma$ and $n_{pe}$ entries filled & none \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\fn{adapt\_wavelet ()} skips the whole repartition when the partition is
+still good (section~\ref{sec:when}); its own \fn{MPI\_Allreduce} carries
+the test.
+
+The table's part alone, in the model ($\alpha = 1$\,\textmu s, $\beta =
+0.1$\,ns/B, $\gamma = 0.5$\,ns/B for the user function; Bruck for both
+gathers), in \textmu s:
+
+\begin{center}
+\small
+\begin{tabular}{@{}r r r r r@{}}
+  \toprule
+  $n_{pe}$ & $24\,n_{pe}$ & before, doubling & before, Rabenseifner &
+    now \\
+  \midrule
+  \costrows
+  \bottomrule
+\end{tabular}
+\end{center}
+
+On few ranks the vector is short, MPI picks recursive doubling, and the
+two gathers cost one $\log_2 p$ of latency more than the one reduction;
+the two collectives saved by fusing the totals and prefixes make up for it.
+From about a thousand ranks the gathers win: half the bytes of
+Rabenseifner's algorithm and nothing to combine. The order stays $O(n_{pe})$
+bytes a rank: the least for a table every rank keeps. Which algorithm an
+MPI library takes at which size depends on its tuning tables, not checked
+here.
+
+\textbf{Measured} on one machine (Open MPI 4.1.6, 8 cores, 16 threads;
+\fn{tests/bench\_table.c}: the collectives alone, a barrier after each
+call, the slowest rank's mean, three runs), in \textmu s:
+
+\begin{center}
+\small
+\begin{tabular}{@{}r r r r r r@{}}
+  \toprule
+  $n_{pe}$ & small, before & small, now & table, before & table, now &
+    now, all from rank 0 \\
+  \midrule
+  2 & 0.93 & 0.51 & 0.42 & 0.50 & 0.49 \\
+  4 & 2.61 & 1.33 & 1.05 & 1.69 & 1.42 \\
+  8 & 4.2--4.6 & 2.5--2.7 & 1.7--1.9 & 3.0--3.6 & 2.1--2.3 \\
+  16 & 26--31 & 17--23 & 12--19 & 15--33 & 13--16 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+As the model says, on few ranks the two gathers cost a round more than
+the one reduction, and fusing the small collectives makes up for it (the
+sum about equal at 8 ranks). At 16 ranks the 8 cores are oversubscribed
+and the times noisy. The gain is for many ranks, not measured here.
+
+% ======================================================================
+\clearpage
+\section{The three pipelines}
+
+The steps of one repartition, in order. libb-amr and p4est cut and move
+once with a table of first keys; Basilisk loops on moves of one rank until
+nothing changes.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[node distance=5mm and 4mm]
+    \node[font=\footnotesize\bfseries] at (0,0.9) {libb-amr: one pass};
+    \node[box=r0!12] (a1) at (0,0) {prefix sums\\\fn{MPI\_Exscan},
+      \fn{Allreduce}};
+    \node[box=r0!12, below=of a1] (a2) {each leaf by its middle};
+    \node[box=r0!12, below=of a2] (a3) {families to child 0\\(one peer
+      round)};
+    \node[box=r0!12, below=of a3] (a4) {new \fn{key\_first}:\\
+      \fn{Allgather}, \fn{Allgatherv}};
+    \node[box=r0!12, below=of a4] (a5) {move every node\\to its new rank,
+      once};
+    \node[box=r0!12, below=of a5] (a6) {pids from the keys;\\skeleton, peers,
+      plan};
+    \foreach \u/\v in {a1/a2, a2/a3, a3/a4, a4/a5, a5/a6}
+      \draw[flow] (\u) -- (\v);
+
+    \node[font=\footnotesize\bfseries] at (5.6,0.9) {Basilisk:
+      repeated};
+    \node[box=r1!14] (b1) at (5.6,0) {\fn{z\_weights ()}:\\tree sums up and
+      down};
+    \node[box=r1!14, below=of b1] (b2) {target by the cell's start\\
+      \fn{balanced\_pid ()}};
+    \node[box=r1!14, below=of b2] (b3) {clamp to \fn{pid} $\pm 1$};
+    \node[box=r1!14, below=of b3] (b4) {\fn{send\_tree ()} to\\\fn{pid () - 1},
+      \fn{pid () + 1}};
+    \node[box=r1!14, below=of b4] (b5) {pids from the senders;\\rebuild
+      \fn{RcvPid} lists};
+    \node[box=white, below=of b5] (b6) {any rank changed?\\(\fn{mpi\_all\_reduce})};
+    \foreach \u/\v in {b1/b2, b2/b3, b3/b4, b4/b5, b5/b6}
+      \draw[flow] (\u) -- (\v);
+    \draw[flow] (b6.east) -- ++(0.5,0) |- node[pos=0.25, right,
+      font=\scriptsize] {yes} (b1.east);
+    \node[font=\scriptsize, below=1mm of b6] {no: done};
+
+    \node[font=\footnotesize\bfseries] at (11.0,0.9) {p4est};
+    \node[box=r2!14] (c1) at (11.0,0) {prefix sums\\of the weights};
+    \node[box=r2!14, below=of c1] (c2) {cut, optionally\\for coarsening};
+    \node[box=r2!14, below=of c2] (c3) {\fn{global\_first\_}\\\fn{quadrant}\\($n_{pe}+1$ entries)};
+    \node[box=r2!14, below=of c3] (c4) {\fn{p4est\_partition\_}\\\fn{given ()}: move once};
+    \node[box=r2!14, below=of c4] (c5) {ghost layer again\\
+      \fn{p4est\_ghost\_new}};
+    \foreach \u/\v in {c1/c2, c2/c3, c3/c4, c4/c5}
+      \draw[flow] (\u) -- (\v);
+  \end{tikzpicture}
+  \caption{The three pipelines side by side. libb-amr and p4est cut and
+    move once with a table of first keys; Basilisk loops on moves of one
+    rank until nothing changes.}
+  \label{fig:pipelines}
+\end{figure}
+
+\input{algorithms.tex}
+
+% ======================================================================
+\section{Side by side}
+
+\begin{center}
+\small
+\begin{tabular}{>{\raggedright}p{3.2cm} >{\raggedright}p{5.6cm}
+  >{\raggedright\arraybackslash}p{5.6cm}}
+  \toprule
+  & \textbf{Basilisk} & \textbf{libb-amr} \\
+  \midrule
+  owner of a nearby cell & \fn{cell.pid}, on local and halo cells &
+    \fn{node->pid}, on skeleton nodes: the same idea \\
+  owner of any index & not needed & \fn{key\_first} ($n_{pe}+1$ keys),
+    binary search \\
+  the cut & prefix weights by tree sums, neighbour exchanges only &
+    \fn{MPI\_Exscan} and \fn{MPI\_Allreduce} \\
+  moving cells & to rank $\pm 1$, repeated until no change & one pass,
+    straight to the final rank \\
+  new partition table & none & \fn{MPI\_Allgather} of an int,
+    \fn{MPI\_Allgatherv} of $n_{pe}$ entries \\
+  when to balance & every \fn{mpi\_boundary\_update ()}, until no change &
+    when a family is split or a rank is above $\eta_{\max}$ and a cut's
+    bound \\
+  pids after a move & told by the sending neighbour & from the new keys \\
+  families of siblings & no rule found in the files read & never split
+    (child 0's rank) \\
+  weights & \fn{balance\_weights}; \fn{LB\_AUTO} measures busy time &
+    given by the caller \\
+  halo lists & \fn{RcvPid}, per neighbour and level & \fn{TreeMpiPlan},
+    per peer, kind and level \\
+  what a rank holds & local, halo, ancestors; unused halo coarsened away &
+    the skeleton; inactive nodes without blocks \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Messages in one libb-amr repartition:} 1 \fn{MPI\_Exscan}, 2
+\fn{MPI\_Allreduce} (the totals with the weight check, the levels), 1
+\fn{MPI\_Allgather}, 1 \fn{MPI\_Allgatherv}, one peer round for split
+families, one migration round, then the rounds of \fn{distribute\_again
+()} for the skeleton and plan.
+
+\textbf{Where Basilisk's details come from.} \fn{src/grid/balance.h} and
+\fn{src/grid/tree-mpi.h}, read through a web extraction rather than a
+byte-exact copy: check the quoted lines against the source before relying
+on them.
+
+% ======================================================================
+\begin{thebibliography}{99}
+\small
+\bibitem{warren} M.~S.~Warren, J.~K.~Salmon. A parallel hashed oct-tree
+  N-body algorithm. \emph{Supercomputing '93}, 1993.
+\bibitem{pilkington} J.~R.~Pilkington, S.~B.~Baden. Dynamic partitioning
+  of non-uniform structured workloads with spacefilling curves.
+  \emph{IEEE Trans.\ Parallel Distrib.\ Syst.} 7~(3), 1996.
+\bibitem{aluru} S.~Aluru, F.~E.~Sevilgen. Parallel domain decomposition
+  and load balancing using space-filling curves. \emph{HiPC}, 1997.
+\bibitem{pinar} A.~Pinar, C.~Aykanat. Fast optimal load balancing
+  algorithms for 1D partitioning. \emph{J.\ Parallel Distrib.\ Comput.}
+  64~(8), 2004.
+\bibitem{p4est} C.~Burstedde, L.~C.~Wilcox, O.~Ghattas. p4est: scalable
+  algorithms for parallel adaptive mesh refinement on forests of
+  octrees. \emph{SIAM J.\ Sci.\ Comput.} 33~(3), 2011.
+\bibitem{rabenseifner} R.~Rabenseifner. Optimization of collective
+  reduction operations. \emph{ICCS}, LNCS 3036, 2004.
+\bibitem{rabtraff} R.~Rabenseifner, J.~L.~Tr\"aff. More efficient
+  reduction algorithms for non-power-of-two number of processors in
+  message-passing parallel systems. \emph{EuroPVM/MPI}, LNCS 3241, 2004.
+\bibitem{thakur} R.~Thakur, R.~Rabenseifner, W.~Gropp. Optimization of
+  collective communication operations in MPICH. \emph{Int.\ J.\ High
+  Perform.\ Comput.\ Appl.} 19~(1), 2005.
+\bibitem{chan} E.~Chan, M.~Heimlich, A.~Purkayastha, R.~van~de~Geijn.
+  Collective communication: theory, practice, and experience.
+  \emph{Concurr.\ Comput.: Pract.\ Exper.} 19~(13), 2007.
+\bibitem{patarasuk} P.~Patarasuk, X.~Yuan. Bandwidth optimal all-reduce
+  algorithms for clusters of workstations. \emph{J.\ Parallel Distrib.\
+  Comput.} 69~(2), 2009.
+\bibitem{bruck} J.~Bruck, C.-T.~Ho, S.~Kipnis, E.~Upfal, D.~Weathersby.
+  Efficient algorithms for all-to-all communications in multiport
+  message-passing systems. \emph{IEEE Trans.\ Parallel Distrib.\ Syst.}
+  8~(11), 1997.
+\bibitem{nbx} T.~Hoefler, C.~Siebert, A.~Lumsdaine. Scalable
+  communication protocols for dynamic sparse data exchange. \emph{PPoPP},
+  2010.
+\bibitem{basilisk} S.~Popinet. Basilisk, \url{http://basilisk.fr},
+  \fn{src/grid/balance.h}, \fn{src/grid/tree-mpi.h}.
+\end{thebibliography}
+
+\noindent\footnotesize The references are cited from memory, not checked
+against the publications: verify them before citing this note.
+
+\end{document}

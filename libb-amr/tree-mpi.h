@@ -173,9 +173,13 @@
   ..                                on the distributed tree, collective: a
   ..                                new cut by weight [q] for each leaf q
   ..                                of tree_caches ()->owned (NULL: 1
-  ..                                each), by prefix sums (MPI_Exscan),
+  ..                                each), by prefix sums (MPI_Exscan,
+  ..                                one MPI_Allreduce for the totals),
   ..                                each leaf where tree_partition () on
-  ..                                the whole tree would put it; every
+  ..                                the whole tree would put it; the new
+  ..                                first keys from the processes holding
+  ..                                them (MPI_Allgather of an int, then
+  ..                                MPI_Allgatherv of the entries); every
   ..                                node that changes hands sent to its
   ..                                new owner with its blocks (every
   ..                                scalar) and N () of it (structure),
@@ -217,7 +221,13 @@
   ..                                whole level, without it on any process
   ..   tree_mpi_redistribute ()     the skeleton and plan made again, after
   ..                                the tree changed
-  ..   (adapt_wavelet () calls the three, then tree_mpi_repartition ())
+  ..   (adapt_wavelet () calls the three, then tree_mpi_repartition ()
+  ..   if a family of leaves is split across processes, or a process has
+  ..   more leaves than both tree_mpi_imbalance_max times the mean and
+  ..   what a cut can leave it, ceil (mean) + TREE_NCHILDREN - 1)
+  ..   tree_mpi_imbalance_max       1 by default: repartition whenever the
+  ..                                leaves are worse than a cut's; 1.2:
+  ..                                not until 20 % above the mean
   ..   tree_mpi_end ()              exchanges off, the plan and partition
   ..                                freed; the tree stays pruned
   ..   tree_mpi_plan ()             the plan applied, NULL if none
@@ -303,6 +313,7 @@
 
   /* 5. MPI */
   #ifdef _MPI
+  extern double       tree_mpi_imbalance_max;
   int                 tree_mpi_partition (const double * weight);
   int                 tree_mpi_start (int level);
   int                 tree_mpi_repartition (const double * weight);
