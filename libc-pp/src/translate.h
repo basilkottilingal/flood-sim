@@ -340,6 +340,38 @@ struct ast *operator_uses (struct ast *at, struct ast *word, struct ast *open,
 struct ast *ghost_ops_call (struct ast *fn, struct ast *args, int has_bind,
                             int *rejected);
 
+/* Events: see include/cwrap/event.h and the README, "Events".
+ *
+ *   @event name (clauses) { body }   at file scope, where clauses are
+ *       expressions split by ; and , and each is one of
+ *         i++  i += n  i = n  i <= n  i < n    a schedule by step
+ *         t += d  t = a  t <= b  t < b         a schedule by time
+ *         first  last                          the slot's rank
+ *         next.X  prev.X                       after, before event X
+ *         any other expression of i and t      a condition, ANDed
+ *       With a schedule or a condition, it defines the slot `name`:
+ *         static void __cwrap_eventN_plan (cwrap_event_plan *p) { ... }
+ *         static int __cwrap_eventN_when (int i, double t) { return ...; }
+ *         static int __cwrap_eventN_run (int i, double t) body (+ return 0)
+ *         const cwrap_event_slot __cwrap_event_slot_name = { ... };
+ *         static const cwrap_event_body __cwrap_eventN_body = { ... };
+ *         static const cwrap_event_body *const __cwrap_eventN_ptr
+ *           __attribute__ ((used, section ("cwrap_events"))) = &...;
+ *       Without, it is an overload: a body for the slot, with first or last
+ *       only, of a reserved name (defaults, init, end) or one defined or
+ *       declared before it in the file. N counts the file's events.
+ *   @event name;   extern const cwrap_event_slot __cwrap_event_slot_name;
+ *
+ * has_header: <cwrap/event.h> is included (cwrap_event_body declared), which
+ * the code needs: an error otherwise. */
+struct ast *event_define (struct ast *at, struct ast *name, struct ast *open,
+                          struct ast *clauses, struct ast *close,
+                          struct ast *body, int has_header, int *rejected);
+struct ast *event_declare (struct ast *at, struct ast *name, struct ast *semi,
+                           int has_header, int *rejected);
+/* The file compiled, for the events' descriptors (the unit they come from). */
+void translate_set_unit (const char *unit);
+
 /* Whether `foreach ()` is the stencil loop: -dimension= is given. */
 int stencil_enabled (void);
 int stencil_dimension (void);       /* -dimension=, or 0 */

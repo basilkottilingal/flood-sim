@@ -7,7 +7,7 @@ OBJS := $(BUILD)/driver.o $(BUILD)/translate.o $(BUILD)/ast.o \
         $(BUILD)/allocator.o $(BUILD)/scope.o $(BUILD)/diag.o \
         $(BUILD)/parser.tab.o $(BUILD)/lexer.yy.o
 
-all: $(BUILD)/cwrap $(BUILD)/scalar.o
+all: $(BUILD)/cwrap $(BUILD)/scalar.o $(BUILD)/event.o
 
 $(BUILD)/cwrap: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -18,6 +18,10 @@ $(BUILD)/driver.o: CFLAGS += -DCWRAP_INCLUDE_DIR='"$(abspath src)"' \
                              -DCWRAP_HEADER_DIR='"$(abspath include)"'
 
 $(BUILD)/scalar.o: src/scalar.c src/scalar.h | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# The runtime of @event: see include/cwrap/event.h.
+$(BUILD)/event.o: src/event.c include/cwrap/event.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD)/parser.tab.c $(BUILD)/parser.tab.h: src/parser.y | $(BUILD)
@@ -50,7 +54,7 @@ $(BUILD):
 $(BUILD)/scope_test: tests/scope_test.c src/scope.c src/scope.h $(BUILD)/allocator.o
 	$(CC) $(CFLAGS) -o $@ tests/scope_test.c $(BUILD)/allocator.o
 
-test: $(BUILD)/cwrap $(BUILD)/scalar.o $(BUILD)/scope_test
+test: $(BUILD)/cwrap $(BUILD)/scalar.o $(BUILD)/event.o $(BUILD)/scope_test
 	sh tests/run.sh
 
 clean:

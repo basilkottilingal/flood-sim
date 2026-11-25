@@ -354,6 +354,8 @@ PFX     (u8|u|U|L)
 "@prolongation"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_OPERATOR); }
 "@restriction"/[^A-Za-z0-9_$\x80-\xff]   { AST (T_AT_OPERATOR); }
 "@boundary"/[^A-Za-z0-9_$\x80-\xff]      { AST (T_AT_OPERATOR); }
+  /* An event, defined or declared: see translate.h. */
+"@event"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_EVENT); }
   /* A stencil loop: see translate.h. */
 "@foreach"/[^A-Za-z0-9_$\x80-\xff]  { AST (T_AT_FOREACH); }
 

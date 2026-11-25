@@ -1,6 +1,6 @@
 # c wrapper
 
-*Documentation as of 2026-11-10.*
+*Documentation as of 2026-11-25.*
 
 This subdirectory is written with the help of claude-code
 
@@ -26,6 +26,9 @@ On top of C11 with GNU extensions, cwrap adds:
   for loops that `#define` cannot express cleanly
 - **`foreach ()` and `s[]`, `s[i,j,k]`**: Basilisk-style stencils, every cell
   of every leaf block of libb-amr, with `-dimension`
+- **`@event`**: code run at given steps or times, overloaded by name, in an
+  order the program states (`first`, `last`, `next.X`, `prev.X`), with
+  `defaults`, `init` and `end` reserved
 
 ---
 
@@ -40,12 +43,13 @@ On top of C11 with GNU extensions, cwrap adds:
 7. [@loop: block macros](#loop-block-macros)
 8. [Stencils: foreach () and s[]](#stencils-foreach--and-s)
 9. [Ghost operators: @prolongation, @restriction, @boundary](#ghost-operators-prolongation-restriction-boundary)
-10. [How the translator works](#how-the-translator-works)
-11. [Source layout](#source-layout)
-12. [Tests](#tests)
-13. [Limitations](#limitations)
-14. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
-15. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
+10. [Events: @event](#events-event)
+11. [How the translator works](#how-the-translator-works)
+12. [Source layout](#source-layout)
+13. [Tests](#tests)
+14. [Limitations](#limitations)
+15. [Future: a single build, and portable C99 output](#future-a-single-build-and-portable-c99-output)
+16. [Future: any object as the collection in foreach](#future-any-object-as-the-collection-in-foreach)
 
 ---
 
@@ -1157,6 +1161,252 @@ a pointer. The boundary conditions stay plain C, with `boundary_cells ()`.
 
 ---
 
+## Events: @event
+
+An event is code that runs at given steps or times, in an order the program
+states. A solver's step is a chain of them, and a program adds its own
+(rain, gauges, maps) or adds bodies to the solver's, without editing it.
+
+    #include <cwrap/event.h>
+
+    @event flux (i++, t <= 3600) { ... events_dtnext (dt_cfl); ... }
+    @event vof (i++, next.flux) { ... }
+    @event vof (first) { ... }               /* an overload: runs before */
+    @event gauges (t += 60, next.vof) { ... }
+    @event init { ... }                      /* reserved: once, at the start */
+    @event end { if (event_status ()) ...; } /* reserved: once, at the end */
+
+    int main (void) { return events_run (); }
+
+### A name, a schedule, bodies
+
+- **A name is a slot with one schedule.** Only its definition writes the
+  schedule. An overload, `@event vof (first) { ... }` or `@event vof { ... }`,
+  adds a body to the slot and writes no schedule. So two schedules for one
+  name, as `i++` and `i += 2`, cannot happen. The second is an error:
+  `@event vof is defined twice: an overload takes no schedule, only first or
+  last; an event with a schedule of its own needs a name of its own`.
+- **A declaration,** `@event vof;`, lets another file overload `vof`. An
+  overload needs the definition or a declaration before it in its file.
+- **Reserved names:** `defaults`, `init` and `end`. Their schedules are fixed,
+  and their bodies are all overloads. They are phases, not steps:
+
+      defaults (once) -> init (once) -> steps 0, 1, ... -> end (once)
+
+  `next.init` and the like are errors, as no step's event is in a phase.
+- **A body returns 0, or a failure code** (`return 3;`). Falling off its end
+  returns 0. `return;` is an error, and so is `return` inside `foreach ()`,
+  which would skip the end of the loop.
+- **i and t** are the body's parameters: the step, from 0, and the time.
+
+### Schedules
+
+The clauses are split by `;` or `,`, in any order:
+
+| Clause | Meaning |
+|---|---|
+| `i++` | every step |
+| `i += n` | every n steps, from `i = n0` if given, else from 0 |
+| `i = n` | at step n; once, without `i += ...` |
+| `i <= n`, `i < n` | not after step n (`i < n`: n - 1) |
+| `t += d` | every d of time, from `t = a` if given, else from 0 |
+| `t = a` | at time a; once, without `t += ...` |
+| `t <= b`, `t < b` | not after time b |
+| any other expression | a condition, of `i` and `t` or anything else, ANDed |
+| `first`, `last` | the slot's rank, or for an overload its rank in the slot |
+| `next.X`, `prev.X` | after event X, before event X (definitions only) |
+
+- A schedule is by step or by time, not both: `i += 2, t += 1` is an error.
+  Bounds of either kind go with either: `i++, t <= 10`.
+- The numbers are read when the steps start, after `init`, so they may be
+  variables that `init` sets.
+- **Times are landed on exactly.** `t += 0.1` fires at `t0 + k * 0.1`, with
+  k an integer: no drift from adding 0.1. A solver asks for its step with
+  `events_dtnext (dt)`, which gives the fewest equal steps no longer than dt
+  that reach the next time an event or a bound `t <= b` waits for. If no
+  body calls it, the time jumps to that next time.
+- **The run goes on while a finite slot may still run:** one with a bound,
+  or one that runs once (`i = n`, `t = a`). Unbounded slots (`i++`,
+  `t += d`, conditions) run alongside them. A program with no finite slot
+  runs until `events_stop ()` or a failure.
+
+### Order
+
+The order is resolved once, when `events_run ()` starts, from the
+descriptors of every file:
+
+1. **Slots** (the steps' events) are sorted by Kahn's algorithm. `next.X` and
+   `prev.X` are edges, which always hold. Among the slots free to go next, the
+   lowest rank wins (first, then neither, then last), then the first in its
+   file. `next.X` promises "after X", not "right after X": two events can both
+   be `next.X`.
+2. **Bodies of one slot:** by rank, then the bodies of the file that defines
+   the slot, in their order there (the solver's first), then those of one
+   other file, in theirs.
+3. **No order left to chance.** Two slots from two files that nothing orders,
+   at one rank, are an error. So are bodies of one slot from two files that
+   don't define it, at one rank. Link order and names never decide. Within a
+   file, the order is the source order after preprocessing, so the include
+   order.
+
+`events_print (stdout)` writes the resolved order:
+
+    defaults
+        main.c:9
+    init
+        main.c:20 (first)
+        main.c:10
+    steps
+      stability (i ++ , t <= 1) main.c:11
+        main.c:11
+      output (t += 0.5 , prev . vof) main.c:14
+        main.c:14
+      vof (i ++ , next . stability) main.c:12
+        main.c:13 (first)
+        main.c:12
+    end
+        main.c:21
+
+### Failures, stop, cancel
+
+- **A body that returns non-zero** stops the run. The rest of its slot and
+  the later steps are skipped. The failure is reported as
+  `event 'vof' (main.c:44) failed with 3 at i = 120, t = 3.2`.
+- **`end` still runs,** all of its bodies. `event_status ()` gives the
+  first failure code, or 0, so that a body can skip work that needs a valid
+  state. A failing `end` body is reported too, and the rest of `end` runs.
+- **`events_run ()` returns** the first failure code, 0, or -1 when the
+  order cannot be resolved (nothing then runs).
+- **`events_stop ()`** ends the run after the current step, with status 0.
+  **`event_cancel ()`** stops the running body from running again, and the
+  slot's other bodies go on.
+- **Several processes (MPI):** `events_set_reduce (max)` gives a function
+  that combines a status over the processes (an `MPI_Allreduce` with
+  `MPI_MAX`). It is called after every body, so that every process stops at
+  the same body, before any collective of the next one. Schedules,
+  `events_stop ()` and `event_cancel ()` must be the same on every process.
+
+### Several files
+
+- **Definitions are compiled in one file of the program.** A solver's events
+  can sit in a header that only the program includes, as in Basilisk. Or a
+  library defines them in its own `.c`, and its header declares them
+  (`@event adv;`).
+- Each definition is a strong symbol, `__cwrap_event_slot_NAME`, and each
+  overload refers to it. **The linker** then refuses a definition compiled
+  in two files (`multiple definition of '__cwrap_event_slot_flux'`) and an
+  overload whose definition is in no file (`undefined reference to
+  '__cwrap_event_slot_adv'`). That reference also pulls the defining object
+  out of a `.a`.
+- **A header with events included twice** in one file is cwrap's error
+  (`@event flux is defined twice (its file included twice?)`): give it an
+  include guard. An overload included in two files is `events_run ()`'s:
+  `the body of 'init' at event_init.h:7 is linked twice, from a.c and b.c`.
+
+### What cwrap writes
+
+For `@event vof (i++, next.flux) { body }`, on the event's own lines:
+
+    static void __cwrap_event4_plan (cwrap_event_plan *p) { p->kind = 1;
+      p->i0 = (long) (0); p->di = (long) (1); }
+    static int __cwrap_event4_run (__attribute__ ((unused)) int i,
+                                   __attribute__ ((unused)) double t)
+      { body return 0; }
+    const cwrap_event_slot __cwrap_event_slot_vof = { .name = "vof",
+      .schedule = "i ++ , next . flux", .file = "main.c", .line = 12,
+      .unit = "main.c", .seq = 4, .rank = 1, .plan = __cwrap_event4_plan,
+      .next = (const char *const []) { "flux", 0 }, ... };
+    static const cwrap_event_body __cwrap_event4_body = { ... };
+    static const cwrap_event_body *const __cwrap_event4_ptr
+      __attribute__ ((used, section ("cwrap_events"))) = &__cwrap_event4_body;
+
+N counts the file's events. A condition becomes `__cwrap_eventN_when (i,
+t)`. The section holds pointers, not the descriptors, so that no padding or
+sanitizer red zone sits between them. The runtime (`src/event.c`, linked
+into every program as `build/event.o`) reads it between
+`__start_cwrap_events` and `__stop_cwrap_events`, declared weak, so that a
+program with no event links too.
+
+### API (`include/cwrap/event.h`)
+
+| | |
+|---|---|
+| `int events_run (void)` | defaults, init, the steps, end; the first failure code, 0, or -1 |
+| `double events_dtnext (double dt)` | the step's dt, cut so that the time lands on the next event's time |
+| `void events_stop (void)` | ends the run after this step, status 0 |
+| `void event_cancel (void)` | the running body runs no more |
+| `int event_status (void)` | 0, or the first failure code (for `end`'s bodies) |
+| `void events_print (FILE *fp)` | the resolved order |
+| `void events_set_reduce (int (*max) (int))` | combines a status over the processes |
+| `events_i`, `events_t`, `events_dt` | the step, the time, the last dt of `events_dtnext ()` |
+
+### Tested
+
+`tests/run.sh`, 13 checks, each against output written out by hand and
+checked line by line:
+
+| Case | What it checks | Result |
+|---|---|---|
+| `event_run.c` | `next.`, `prev.`, `first` overloads, an overload after the definition, `defaults` and `init` order, `t += 0.5` with `events_dtnext (0.3)` (steps of 0.25), `__LINE__` in a body after a header over two lines | exact log |
+| `event_sched.c` | `i = 2`; `i = 1, i += every, i <= 10` gives 1 4 7 10; the same with `;` and `i < 10` gives 1 4 7; conditions; `t += 0.1, t <= 1` equal to `0.1 k` bit for bit, 11 times; `t = 0.35` exact; `t < 0.1`; every step in [0.025, 0.03] | exact log, 0 misses |
+| `event_land.c` | steps of `events_dtnext (1)` landing on 0.03 then 0.29 exactly (`t + (tn - t)` would miss), on a bound `t <= 0.97`; a `last` slot defined first and a `first` one defined last | exact log |
+| `event_fail.c` | a failure at step 2 skips the slot's next body and the later steps, `end` runs and sees 3; a failing `end` body seen by the next; `events_stop ()` finishing its step; `event_cancel ()`; the reduce hook called after each body (25 and 14 calls) | exact logs |
+| `event_main.c`, `event_lib.c`, `event_solver.h` | three files: a slot defined in one, declared and overloaded in another; the defining file's body after `first` and before the rest; `next.` across files; `init` bodies of three files ordered by `first` and `last` | exact log |
+| the same, `-DTIE`, `-DSOLVER` | `init` bodies of two files at one rank: an error; the solver's header in two files: the linker's multiple definition | errors |
+| `event_undef.c` | an overload of an event linked from nowhere: undefined reference | error |
+| `event_order_bad.c` | `next.nothere`, `prev.end`, a cycle of three (reported `a -> b -> c -> a`), `next.a` on a: errors at startup, nothing run | errors |
+| `event_unit_a.c`, `event_unit_b.c` | slots of two files nothing orders: an error; `next.x` fixes it; an overload included in both: linked twice | errors, then `x y` |
+| `event_bad.c` | 12 errors on lines 3 to 14, one each: a schedule twice, an overload of nothing, `init (i = 0)`, `end (next.vof)`, `next.` on an overload, i and t, `t++`, `i -= 1`, `first, last`, a start twice, `@event init;`, `return;` | errors |
+| `event_twice.c`, `event_noheader.c`, `event_foreach_bad.c` | a header included twice, `<cwrap/event.h>` missing, `return` in `foreach ()` | errors |
+| `event_lines.c`, `event_none.c` | gcc's error on the body's own line; a program with no event | line 10; rc 0 |
+| ASan and UBSan, -O2 | the run cases again, the runtime built with the sanitizers too | same logs |
+
+Deliberate bugs, one line each, in a copy of libc-pp: all 22 are caught.
+The checks that fail for each:
+
+| Bug | Checks |
+|---|---|
+| the slot's own file's bodies after the others | 2 |
+| slot ranks (first, last) ignored | 1 |
+| `prev.` read as `next.` | 2 |
+| bounds `t <= b` not landed on | 2 |
+| `t + (tn - t)` for the landing step, not `tn` | 2 |
+| a slot's bodies go on after a failure | 2 |
+| `end` skipped after a failure | 2 |
+| slots of two files at one rank allowed | 1 |
+| a body linked twice allowed | 1 |
+| `event_cancel ()` ignored | 2 |
+| a step event due one step late | 5 |
+| the reduce hook not called | 2 |
+| bodies of two other files at one rank allowed | 1 |
+| an unknown `next.X` accepted | 1 |
+| the run ends when every slot is done, not the finite ones | 5 |
+| a second schedule for a name allowed | 2 |
+| a schedule on `init` or `end` allowed | 1 |
+| `i < n` read as `i <= n` | 2 |
+| `first` and `last` swapped | 5 |
+| no `return 0` at the end of a body | 9 |
+| `return` in `foreach ()` in an event allowed | 1 |
+| `next.` on an overload allowed | 1 |
+
+Those caught by one check are each a rule with an error of its own, which
+that check's message matches.
+
+### Not done yet
+
+- **`t = {1, 2, 5}`,** a list of times (Basilisk's), and data clocks
+  (a rain series): C has no braces in an expression; a pointer and a count
+  would do.
+- **Clocks** (`sub`, `super`, `shift`; levels for subcycling): the design is
+  in the notes of 2026-11-25, nothing built.
+- **The reduce hook for libb-amr:** `tree-mpi.c` could set
+  `events_set_reduce ()` itself. That is a change to libb-amr, left to ask.
+- **A start time** other than 0 (a restart): `events_t` is set to 0.
+- **cwrap could read the `cwrap_events` sections before linking,** to report
+  a definition in two files in its own words rather than the linker's.
+
+---
+
 ## How the translator works
 
 1. **Lexer** (`src/lexer.l`, reentrant flex)
@@ -1207,7 +1457,9 @@ a pointer. The boundary conditions stay plain C, with `boundary_cells ()`.
 | `src/diag.c`, `src/diag.h` | gcc-style colored diagnostics |
 | `src/allocator.c`, `src/allocator.h` | the arena that holds each file's tree |
 | `src/scalar.c`, `src/scalar.h` | the scalar runtime |
+| `src/event.c` | the event runtime: gathering, ordering, running |
 | `include/cwrap/cache.h` | the cache API |
+| `include/cwrap/event.h` | the event API and descriptors |
 | `tests/run.sh`, `tests/cases/` | end-to-end tests and their files |
 | `tests/scope_test.c` | unit tests of the scope table |
 | `tests/grammar.c` | a file using the whole grammar, which must come out byte for byte the same |
@@ -1255,6 +1507,9 @@ on it. The tests cover:
   definitions three levels deep, names passed on from two levels down, break
   and continue at every level, parameters the block sees, statics, caches and
   scalars; with their errors and line numbers
+- `@event`: 13 checks (`event_*.c`), see [Events](#events-event): the
+  order, schedules, failures, three files, every error at translation, link
+  and startup, and the run cases again under ASan and UBSan
 
 It prints `ok` or `FAIL` for each check, then `all passed`.
 
@@ -1264,8 +1519,8 @@ It prints `ok` or `FAIL` for each check, then `all passed`.
 
 - **`-E` with `-dimension`** goes straight to gcc without `scalar.h`, so
   `scalar`, `vector` and `tensor` are unknown there.
-- **Linux only:** global scalars rely on GNU ld's `__start_`/`__stop_` symbols
-  for an ELF section.
+- **Linux only:** global scalars and events rely on GNU ld's
+  `__start_`/`__stop_` symbols for an ELF section.
 - **Not portable source:** the output of `-translate` is preprocessed, so it
   contains this system's headers and fully expanded macros.
 - **GCC extensions in the generated code:** `__attribute__ ((cleanup))`,

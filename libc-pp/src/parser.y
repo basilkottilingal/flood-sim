@@ -60,6 +60,7 @@ struct parse_status {
   int dimension_depth;    /* foreach_dimension () statements open outside
                            * any stencil loop */
   const struct token *dimension_at;  /* the outermost of them */
+  const char *event;      /* the @event whose body is parsed, or NULL */
 };
 
 /* The action of an error rule, where the parse has found its feet again.
@@ -388,6 +389,7 @@ static int foreach_declared (const struct scope_table *scopes,
 %token REDUCTION "reduction"
 %token FOREACH_DIMENSION "foreach_dimension"
 %token AT_OPERATOR "@prolongation, @restriction or @boundary"
+%token AT_EVENT "@event"
 %token BUILTIN_VA_ARG BUILTIN_OFFSETOF BUILTIN_TYPES_COMPATIBLE
 %token IDENTIFIER TYPE_NAME CONSTANT STRING
 %token ELLIPSIS SHL_ASSIGN SHR_ASSIGN ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN
@@ -428,6 +430,7 @@ external_declaration:
   | loop_definition
   | stencil_definition
   | operator_definition
+  | event_definition
   /* Error recovery: skip to the end of the declaration, and go on to find more
    * errors. A file with errors is not translated, so these build nothing. */
   | error ';'                     { RECOVERED (); $$ = NULL; }
@@ -500,6 +503,43 @@ operator_definition:
                                                                  &status->rejected);
                                     (void) $3; (void) $4; (void) $5; (void) $6;
                                     (void) $9; }
+  ;
+
+/* An event: see translate.h. The body is parsed as a function's, named
+ * after the event for its local scalars. */
+event_definition:
+    AT_EVENT any_identifier '(' event_clauses ')'
+                                  { status->event = ast_token ($2)->text;
+                                    status->function = status->event;
+                                    $$ = NULL; }
+    compound_statement
+                                  { status->event = NULL;
+                                    $$ = event_define ($1, $2, $3, $4, $5, $7,
+                                                       scope_find (scopes, "cwrap_event_body") != NULL,
+                                                       &status->rejected);
+                                    (void) $6; }
+  /* @event init { ... }: no clauses, an overload */
+  | AT_EVENT any_identifier
+                                  { status->event = ast_token ($2)->text;
+                                    status->function = status->event;
+                                    $$ = NULL; }
+    compound_statement
+                                  { status->event = NULL;
+                                    $$ = event_define ($1, $2, NULL, N (EVENT_CLAUSES, NULL),
+                                                       NULL, $4,
+                                                       scope_find (scopes, "cwrap_event_body") != NULL,
+                                                       &status->rejected);
+                                    (void) $3; }
+  | AT_EVENT any_identifier ';'   { $$ = event_declare ($1, $2, $3,
+                                                        scope_find (scopes, "cwrap_event_body") != NULL,
+                                                        &status->rejected); }
+  ;
+
+/* schedule; schedule, position: expressions split at ; (and at , later) */
+event_clauses:
+    opt_expression                { $$ = N (EVENT_CLAUSES, $1); }
+  | event_clauses ';' opt_expression
+                                  { $$ = ast_add (ast_add ($1, $2), $3); }
   ;
 
 /* (scalar zb, ...): the scalars a coupled operator depends on */
@@ -1248,11 +1288,20 @@ jump_statement:
                                       loop_error (status, $1, "return in loop '%s', "
                                                   "which would leave the function "
                                                   "that uses it", status->cur_loop->name);
+                                    if (status->event)
+                                      loop_error (status, $1, "return in event '%s' needs "
+                                                  "a value: 0, or a failure code",
+                                                  status->event);
                                     $$ = N (RETURN_STATEMENT, $1, $2); }
   | RETURN expression ';'         { if (status->cur_loop)
                                       loop_error (status, $1, "return in loop '%s', "
                                                   "which would leave the function "
                                                   "that uses it", status->cur_loop->name);
+                                    if (status->event && status->stencil)
+                                      loop_error (status, $1, "return in foreach () in "
+                                                  "event '%s', which would skip the end "
+                                                  "of the loop: set a flag, and return "
+                                                  "after it", status->event);
                                     status->rejected += check_cache_copy (scopes, $2, $1);
                                     $$ = N (RETURN_STATEMENT, $1, $2, $3); }
   ;

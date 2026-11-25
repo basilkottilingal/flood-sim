@@ -692,5 +692,97 @@ for args in '-translate keep.c -o keep.c' '-translate keep.c -o ./keep.c' \
   cp keep.orig keep.c
 done
 
+# Events: see include/cwrap/event.h and the README, "Events".
+"$cwrap" -Wall -Wextra -Werror event_run.c -o event_run && ./event_run | cmp -s - event_run.out
+check "events: order by next. and prev., overloads first and after the definition, phases, times landed on, __LINE__ in a body" $?
+
+"$cwrap" -Wall -Wextra -Werror event_sched.c -o event_sched && ./event_sched | cmp -s - event_sched.out
+check "events: i = n, i += n, i <= n, i < n, by ; or ,, conditions; t += d on 0.1 k exactly, t = a, t < b, no step over dt" $?
+
+"$cwrap" -Wall -Wextra -Werror event_land.c -o event_land && ./event_land | cmp -s - event_land.out
+check "events: long steps land on 0.03 then 0.29 exactly (t + (tn - t) would not), on a bound t <= 0.97, slots first and last against the file's order" $?
+
+"$cwrap" -Wall -Wextra -Werror event_fail.c -o event_fail &&
+  ./event_fail 2>&1 | cmp -s - event_fail.out && FAIL_AT=2 ./event_fail 2>&1 | cmp -s - event_fail2.out
+check "events: a failure stops the run, end runs and sees it, events_stop (), event_cancel (), the reduce hook after each body" $?
+
+"$cwrap" -Wall -Wextra -Werror event_main.c event_lib.c -o event_files && ./event_files | cmp -s - event_files.out
+check "events: three files: the defining file's body first, next. across files, a declared event overloaded" $?
+
+"$cwrap" -Wall -Werror -DTIE event_main.c event_lib.c -o event_tie && ./event_tie > tie.out 2>&1
+[ "$(tail -1 tie.out)" = "rc -1" ] && grep -q "the order of two bodies of 'init' is not defined: event_lib.c:15 (in event_lib.c) and event_solver.h:6 (in event_main.c), neither first nor last" tie.out
+check "events: bodies of two files, neither defining the event, at one rank: an error at startup" $?
+
+"$cwrap" -DSOLVER event_main.c event_lib.c -o event_x 2> solver2.log
+[ $? -ne 0 ] && grep -q "multiple definition of \`__cwrap_event_slot_flux'" solver2.log &&
+  "$cwrap" event_undef.c -o event_undef 2> undef.log
+[ $? -ne 0 ] && grep -q "undefined reference to \`__cwrap_event_slot_adv'" undef.log
+check "events: the linker refuses a definition compiled in two files, and an overload whose definition is in none" $?
+
+ok=0
+for m in UNKNOWN RESERVED CYCLE SELF; do
+  "$cwrap" -Wall -Wextra -Werror -D$m=1 event_order_bad.c -o order_bad &&
+    ./order_bad > order_$m.out 2>&1 && [ "$(tail -1 order_$m.out)" = "rc -1" ] &&
+    ! grep -q ran order_$m.out || ok=1
+done
+grep -q "'a' is next.nothere, but no event is named 'nothere'; the events are: a b" order_UNKNOWN.out &&
+  grep -q "'a' is prev.end, but end is a phase of its own" order_RESERVED.out &&
+  grep -q "the order of events is a cycle: a -> b -> c -> a" order_CYCLE.out &&
+  grep -q "^  'c' is defined at event_order_bad.c:14" order_CYCLE.out &&
+  grep -q "'a' is next.a, itself" order_SELF.out || ok=1
+check "events: an unknown name, a phase, a cycle, itself in next. or prev.: errors at startup, nothing run" $ok
+
+"$cwrap" -Wall -Werror event_unit_a.c event_unit_b.c -o units && ./units > units.out 2>&1
+[ "$(tail -1 units.out)" = "rc -1" ] && grep -q "the order of 'x' and 'y' is not defined: neither first nor last, nothing orders them, and they come from two files (event_unit_a.c, event_unit_b.c)" units.out &&
+  "$cwrap" -Wall -Werror -DNEXT event_unit_a.c event_unit_b.c -o units && [ "$(./units | tr '\n' ' ')" = "x y rc 0 " ] &&
+  "$cwrap" -Wall -Werror -DNEXT -DTWICE event_unit_a.c event_unit_b.c -o units && ./units > twice.out 2>&1
+[ "$(cat twice.out)" = "cwrap: event error: the body of 'init' at event_init.h:7 is linked twice, from event_unit_a.c and event_unit_b.c: compile event definitions in one file of the program only
+rc -1" ]
+check "events: slots of two files nothing orders, an error, next. the fix; a body linked from two files, an error" $?
+
+"$cwrap" -c event_bad.c -o event_bad.o 2> event_bad.log
+[ $? -ne 0 ] &&
+  [ "$(grep -o '^event_bad.c:[0-9]*: error' event_bad.log | cut -d: -f2 | tr '\n' ' ')" = "3 4 5 6 7 8 9 10 11 12 13 14 " ] &&
+  grep -q "^event_bad.c:3: error: @event vof is defined twice: an overload takes no schedule" event_bad.log &&
+  grep -q "^event_bad.c:4: error: @event gauge has no schedule, and no definition before it" event_bad.log &&
+  grep -q "^event_bad.c:5: error: @event init: 'init' is reserved, with a schedule of its own" event_bad.log &&
+  grep -q "^event_bad.c:7: error: @event vof: next. and prev. belong to the definition" event_bad.log &&
+  grep -q "^event_bad.c:8: error: @event both: a schedule by step (i) or by time (t), not both" event_bad.log &&
+  grep -q "^event_bad.c:9: error: @event: t ++ is no schedule" event_bad.log &&
+  grep -q "^event_bad.c:10: error: @event: i -= 1 is no schedule" event_bad.log &&
+  grep -q "^event_bad.c:11: error: @event: first or last, once" event_bad.log &&
+  grep -q "^event_bad.c:12: error: @event: the start given twice" event_bad.log &&
+  grep -q "^event_bad.c:13: error: @event init; 'init' is reserved" event_bad.log &&
+  grep -q "^event_bad.c:14: error: return in event 'ret' needs a value" event_bad.log
+check "events: a schedule twice, an overload of nothing, a reserved one given a schedule or next., both i and t, t++, i -=, first and last, a start twice, return with no value" $?
+
+"$cwrap" -c event_twice.c -o event_twice.o 2> twice.log
+[ $? -ne 0 ] && grep -q "^event_twice.h:3: error: @event flux is defined twice (its file included twice?)" twice.log &&
+  "$cwrap" -c event_noheader.c -o event_noheader.o 2> noheader.log
+[ $? -ne 0 ] && [ "$(grep -c 'include <cwrap/event.h> first' noheader.log)" = 2 ] &&
+  "$cwrap" -dimension=2 -c event_foreach_bad.c -o event_foreach_bad.o 2> foreach_ev.log
+[ $? -ne 0 ] && grep -q "^event_foreach_bad.c:8: error: return in foreach () in event 'step'" foreach_ev.log
+check "events: a header included twice, no <cwrap/event.h>, return in foreach ()" $?
+
+"$cwrap" -c event_lines.c -o event_lines.o 2> lines_ev.log
+[ $? -ne 0 ] && grep -q "^event_lines.c:10:14: error: .undeclared. undeclared" lines_ev.log &&
+  "$cwrap" -Wall -Werror event_none.c -o event_none && [ "$(./event_none | tail -1)" = "rc 0 i 0" ]
+check "events: gcc's errors on the body's own lines, a header over lines; no event, nothing run" $?
+
+ok=0
+san="-O2 -fsanitize=address,undefined -fno-sanitize-recover=all"
+gcc $san -std=gnu11 -Wall -Wextra -Werror -c "$tests"/../src/event.c -o event_san.o || ok=1
+for p in run sched land fail; do
+  "$cwrap" $san -Wall -Wextra -Werror -c event_$p.c -o ev_$p.o &&
+    gcc $san ev_$p.o event_san.o "$tests"/../build/scalar.o -o ev_$p || ok=1
+done
+"$cwrap" $san -Wall -Werror -c event_main.c -o ev_main.o && "$cwrap" $san -Wall -Werror -c event_lib.c -o ev_lib.o &&
+  gcc $san ev_main.o ev_lib.o event_san.o "$tests"/../build/scalar.o -o ev_files || ok=1
+[ $ok = 0 ] && ./ev_run | cmp -s - event_run.out && ./ev_sched | cmp -s - event_sched.out &&
+  ./ev_land | cmp -s - event_land.out &&
+  ./ev_fail 2>&1 | cmp -s - event_fail.out && FAIL_AT=2 ./ev_fail 2>&1 | cmp -s - event_fail2.out &&
+  ./ev_files | cmp -s - event_files.out
+check "events: the same runs at -O2 under ASan and UBSan, the runtime too" $?
+
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

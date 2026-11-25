@@ -4016,6 +4016,361 @@ static int transform (struct ast *root)
 
 /* gcc gets the input as it came. It either accepts code our grammar does not
  * cover, or reports the error better than we could. */
+/*
+.. Events: @event definitions, overloads and declarations, turned into the
+.. descriptors of include/cwrap/event.h. What one file can check is checked
+.. here: a schedule on an overload, a reserved name given one, an overload
+.. with no definition or declaration before it, a name defined twice. The
+.. rest (across files) is the linker's and events_run ()'s.
+*/
+struct event_name {
+  const char *name;
+  const struct token *at;           /* the definition, or the declaration */
+  int defined;
+  struct event_name *next;
+};
+static struct event_name *event_names;  /* this file's, newest first */
+static int event_seq;                   /* the file's events so far */
+static const char *event_unit = "?";
+
+void translate_set_unit (const char *unit)
+{
+  event_unit = unit;
+}
+
+static int event_reserved (const char *nm)
+{
+  return !strcmp (nm, "defaults") || !strcmp (nm, "init")
+    || !strcmp (nm, "end");
+}
+
+static struct event_name *event_find (const char *nm)
+{
+  for (struct event_name *e = event_names; e; e = e->next)
+    if (!strcmp (e->name, nm))
+      return e;
+  return NULL;
+}
+
+/* the tokens under n, a space between each */
+static void spaced_leaf (struct ast *leaf, void *out)
+{
+  fprintf (out, "%s%s", ftell (out) ? " " : "", ast_token (leaf)->text);
+}
+
+static const char *spaced_text (const struct ast *n)
+{
+  MEMSTREAM (out);
+
+  if (!out)
+    abort ();
+  each_leaf ((struct ast *)n, spaced_leaf, out);
+  return MEMSTREAM_TEXT (out);
+}
+
+static int is_word (const struct ast *e, const char *word)
+{
+  return e->kind == AST_TOKEN && ast_token (e)->kind == T_IDENTIFIER
+    && !strcmp (ast_token (e)->text, word);
+}
+
+struct event_clauses {
+  const char *i0, *di, *imax, *t0, *dt, *tmax, *when;
+  int imax_strict, tmax_strict, rank, nnext, nprev;
+  const char *next, *prev;          /* "a", "b", */
+  const struct ast *rank_at;
+};
+
+static void event_twice (const char *what, const struct ast *e, int *rejected)
+{
+  stencil_error (rejected, e, "@event: %s given twice", what);
+}
+
+static void event_not_schedule (const struct ast *e, int *rejected)
+{
+  stencil_error (rejected, e, "@event: %s is no schedule: by step i++, "
+                 "i += n, i = n, i <= n, i < n; by time t += d, t = a, "
+                 "t <= b, t < b", spaced_text (e));
+}
+
+/* one clause: a schedule, a position, or a condition */
+static void event_clause (struct event_clauses *c, const struct ast *e,
+                          int *rejected)
+{
+  if (e->kind == AST_COMMA) {
+    event_clause (c, e->child, rejected);
+    event_clause (c, e->child->next->next, rejected);
+    return;
+  }
+  if (is_word (e, "first") || is_word (e, "last")) {
+    if (c->rank_at)
+      stencil_error (rejected, e, "@event: first or last, once");
+    c->rank = is_word (e, "first") ? 0 : 2;
+    c->rank_at = e;
+    return;
+  }
+  if (e->kind == AST_MEMBER && !strcmp (ast_token (e->child->next)->text, ".")
+      && (is_word (e->child, "next") || is_word (e->child, "prev"))) {
+    const char *x = ast_token (e->child->next->next)->text;
+
+    if (is_word (e->child, "next")) {
+      c->next = arena_printf ("%s\"%s\", ", c->next, x);
+      c->nnext++;
+    } else {
+      c->prev = arena_printf ("%s\"%s\", ", c->prev, x);
+      c->nprev++;
+    }
+    return;
+  }
+  if (e->kind == AST_POSTFIX_OP || e->kind == AST_PREFIX_OP) {
+    const struct ast *v = e->kind == AST_POSTFIX_OP ? e->child : e->child->next;
+    const char *op = ast_token (e->kind == AST_POSTFIX_OP ? e->child->next
+                                : e->child)->text;
+
+    if (is_word (v, "i") || is_word (v, "t")) {
+      if (is_word (v, "t") || strcmp (op, "++"))
+        event_not_schedule (e, rejected);
+      else if (c->di)
+        event_twice ("the step's increment", e, rejected);
+      else
+        c->di = "1";
+      return;
+    }
+  }
+  if (e->kind == AST_ASSIGNMENT
+      && (is_word (e->child, "i") || is_word (e->child, "t"))) {
+    const char *op = ast_token (e->child->next)->text;
+    int is_i = is_word (e->child, "i");
+    const char **slot = !strcmp (op, "=") ? (is_i ? &c->i0 : &c->t0)
+      : !strcmp (op, "+=") ? (is_i ? &c->di : &c->dt) : NULL;
+
+    if (!slot)
+      event_not_schedule (e, rejected);
+    else if (*slot)
+      event_twice (!strcmp (op, "=") ? "the start" : "the increment", e,
+                   rejected);
+    else
+      *slot = spaced_text (e->child->next->next);
+    return;
+  }
+  if (e->kind == AST_RELATIONAL
+      && (is_word (e->child, "i") || is_word (e->child, "t"))
+      && (!strcmp (ast_token (e->child->next)->text, "<=")
+          || !strcmp (ast_token (e->child->next)->text, "<"))) {
+    int is_i = is_word (e->child, "i");
+    int strict = !strcmp (ast_token (e->child->next)->text, "<");
+    const char **slot = is_i ? &c->imax : &c->tmax;
+
+    if (*slot)
+      event_twice (is_i ? "the last step" : "the last time", e, rejected);
+    *slot = spaced_text (e->child->next->next);
+    if (is_i)
+      c->imax_strict = strict;
+    else
+      c->tmax_strict = strict;
+    return;
+  }
+  /* a condition of i and t, ANDed with the others */
+  c->when = c->when ? arena_printf ("%s && (%s)", c->when, spaced_text (e))
+                    : arena_printf ("(%s)", spaced_text (e));
+}
+
+/* external declarations, parsed, on the place of `at`; the types of
+ * <cwrap/event.h> are names to the parser here */
+static struct ast *event_snippet (const char *text, const struct token *at)
+{
+  struct ast *first = parse_snippet (arena_printf ("typedef int "
+                                                   "cwrap_event_plan; typedef "
+                                                   "int cwrap_event_slot; "
+                                                   "typedef int "
+                                                   "cwrap_event_body; %s",
+                                                   text));
+
+  first = first->next->next->next;
+  for (struct ast *d = first; d; d = d->next)
+    each_leaf (d, flatten_leaf, (void *)at);
+  return first;
+}
+
+static void event_add_all (struct ast *node, struct ast *decls)
+{
+  while (decls) {
+    struct ast *next = decls->next;
+
+    decls->next = decls->parent = NULL;
+    ast_add (node, decls);
+    decls = next;
+  }
+}
+
+struct ast *event_define (struct ast *at, struct ast *name, struct ast *open,
+                          struct ast *clauses, struct ast *close,
+                          struct ast *body, int has_header, int *rejected)
+{
+  const struct token *t = ast_token (at), *end = last_token (body);
+  const char *nm = ast_token (name)->text;
+  struct event_clauses c = { .rank = 1, .next = "", .prev = "" };
+  struct event_name *known = event_find (nm);
+  int before = *rejected, defines, seq = ++event_seq;
+  const char *pre = "", *post = "", *file = c_string (t->file);
+  struct ast *node, *fn, *source[5] = { at, name, open, clauses, close };
+
+  if (!has_header)
+    stencil_error (rejected, at, "@event %s: include <cwrap/event.h> first",
+                   nm);
+  for (const struct ast *e = clauses->child; e; e = e->next)
+    if (e->kind != AST_TOKEN || ast_token (e)->kind != ';')
+      event_clause (&c, e, rejected);
+  defines = c.i0 || c.di || c.t0 || c.dt || c.imax || c.tmax || c.when;
+  if ((c.i0 || c.di) && (c.t0 || c.dt))
+    stencil_error (rejected, clauses, "@event %s: a schedule by step (i) or "
+                   "by time (t), not both", nm);
+  if (event_reserved (nm) && (defines || c.nnext || c.nprev))
+    stencil_error (rejected, clauses, "@event %s: '%s' is reserved, with a "
+                   "schedule of its own; give it only first or last", nm, nm);
+  else if (defines && known && known->defined) {
+    if (known->at->line == ast_token (name)->line
+        && !strcmp (known->at->file, ast_token (name)->file))
+      stencil_error (rejected, name, "@event %s is defined twice (its file "
+                     "included twice?)", nm);
+    else
+      stencil_error (rejected, name, "@event %s is defined twice: an "
+                     "overload takes no schedule, only first or last; an "
+                     "event with a schedule of its own needs a name of its "
+                     "own", nm);
+    diag (known->at->file, known->at->line, DIAG_NOTE, "'%s' is defined here",
+          nm);
+  } else if (!defines && !event_reserved (nm) && !known
+             && *rejected == before)    /* not after a clause refused */
+    stencil_error (rejected, name, "@event %s has no schedule, and no "
+                   "definition before it: give it one, or declare it "
+                   "(@event %s;) if it is defined in another file", nm, nm);
+  if (!defines && !event_reserved (nm) && (c.nnext || c.nprev))
+    stencil_error (rejected, clauses, "@event %s: next. and prev. belong to "
+                   "the definition, with the schedule; an overload takes "
+                   "first or last", nm);
+  if (*rejected != before) {
+    struct ast *all[6] = { at, name, open, clauses, close, body };
+
+    return loop_stub (ast_node (AST_EVENT_DEFINITION, all, 6)); /* NULL skipped */
+  }
+  if (defines) {
+    if (!known) {
+      known = allocate (sizeof (*known));
+      known->name = nm;
+      known->next = event_names;
+      event_names = known;
+    }
+    known->defined = 1;
+    known->at = ast_token (name);
+    pre = arena_printf ("static void __cwrap_event%d_plan (cwrap_event_plan *p) "
+                        "{ p->kind = %d; ", seq,
+                        c.i0 || c.di ? 1 : c.t0 || c.dt ? 2 : 0);
+    if (c.i0 || c.di)
+      pre = arena_printf ("%sp->i0 = (long) (%s); p->di = (long) (%s); ", pre,
+                          c.i0 ? c.i0 : "0", c.di ? c.di : "0");
+    if (c.t0 || c.dt)
+      pre = arena_printf ("%sp->t0 = (%s); p->dt = (%s); ", pre,
+                          c.t0 ? c.t0 : "0", c.dt ? c.dt : "0");
+    if (c.imax)
+      pre = arena_printf ("%sp->has_imax = 1; p->imax = (long) (%s)%s; ", pre,
+                          c.imax, c.imax_strict ? " - 1" : "");
+    if (c.tmax)
+      pre = arena_printf ("%sp->has_tmax = 1; p->tmax = (%s); "
+                          "p->tmax_strict = %d; ", pre, c.tmax, c.tmax_strict);
+    pre = arena_printf ("%s} ", pre);
+    if (c.when)
+      pre = arena_printf ("%sstatic int __cwrap_event%d_when (__attribute__ "
+                          "((unused)) int i, __attribute__ ((unused)) "
+                          "double t) { return %s; } ", pre, seq, c.when);
+  }
+  /* the body, as a function returning 0 at its end */
+  fn = event_snippet (arena_printf ("static int __cwrap_event%d_run "
+                                    "(__attribute__ ((unused)) int i, "
+                                    "__attribute__ ((unused)) double t) {}",
+                                    seq), t);
+  ast_replace (fn->last, body);
+  {
+    struct ast *ret = parse_block_item ("return 0;");
+
+    each_leaf (ret, flatten_leaf, (void *)end);
+    ast_insert_before (body->last, ret);
+  }
+  if (defines)
+    post = arena_printf ("const cwrap_event_slot __cwrap_event_slot_%s = { "
+                         ".name = \"%s\", .schedule = %s, .file = %s, "
+                         ".line = %d, .unit = %s, .seq = %d, .phase = 0, "
+                         ".rank = %d, .plan = __cwrap_event%d_plan, "
+                         ".when = %s, .next = %s, .prev = %s }; ",
+                         nm, nm, c_string (spaced_text (clauses)), file,
+                         ast_token (name)->line, c_string (event_unit), seq,
+                         c.rank, seq,
+                         c.when ? arena_printf ("__cwrap_event%d_when", seq)
+                                : "0",
+                         c.nnext ? arena_printf ("(const char *const []) "
+                                                 "{ %s0 }", c.next) : "0",
+                         c.nprev ? arena_printf ("(const char *const []) "
+                                                 "{ %s0 }", c.prev) : "0");
+  post = arena_printf ("%sstatic const cwrap_event_body __cwrap_event%d_body = "
+                       "{ .slot = &__cwrap_event_slot_%s, "
+                       ".run = __cwrap_event%d_run, .file = %s, .line = %d, "
+                       ".unit = %s, .seq = %d, .rank = %d }; "
+                       "static const cwrap_event_body *const "
+                       "__cwrap_event%d_ptr __attribute__ ((used, section "
+                       "(\"cwrap_events\"))) = &__cwrap_event%d_body;",
+                       post, seq, nm, seq, file, ast_token (name)->line,
+                       c_string (event_unit), seq, defines ? 1 : c.rank, seq,
+                       seq);
+  node = ast_new (AST_EVENT_DEFINITION);
+  if (*pre)
+    event_add_all (node, event_snippet (pre, t));
+  event_add_all (node, fn);
+  event_add_all (node, event_snippet (post, end));
+  /* the trivia of the header, so that no line moves */
+  {
+    MEMSTREAM (tr);
+
+    if (!tr)
+      abort ();
+    for (int k = 0; k < 5; k++)
+      if (source[k])
+        subtree_trivia (source[k], tr);
+    first_token (node)->trivia = MEMSTREAM_TEXT (tr);
+  }
+  return node;
+}
+
+struct ast *event_declare (struct ast *at, struct ast *name, struct ast *semi,
+                           int has_header, int *rejected)
+{
+  const struct token *t = ast_token (at);
+  const char *nm = ast_token (name)->text;
+  struct ast *decl;
+
+  if (!has_header)
+    stencil_error (rejected, at, "@event %s: include <cwrap/event.h> first",
+                   nm);
+  if (event_reserved (nm))
+    stencil_error (rejected, name, "@event %s; '%s' is reserved, and "
+                   "declared by <cwrap/event.h>", nm, nm);
+  if (!event_find (nm)) {
+    struct event_name *e = allocate (sizeof (*e));
+
+    e->name = nm;
+    e->at = ast_token (name);
+    e->defined = 0;
+    e->next = event_names;
+    event_names = e;
+  }
+  decl = event_snippet (arena_printf ("extern const cwrap_event_slot "
+                                      "__cwrap_event_slot_%s;", nm), t);
+  decl->next = NULL;
+  first_token (decl)->trivia = arena_printf ("%s%s", t->trivia,
+                                             all_trivia (name));
+  last_token (decl)->trivia = ast_token (semi)->trivia;
+  return decl;
+}
+
 static int copy_file (FILE *in, FILE *out)
 {
   char buf[1 << 16];
@@ -4042,6 +4397,8 @@ int translate_file (const char *in_path, const char *out_path)
   cache_types = NULL;
   ghost_ops = NULL;
   ghost_decls = NULL;
+  event_names = NULL;
+  event_seq = 0;
   root = parse_file (in, &rejected);
   if (rejected) {
     fclose (in);

@@ -420,8 +420,10 @@ int main (int argc, char **argv)
     push (&all, "-I");
     push (&all, CWRAP_HEADER_DIR);
     /* Linking objects alone still needs the runtime. */
-    if (!passthrough && ninputs && !compile_only && !assemble_only)
+    if (!passthrough && ninputs && !compile_only && !assemble_only) {
       push (&all, CWRAP_LIB_DIR "/scalar.o");
+      push (&all, CWRAP_LIB_DIR "/event.o");
+    }
     execvp (cc, (char *const *)all.v);
     die ("%s: %s", cc, strerror (errno));
   }
@@ -491,6 +493,7 @@ int main (int argc, char **argv)
     if (rc)
       return rc;
 
+    translate_set_unit (it->src);
     if (translate_only) {
       rc = translate_file (pre, output ? output : post);
       if (rc == TRANSLATE_FAILED)
@@ -538,6 +541,7 @@ int main (int argc, char **argv)
       }
     }
     push (&link, CWRAP_LIB_DIR "/scalar.o");
+    push (&link, CWRAP_LIB_DIR "/event.o");
     if (output) {
       push (&link, "-o");
       push (&link, output);
