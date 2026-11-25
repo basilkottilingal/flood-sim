@@ -2106,6 +2106,65 @@ milestones 4-5) next:
 8. **Periodic boundaries** with it: the wall bits of "Ghost operators and
    adaptation", item 1, become the maps' "none" on a non-periodic axis.
 
+### Topology-aware MPI (plans, not started)
+
+`mpi-topology.[ch]` (experimental, not linked to the tree) reports what a
+job was given: each rank's placement, each node's allocated CPUs, NUMA
+domains, memory nodes and GPUs, the caches of the assigned NUMA domains,
+and the latency between every two ranks by class (same core, L3, NUMA
+domain, socket, node, another node). How `tree-mpi.c` could use it, in
+the cost model of `doc/partition` (t ~ max_r sum_s (alpha_rs + beta_rs b
+V_rs)): today alpha and beta are one number, while the machine has a
+class a pair.
+
+1. **Measure first.** Time `tree_mpi_exchange ()` per peer, and join the
+   plan's peers and volumes (`TreeMpiPlan`, V_rs) with the classes of
+   `mpi-topology`: the share of halo bytes and messages within a node,
+   within a NUMA domain, across nodes. Everything below depends on it.
+2. **Rank order along the curve.** Neighbouring pieces of the Morton
+   curve are neighbouring ranks, and a piece's peers are mostly near it
+   on the curve. With block mapping (consecutive ranks on one node:
+   `srun` default, `mpirun --map-by core`) most peers are on the node;
+   with round-robin mapping almost none are. Check the mapping at
+   `tree_mpi_start ()` (node ids, as `mpi-topology` finds them) and warn,
+   or renumber: a communicator ordered by (node, NUMA domain, core).
+3. **A two-level cut.** Cut the curve into one piece a node by weight,
+   then each node's piece into its ranks. The same as today with equal
+   nodes and block mapping; it differs when nodes differ (a GPU node
+   beside CPU nodes, a node given fewer cores): the targets become a
+   capacity a rank, prefix sums of capacities in place of r W / npe in
+   `leaf_pid ()`.
+4. **Weights by class in the repartition test.** `adapt_wavelet ()`
+   repartitions on the load alone (`tree_mpi_imbalance_max`). With the
+   classes, the time of a step is load plus exchange: repartition when
+   the modelled step time, not only the load, is worse than a cut's.
+5. **Within a node, shared memory.** Ranks of one node could read each
+   other's halo blocks through `MPI_Win_allocate_shared` instead of
+   messages; or one rank a NUMA domain with OpenMP threads inside, which
+   divides P (the O(P) table, the collectives, the peers) by the cores
+   of a domain.
+6. **Collectives by node.** The repartition's `MPI_Exscan`,
+   `MPI_Allreduce` and gathers in two stages, node then node leaders,
+   where the MPI library does not already (Open MPI's `han`); the
+   linear `MPI_Exscan` of Open MPI 4.1.6 (measured in `doc/partition`,
+   "Collectives: algorithms and costs") then runs over nodes, not ranks.
+7. **Block size from the caches.** A block with its ghosts is (m + 4)^D
+   cells a scalar: 3.2 KB in 2D, 64 KB in 3D at m = 16, double. The L2 a
+   core (1.25 MB on the test laptop) bounds how many scalars of a block
+   a stencil can keep there: an input to the deferred compile-time block
+   size ("Compile-time block size").
+8. **GPU nodes.** One rank a GPU, bound close to it (`mpi-topology`
+   warns of a rank whose GPUs are far from its CPU), its buffers on the
+   GPU's NUMA node; the cut by capacity (item 3) when a GPU rank and a
+   CPU rank share a job.
+9. **Placement by the plan.** After a repartition, the peers with the
+   most volume could be put on one node (`MPI_Dist_graph_create_adjacent`
+   with reorder, or a greedy map of the communication graph onto the
+   nodes). Only if item 1 shows the curve's order is not enough.
+
+Suggested order: 1, then 2 (cheap, likely the largest gain), then 5 or 6
+as the measurements point.
+
 ## Compile-time block size
 
 Under consideration; not started. The block size `m` is now an argument of
