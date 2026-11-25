@@ -8,7 +8,9 @@ tests/*.s
 tests/*.o
 tests/*.pgm
 papers/*
-
-
+deps.png
 
 libb-amr/backup/
+libb-amr/*_ranks.csv
+libb-amr/*_nodes.csv
+libb-amr/*_latency.csv
