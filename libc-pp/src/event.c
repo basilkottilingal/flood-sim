@@ -60,10 +60,23 @@ static struct {
   struct slot **order;              /* the steps' slots, sorted */
   int nslots, nsteps;
   struct slot *phase [4];            /* by CWRAP_EVENT_DEFAULTS ... END */
-  int status, stop, cancel, dt_given;
+  int status, stop, cancel, in_step;
+  /* the step's dt: the lowest limit so far, and once fixed, the body that
+   * fixed it (its first events_dtnext ()) */
+  double dtmax;
+  int dt_fixed;
+  const cwrap_event_body *dt_by, *body;   /* body: the one running */
+  const struct slot *dt_by_slot, *slot;
+  int failed;                       /* event_fail ()'s code, reset before
+                                       each body: outside one, it is lost */
   double t_new;
   int (*reduce) (int);
-} ev;
+  /* the sync over the processes (events_set_sync ()): a local failure,
+   * kept for the next status word, and whether one is on its way */
+  cwrap_event_sync sync;
+  int has_sync, in_flight, local;
+  double timeout, timeout_set;
+} ev = { .timeout_set = 600 };
 
 static int same (const char *a, const char *b)
 {
@@ -523,16 +536,58 @@ static double tnext (double t)
   return tn;
 }
 
-double events_dtnext (double dt)
+/* a misuse of dtmax or dtnext: call, as "events_dtmax (0.5)", and what is
+ * wrong; said once a body, which then fails (1) */
+static void dt_error (const char *call, const char *wrong)
 {
-  double t = events_t, tn = tnext (t);
+  if (ev.failed)
+    return;                         /* the first misuse is enough */
+  fprintf (stderr, "cwrap: event error: %s", call);
+  if (ev.body)
+    fprintf (stderr, " in '%s' (%s:%d)", ev.slot->s->name, ev.body->file,
+             ev.body->line);
+  fprintf (stderr, "%s\n", wrong);
+  event_fail (1);
+}
 
-  if (dt > 0 && tn < __builtin_inf ()) {
+static char dt_call [64];
+
+void events_dtmax (double dt)
+{
+  snprintf (dt_call, sizeof (dt_call), "events_dtmax (%g)", dt);
+  if (!ev.in_step)
+    dt_error (dt_call, ": dt is a step's, not defaults', init's or end's");
+  else if (!(dt > 0))
+    dt_error (dt_call, ": a limit is > 0");
+  else if (ev.dt_fixed && ev.dt_by == ev.body)
+    dt_error (dt_call, ", after this body read the step's dt "
+              "(events_dtnext ()): set the limits before reading it");
+  else if (ev.dt_fixed) {
+    char wrong [256];
+
+    snprintf (wrong, sizeof (wrong), ", after the step's dt was fixed by "
+              "'%s' (%s:%d): make '%s' prev.%s", ev.dt_by_slot->s->name,
+              ev.dt_by->file, ev.dt_by->line,
+              ev.slot ? ev.slot->s->name : "", ev.dt_by_slot->s->name);
+    dt_error (dt_call, wrong);
+  } else if (dt < ev.dtmax)
+    ev.dtmax = dt;
+}
+
+/* The step's dt, fixed by the first call: the lowest limit, cut so that the
+ * step lands on the next time an event or a bound t <= b waits for (the
+ * fewest equal steps no longer than the limit, the last on that time as it
+ * is); without a limit, the step to that time. */
+static double fix_dt (void)
+{
+  double t = events_t, tn = tnext (t), dt = ev.dtmax;
+
+  if (tn < __builtin_inf ()) {
     double rem = tn - t;
-    long n = (long) (rem / dt);
+    long n = dt < __builtin_inf () ? (long) (rem / dt) : 1;
 
     if (n * dt < rem * (1 - 1e-9))
-      n++;                          /* the fewest steps no longer than dt */
+      n++;
     if (n <= 1) {
       dt = rem;
       ev.t_new = tn;                /* lands on tn exactly */
@@ -540,16 +595,43 @@ double events_dtnext (double dt)
       dt = rem / n;
       ev.t_new = t + dt;
     }
-  } else
+  } else if (dt < __builtin_inf ())
     ev.t_new = t + dt;
-  ev.dt_given = 1;
+  else
+    return 0;                       /* no limit, no time ahead */
+  ev.dt_fixed = 1;
   events_dt = dt;
   return dt;
+}
+
+double events_dtnext (void)
+{
+  if (!ev.in_step) {
+    dt_error ("events_dtnext ()", ": dt is a step's, not defaults', "
+              "init's or end's");
+    return 0;
+  }
+  if (!ev.dt_fixed) {
+    if (!fix_dt ()) {
+      dt_error ("events_dtnext ()", ": no limit (events_dtmax ()) and no "
+                "event's time ahead give the step's dt");
+      return 0;
+    }
+    ev.dt_by = ev.body;
+    ev.dt_by_slot = ev.slot;
+  }
+  return events_dt;
 }
 
 void events_stop (void)
 {
   ev.stop = 1;
+}
+
+void event_fail (int code)
+{
+  if (code && !ev.failed)
+    ev.failed = code;
 }
 
 void event_cancel (void)
@@ -571,7 +653,6 @@ void events_set_reduce (int (*max) (int))
  * keep_going); the status, the first failure kept as the run's */
 static int run_slot (struct slot *sl, int keep_going)
 {
-
   for (int j = 0; j < sl->nbodies; j++) {
     const cwrap_event_body *b = sl->bodies [j];
     int rc;
@@ -579,7 +660,13 @@ static int run_slot (struct slot *sl, int keep_going)
     if (sl->cancelled [j])
       continue;
     ev.cancel = 0;
+    ev.failed = 0;
+    ev.body = b;
+    ev.slot = sl;
     rc = b->run (events_i, events_t);
+    ev.body = NULL;
+    if (ev.failed)
+      rc = ev.failed;               /* event_fail () came first */
     if (rc)
       fprintf (stderr, "event '%s' (%s:%d) failed with %d at i = %d, "
                "t = %g\n", sl->s->name, b->file, b->line, rc, events_i,
@@ -590,12 +677,80 @@ static int run_slot (struct slot *sl, int keep_going)
       sl->cancelled [j] = 1;
       sl->ncancelled++;
     }
+    if (rc && ev.has_sync && !ev.reduce) {
+      if (!ev.local)
+        ev.local = rc;              /* for the next sync; go on meanwhile */
+      continue;
+    }
     if (rc && !ev.status)
       ev.status = rc;
     if (ev.status && !keep_going)
       break;
   }
   return ev.status;
+}
+
+void events_set_sync (const cwrap_event_sync *s)
+{
+  ev.has_sync = s != NULL;
+  if (s)
+    ev.sync = *s;
+}
+
+void events_set_sync_timeout (double seconds)
+{
+  ev.timeout_set = seconds;
+}
+
+/*
+.. The status word of the step just ended, combined by MAX over the
+.. processes: whether one failed, the largest code of those that did, and
+.. the step's signature, i and t, with their negatives (so MAX gives the
+.. least as well: equal on every process, or out of sync).
+*/
+enum { SYNC_FAILED, SYNC_CODE, SYNC_I, SYNC_MI, SYNC_T, SYNC_MT, SYNC_N };
+
+static void sync_start (void)
+{
+  double v [SYNC_N] = {
+    [SYNC_FAILED] = ev.local != 0,
+    [SYNC_CODE] = ev.local ? ev.local : -__builtin_inf (),
+    [SYNC_I] = events_i, [SYNC_MI] = -events_i,
+    [SYNC_T] = events_t, [SYNC_MT] = -events_t,
+  };
+
+  ev.sync.start (v, SYNC_N, ev.timeout);
+  ev.in_flight = 1;
+}
+
+/* the last word sent, waited for and checked: out of sync ends every
+ * process (abort (), MPI_Abort); a failure stops the run */
+static void sync_finish (void)
+{
+  double v [SYNC_N];
+  int me;
+
+  ev.in_flight = 0;
+  ev.sync.finish (v, SYNC_N);
+  me = ev.sync.rank ();
+  if (v [SYNC_I] != -v [SYNC_MI] || v [SYNC_T] != -v [SYNC_MT]) {
+    if (me == 0)
+      fprintf (stderr, "cwrap: events (): the processes are out of sync: "
+               "after the same step they are at i = %g to %g, t = %.17g to "
+               "%.17g. Possible reasons: (a) a dt limit (events_dtmax ()) "
+               "not from a foreach () reduction, so that the processes took "
+               "steps of their own; (b) a process that stopped or cancelled "
+               "an event alone (events_stop (), event_cancel ()), or a "
+               "schedule or condition of its own data. Aborting\n",
+               -v [SYNC_MI], v [SYNC_I], -v [SYNC_MT], v [SYNC_T]);
+    ev.sync.abort (1);
+  }
+  if (v [SYNC_FAILED] > 0 && !ev.status) {
+    ev.status = (int) v [SYNC_CODE];
+    if (me == 0 && !ev.local)
+      fprintf (stderr, "events: stopped: a process failed with %d\n",
+               ev.status);
+  }
 }
 
 /* whether a step's slot is due at i, t; if so, its schedule moves on */
@@ -633,7 +788,10 @@ static int due (struct slot *sl, int i, double t)
 
 int events_run (void)
 {
-  ev.status = ev.stop = 0;
+  const char *to = getenv ("CWRAP_EVENTS_TIMEOUT");
+
+  ev.timeout = to ? atof (to) : ev.timeout_set;
+  ev.status = ev.stop = ev.local = ev.in_flight = 0;
   events_i = 0;
   events_t = events_dt = 0;
   if (resolve ()) {
@@ -643,6 +801,10 @@ int events_run (void)
   ev.status = run_slot (ev.phase [CWRAP_EVENT_DEFAULTS], 0);
   if (!ev.status)
     ev.status = run_slot (ev.phase [CWRAP_EVENT_INIT], 0);
+  if (ev.has_sync && !ev.status) {
+    sync_start ();                  /* once, waited for: before any step */
+    sync_finish ();
+  }
   /* the schedules, now that init has run */
   for (int k = 0; k < ev.nsteps; k++) {
     struct slot *sl = ev.order [k];
@@ -668,13 +830,19 @@ int events_run (void)
     }
     if (finite ? !finite_alive : !any)
       break;
-    ev.dt_given = 0;
+    ev.in_step = 1;
+    ev.dtmax = __builtin_inf ();
+    ev.dt_fixed = 0;
+    ev.dt_by = NULL;
     for (int k = 0; k < ev.nsteps && !ev.status; k++)
       if (due (ev.order [k], events_i, events_t))
         ev.status = run_slot (ev.order [k], 0);
     if (ev.status)
       break;
-    if (ev.dt_given)
+    if (!ev.dt_fixed && ev.dtmax < __builtin_inf ())
+      fix_dt ();                    /* limits set, dt never read */
+    ev.in_step = 0;
+    if (ev.dt_fixed)
       events_t = ev.t_new;
     else {
       double tn = tnext (events_t);
@@ -683,8 +851,23 @@ int events_run (void)
         events_t = tn;
     }
     events_i++;
+    if (ev.has_sync) {
+      /* the last step's word, sent while this one ran, then this one's */
+      if (ev.in_flight)
+        sync_finish ();
+      if (ev.status)
+        break;
+      sync_start ();
+    }
   }
+  if (ev.in_flight)
+    sync_finish ();                 /* the last step's, before end */
+  if (ev.has_sync)
+    ev.sync.stop ();                /* end has no time limit */
+  ev.in_step = 0;
   run_slot (ev.phase [CWRAP_EVENT_END], 1);
+  if (!ev.status && ev.local)
+    ev.status = ev.local;           /* a failure in end, this process's */
   release ();
   return ev.status;
 }

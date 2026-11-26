@@ -20,7 +20,10 @@ static double dtmin = 1, dtmax;
 /* t lands on 0.1 k exactly, on 0.35, and no step is longer than 0.03 */
 @event step (i++)
 {
-  double dt = events_dtnext (0.03);
+  double dt;
+
+  events_dtmax (0.03);
+  dt = events_dtnext ();
 
   dtmin = dt < dtmin ? dt : dtmin;
   dtmax = dt > dtmax ? dt : dtmax;

@@ -8,7 +8,7 @@ static int n_;
 
 @event defaults { LOG ("D "); }
 @event init () { LOG ("I "); }
-@event stability (i++, t <= 1) { events_dtnext (0.3); LOG ("s%d ", i); }
+@event stability (i++, t <= 1) { events_dtmax (0.3); LOG ("s%d ", i); }
 @event vof (i++, next.stability) { LOG ("v "); }
 @event vof (first) { LOG ("V "); }
 @event output (t += 0.5,

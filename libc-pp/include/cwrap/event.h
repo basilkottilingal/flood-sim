@@ -16,17 +16,25 @@
 .. in that order) and end (once, after the last step, also after a failure).
 ..
 .. A body returns 0, or a failure code that stops the run. It reads the step
-.. i and the time t as its parameters.
+.. i and the time t as its parameters. With several processes (MPI), a body
+.. that fails before a collective the others still enter calls
+.. event_fail (code) instead, finishes its collectives, and returns: every
+.. process then stops at the reduce after the body.
 ..
 .. The runtime, in event.c, linked into every program by cwrap:
 ..
 ..   events_run ()            defaults, init, the steps, end; the status
-..   events_dtnext (dt)       the step's dt, cut to land on the next time
+..   events_dtmax (dt)        lowers the step's limit on dt
+..   events_dtnext ()         the step's dt: the limit, cut to land on the
+..                            next time; fixed by the first call
 ..   events_stop ()           ends the run after this step, status 0
+..   event_fail (code)        the running body fails, once it returns
 ..   event_cancel ()          the running body runs no more
 ..   event_status ()          0, or the failure code (for end's bodies)
 ..   events_print (fp)        the order, as resolved
-..   events_set_reduce (max)  combines a status over the processes (MPI)
+..   events_set_reduce (max)  a status combined after every body (debug)
+..   events_set_sync (s)      the sync after each step: <cwrap/event-mpi.h>
+..   events_set_sync_timeout (s)  each step's time limit, with the sync
 ..   events_i, events_t, events_dt   the step, the time, the last step's dt
 */
 #ifndef CWRAP_EVENT_H
@@ -88,9 +96,29 @@
   extern const cwrap_event_slot __cwrap_event_slot_defaults,
     __cwrap_event_slot_init, __cwrap_event_slot_end;
 
+  /*
+  .. The sync over several processes (MPI): <cwrap/event-mpi.h> gives it.
+  .. start () begins combining v [0 .. n - 1] by MAX over the processes,
+  .. without waiting, at the end of each step, and gives the next step at
+  .. most timeout seconds (0: no limit); finish () waits for the result, in
+  .. v; stop () ends the time limit (the steps are over); abort () ends
+  .. every process; rank () is this one's.
+  */
+  typedef struct {
+    void (*start) (const double *v, int n, double timeout);
+    void (*finish) (double *v, int n);
+    void (*stop) (void);
+    void (*abort) (int code);
+    int (*rank) (void);
+  } cwrap_event_sync;
+
   int events_run (void);
-  double events_dtnext (double dt);
+  void events_set_sync (const cwrap_event_sync *s);
+  void events_set_sync_timeout (double seconds);
+  void events_dtmax (double dt);
+  double events_dtnext (void);
   void events_stop (void);
+  void event_fail (int code);
   void event_cancel (void);
   int event_status (void);
   void events_print (FILE *fp);
@@ -98,6 +126,6 @@
 
   extern int events_i;              /* the step, from 0 */
   extern double events_t;           /* the time, from 0 */
-  extern double events_dt;          /* the last dt given by events_dtnext () */
+  extern double events_dt;          /* the last step's dt, once fixed */
 
 #endif

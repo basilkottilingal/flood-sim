@@ -1,0 +1,28 @@
+== 0
+i0 t0 dt0.1625 i1 t0.1625 dt0.24375 i2 t0.40625 dt0.24375 out0.65000000000000002 i3 t0.65 dt0.45 E0
+rc 0 i 4 t 1.1 dt 0.45
+== 1
+cwrap: event error: events_dtmax (0.01) in 'advance' (event_dt.c:28), after this body read the step's dt (events_dtnext ()): set the limits before reading it
+event 'advance' (event_dt.c:28) failed with 1 at i = 1, t = 0.1625
+i0 t0 dt0.1625 i1 t0.1625 dt0.24375 E1
+rc 1 i 1 t 0.1625 dt 0.24375
+== 2
+cwrap: event error: events_dtmax (0) in 'limits' (event_dt.c:20): a limit is > 0
+event 'limits' (event_dt.c:20) failed with 1 at i = 2, t = 0.40625
+i0 t0 dt0.1625 i1 t0.1625 dt0.24375 E1
+rc 1 i 2 t 0.40625 dt 0.24375
+== 3
+cwrap: event error: events_dtmax (1) in 'init' (event_dt.c:14): dt is a step's, not defaults', init's or end's
+event 'init' (event_dt.c:14) failed with 1 at i = 0, t = 0
+E1
+rc 1 i 0 t 0 dt 0
+== 4
+cwrap: event error: events_dtnext () in 'advance' (event_dt.c:28): no limit (events_dtmax ()) and no event's time ahead give the step's dt
+event 'advance' (event_dt.c:28) failed with 1 at i = 3, t = 0.65
+i0 t0 dt0.1625 i1 t0.1625 dt0.24375 i2 t0.40625 dt0.24375 out0.65000000000000002 i3 t0.65 dt0 E1
+rc 1 i 3 t 0.65 dt 0.24375
+== 5
+cwrap: event error: events_dtmax (0.1) in 'late' (event_dt.c:36), after the step's dt was fixed by 'advance' (event_dt.c:28): make 'late' prev.advance
+event 'late' (event_dt.c:36) failed with 1 at i = 2, t = 0.40625
+i0 t0 dt0.1625 i1 t0.1625 dt0.24375 i2 t0.40625 dt0.24375 E1
+rc 1 i 2 t 0.40625 dt 0.24375

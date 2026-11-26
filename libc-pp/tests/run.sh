@@ -702,9 +702,16 @@ check "events: i = n, i += n, i <= n, i < n, by ; or ,, conditions; t += d on 0.
 "$cwrap" -Wall -Wextra -Werror event_land.c -o event_land && ./event_land | cmp -s - event_land.out
 check "events: long steps land on 0.03 then 0.29 exactly (t + (tn - t) would not), on a bound t <= 0.97, slots first and last against the file's order" $?
 
+"$cwrap" -Wall -Wextra -Werror event_dt.c -o event_dt &&
+  for m in 0 1 2 3 4 5; do echo "== $m"; MODE=$m ./event_dt 2>&1; done | cmp -s - event_dt.out
+check "events: dt limits, the lowest of three bodies, landed on 0.65, read twice the same; a limit after dt is read here or elsewhere, 0, in init; no limit and no time ahead: errors" $?
+
 "$cwrap" -Wall -Wextra -Werror event_fail.c -o event_fail &&
   ./event_fail 2>&1 | cmp -s - event_fail.out && FAIL_AT=2 ./event_fail 2>&1 | cmp -s - event_fail2.out
 check "events: a failure stops the run, end runs and sees it, events_stop (), event_cancel (), the reduce hook after each body" $?
+
+"$cwrap" -Wall -Wextra -Werror event_failcall.c -o event_failcall && ./event_failcall 2>&1 | cmp -s - event_failcall.out
+check "events: event_fail (code) lets the body finish, then stops the run with the first code; 0 and outside a body, nothing" $?
 
 "$cwrap" -Wall -Wextra -Werror event_main.c event_lib.c -o event_files && ./event_files | cmp -s - event_files.out
 check "events: three files: the defining file's body first, next. across files, a declared event overloaded" $?
@@ -769,10 +776,35 @@ check "events: a header included twice, no <cwrap/event.h>, return in foreach ()
   "$cwrap" -Wall -Werror event_none.c -o event_none && [ "$(./event_none | tail -1)" = "rc 0 i 0" ]
 check "events: gcc's errors on the body's own lines, a header over lines; no event, nothing run" $?
 
+"$cwrap" -Wall -Wextra -Werror event_sync.c -o event_sync &&
+  { for m in 0 1 2 3; do echo "== $m"; MODE=$m ./event_sync 2>&1; done
+    echo "== 4"; MODE=0 CWRAP_EVENTS_TIMEOUT=7 ./event_sync 2>&1; } | cmp -s - event_sync.out
+check "events: the sync, its words sent at each step's end and read at the next, a failure seen a step late, in init before any step, out of sync to abort (), the time limit" $?
+
+# Over 3 MPI processes (OpenMPI's mpicc and mpirun), if here
+if mpicc --showme:compile > /dev/null 2>&1 && command -v mpirun > /dev/null; then
+  ok=0
+  "$cwrap" -Wall -Wextra -Werror $(mpicc --showme:compile) event_mpi.c $(mpicc --showme:link) -o event_mpi || ok=1
+  for m in 0 1 4; do
+    MODE=$m timeout 120 mpirun --oversubscribe -np 3 ./event_mpi 2>&1 | grep -E "^p|^events:" | sort
+  done > mpi.out
+  cmp -s mpi.out event_mpi.out || ok=1
+  MODE=2 timeout 120 mpirun --oversubscribe -np 3 ./event_mpi > mpi2.log 2>&1 && ok=1
+  grep -q "the processes are out of sync: after the same step they are at i = 1 to 1, t = 0.10000000000000001 to 0.20000000000000001" mpi2.log || ok=1
+  t0=$(date +%s)
+  MODE=3 CWRAP_EVENTS_TIMEOUT=2 timeout 120 mpirun --oversubscribe -np 3 ./event_mpi > mpi3.log 2>&1 && ok=1
+  [ $(( $(date +%s) - t0 )) -lt 20 ] || ok=1
+  grep -q "process 1: step 2 (t = 0.4) has run more than 2 s" mpi3.log &&
+    grep -q "process 0: step 3 (t = 0.6) has run more than 2 s" mpi3.log || ok=1
+  check "events on 3 MPI processes: in step; a failure on one stops all a step later; in init; out of sync, MPI_Abort; one stuck, all ended in 2 s" $ok
+else
+  echo "skip events on MPI processes: no OpenMPI mpicc or mpirun"
+fi
+
 ok=0
 san="-O2 -fsanitize=address,undefined -fno-sanitize-recover=all"
 gcc $san -std=gnu11 -Wall -Wextra -Werror -c "$tests"/../src/event.c -o event_san.o || ok=1
-for p in run sched land fail; do
+for p in run sched land fail failcall dt sync; do
   "$cwrap" $san -Wall -Wextra -Werror -c event_$p.c -o ev_$p.o &&
     gcc $san ev_$p.o event_san.o "$tests"/../build/scalar.o -o ev_$p || ok=1
 done
@@ -781,6 +813,10 @@ done
 [ $ok = 0 ] && ./ev_run | cmp -s - event_run.out && ./ev_sched | cmp -s - event_sched.out &&
   ./ev_land | cmp -s - event_land.out &&
   ./ev_fail 2>&1 | cmp -s - event_fail.out && FAIL_AT=2 ./ev_fail 2>&1 | cmp -s - event_fail2.out &&
+  ./ev_failcall 2>&1 | cmp -s - event_failcall.out &&
+  for m in 0 1 2 3 4 5; do echo "== $m"; MODE=$m ./ev_dt 2>&1; done | cmp -s - event_dt.out &&
+  { for m in 0 1 2 3; do echo "== $m"; MODE=$m ./ev_sync 2>&1; done
+    echo "== 4"; MODE=0 CWRAP_EVENTS_TIMEOUT=7 ./ev_sync 2>&1; } | cmp -s - event_sync.out &&
   ./ev_files | cmp -s - event_files.out
 check "events: the same runs at -O2 under ASan and UBSan, the runtime too" $?
 

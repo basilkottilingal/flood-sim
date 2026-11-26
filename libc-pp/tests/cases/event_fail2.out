@@ -1,0 +1,4 @@
+event 'a' (event_fail.c:20) failed with 3 at i = 2, t = 0
+event 'end' (event_fail.c:30) failed with 7 at i = 2, t = 0
+a0 A0 b0 c0 C0 a1 A1 b1 c1 C1 a2 E3 F3
+rc 3 i 2 reduce 14

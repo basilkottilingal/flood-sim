@@ -11,7 +11,7 @@ static int n_;
 static double a, b, c;
 
 @event tail (i++, last) { LOG ("tail "); }
-@event step (i++) { events_dtnext (1); LOG ("s%d ", i); }
+@event step (i++) { events_dtmax (1); LOG ("s%d ", i); }
 @event at3 (t = 0.03) { a = t; LOG ("a "); }
 @event at29 (t = 0.29) { b = t; LOG ("b "); }
 @event upto (i++, t <= 0.97) { c = t; }

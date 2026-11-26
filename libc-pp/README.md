@@ -1169,7 +1169,7 @@ states. A solver's step is a chain of them, and a program adds its own
 
     #include <cwrap/event.h>
 
-    @event flux (i++, t <= 3600) { ... events_dtnext (dt_cfl); ... }
+    @event flux (i++, t <= 3600) { ... events_dtmax (dt_cfl); ... }
     @event vof (i++, next.flux) { ... }
     @event vof (first) { ... }               /* an overload: runs before */
     @event gauges (t += 60, next.vof) { ... }
@@ -1221,14 +1221,52 @@ The clauses are split by `;` or `,`, in any order:
 - The numbers are read when the steps start, after `init`, so they may be
   variables that `init` sets.
 - **Times are landed on exactly.** `t += 0.1` fires at `t0 + k * 0.1`, with
-  k an integer: no drift from adding 0.1. A solver asks for its step with
-  `events_dtnext (dt)`, which gives the fewest equal steps no longer than dt
-  that reach the next time an event or a bound `t <= b` waits for. If no
-  body calls it, the time jumps to that next time.
+  k an integer: no drift from adding 0.1. See [The time step](#the-time-step).
 - **The run goes on while a finite slot may still run:** one with a bound,
   or one that runs once (`i = n`, `t = a`). Unbounded slots (`i++`,
   `t += d`, conditions) run alongside them. A program with no finite slot
   runs until `events_stop ()` or a failure.
+
+### The time step
+
+Each routine with a limit on dt states it, and one reads the step:
+
+    @event stability (i++)
+    {
+      double dtc = HUGE_VAL;
+
+      foreach (reduction (min:dtc))     /* the same on every process */
+        dtc = fmin (dtc, Delta / (fabs (u.x[]) + sqrt (G * h[])));
+      events_dtmax (dtc);               /* CFL */
+      events_dtmax (DT);                /* the user's cap */
+    }
+    @event stability { events_dtmax (rain_dt ()); }   /* one more limit */
+    @event advance (i++, next.stability)
+    {
+      double dt = events_dtnext ();     /* fixed here */
+      ...
+    }
+
+- **`events_dtmax (dt)`** lowers the step's limit: the lowest wins. Any
+  body of the step, or any routine it calls, may give one, as often as it
+  likes. It talks to no other process.
+- **`events_dtnext ()`** gives the step's dt: the limit, cut to the fewest
+  equal steps no longer than it that reach the next time an event or a
+  bound `t <= b` waits for, the last on that time as it is. The first call
+  fixes it; later ones give the same value. With no limit, the step goes
+  to that next time.
+- **A step that set limits and read no dt** is fixed at its end, the same
+  way. A step with neither jumps to the next time, or stays.
+- **Several processes:** the runtime does not reduce dt. A limit must be
+  the same on every process, which a `foreach ()` reduction gives: cwrap
+  combines it over the processes (`tree_reduce ()`) after the loop. A
+  value of one process's own cells alone gives each process its own step,
+  and the run hangs later.
+- **Errors,** each failing the body (code 1), with the call and the event:
+  a limit after the step's dt was fixed (in this body: set the limits
+  before reading; in an earlier event: `make 'late' prev.advance`), a limit
+  not > 0, a limit or a read in `defaults`, `init` or `end`, a read with no
+  limit and no event's time ahead.
 
 ### Order
 
@@ -1280,11 +1318,79 @@ descriptors of every file:
 - **`events_stop ()`** ends the run after the current step, with status 0.
   **`event_cancel ()`** stops the running body from running again, and the
   slot's other bodies go on.
-- **Several processes (MPI):** `events_set_reduce (max)` gives a function
-  that combines a status over the processes (an `MPI_Allreduce` with
-  `MPI_MAX`). It is called after every body, so that every process stops at
-  the same body, before any collective of the next one. Schedules,
-  `events_stop ()` and `event_cancel ()` must be the same on every process.
+- **Several processes (MPI):** see [The sync over MPI
+  processes](#the-sync-over-mpi-processes). Schedules, `events_stop ()`
+  and `event_cancel ()` must be the same on every process.
+- **A reduce after every body,** to stop at the very body that failed (a
+  debug mode): `events_set_reduce (max)` gives a function combining a
+  status over the processes (an `MPI_Allreduce` with `MPI_MAX`). It waits
+  for every process: one small reduction per body per step.
+- **A failure before a collective:** a body that returns early, while the
+  other processes go on into a collective (an `MPI_Allreduce`, a `foreach`
+  with a reduction, a ghost update), hangs the run: they wait in it, the
+  failed process in the reduce. Such a body calls `event_fail (code)`
+  instead, goes on through its collectives, and returns. The run then
+  stops as if the body had returned the code:
+
+      @event vof (i++)
+      {
+        if (min_depth () < 0)
+          event_fail (3);           /* not return 3: the foreach below */
+        foreach (reduction (+:mass)) ...
+        return 0;
+      }
+
+  The first code is kept over one returned later. `event_fail (0)` does
+  nothing, nor does a call outside a body.
+
+### The sync over MPI processes
+
+    #include <mpi.h>
+    #include <cwrap/event-mpi.h>        /* in one file: that is all */
+
+With it, the processes agree after each step, at no cost in waiting:
+
+- **A status word** of 6 doubles goes out at the end of each step by
+  `MPI_Iallreduce (MPI_MAX)` and is read at the end of the next one: it
+  travels while that step computes. It holds whether a process failed, the
+  largest code of those that did, and the step's signature, `i` and `t`,
+  each with its negative, so that one `MAX` gives the least too.
+- **A failure on one process** (a body returning a code, `event_fail ()`)
+  does not stop it: it goes on through the step and the next, so that its
+  collectives still meet the others'. At the end of the next step every
+  process learns of it, and all stop there, run `end` (`event_status ()`
+  the code) and return the code. A failure is seen one step late.
+- **After `init`,** one sync is waited for, so that a failure there stops
+  every process before step 0.
+- **Out of sync** (the least and largest `i` or `t` differ): rank 0 says
+  so, and `MPI_Abort` ends every process:
+
+      cwrap: events (): the processes are out of sync: after the same step
+      they are at i = 1 to 1, t = 0.1 to 0.2. Possible reasons: (a) a dt
+      limit (events_dtmax ()) not from a foreach () reduction, so that the
+      processes took steps of their own; (b) a process that stopped or
+      cancelled an event alone (events_stop (), event_cancel ()), or a
+      schedule or condition of its own data. Aborting
+
+- **A time limit on each step,** `CWRAP_EVENTS_TIMEOUT` seconds (600 by
+  default, 0 for none; `events_set_sync_timeout ()` in the program, the
+  environment first), from the end of the step before. A timer fires
+  wherever the process is: in an event, in a collective waiting for a
+  process stuck or gone, in the sync. Each process says where it was, and
+  so which one is stuck:
+
+      cwrap: events (): process 1: step 2 (t = 0.4) has run more than 2 s
+      cwrap: events (): process 0: step 3 (t = 0.6) has run more than 2 s
+
+  then ends (`_exit (1)`: `MPI_Abort` is not safe in a signal handler), and
+  the launcher ends the others. `end` has no time limit. The timer is
+  `SIGALRM` (`ITIMER_REAL`): a program using them itself sets 0.
+- **Its own communicator** (`MPI_COMM_WORLD` duplicated), so that its
+  collective never meets the program's: in step, both would keep their
+  order anyway; out of sync, a process gone on to `main`'s collectives
+  could otherwise match the others' status words.
+- **Not caught:** a process killed (a crash) before the sync is the
+  launcher's to end, as in Basilisk; the time limit ends the others.
 
 ### Several files
 
@@ -1332,25 +1438,33 @@ program with no event links too.
 | | |
 |---|---|
 | `int events_run (void)` | defaults, init, the steps, end; the first failure code, 0, or -1 |
-| `double events_dtnext (double dt)` | the step's dt, cut so that the time lands on the next event's time |
+| `void events_dtmax (double dt)` | lowers the step's limit on dt; no communication |
+| `double events_dtnext (void)` | the step's dt, cut to land on the next event's time; fixed by the first call |
 | `void events_stop (void)` | ends the run after this step, status 0 |
+| `void event_fail (int code)` | the running body fails once it returns, its collectives done (MPI) |
 | `void event_cancel (void)` | the running body runs no more |
 | `int event_status (void)` | 0, or the first failure code (for `end`'s bodies) |
 | `void events_print (FILE *fp)` | the resolved order |
-| `void events_set_reduce (int (*max) (int))` | combines a status over the processes |
-| `events_i`, `events_t`, `events_dt` | the step, the time, the last dt of `events_dtnext ()` |
+| `void events_set_reduce (int (*max) (int))` | combines a status over the processes after every body (debug) |
+| `void events_set_sync (const cwrap_event_sync *s)` | the sync after each step: start, finish, stop, abort, rank; `<cwrap/event-mpi.h>` sets it |
+| `void events_set_sync_timeout (double s)` | each step's time limit (600 s; `CWRAP_EVENTS_TIMEOUT` first) |
+| `events_i`, `events_t`, `events_dt` | the step, the time, the last step's dt once fixed |
 
 ### Tested
 
-`tests/run.sh`, 13 checks, each against output written out by hand and
+`tests/run.sh`, 17 checks, each against output written out by hand and
 checked line by line:
 
 | Case | What it checks | Result |
 |---|---|---|
-| `event_run.c` | `next.`, `prev.`, `first` overloads, an overload after the definition, `defaults` and `init` order, `t += 0.5` with `events_dtnext (0.3)` (steps of 0.25), `__LINE__` in a body after a header over two lines | exact log |
+| `event_run.c` | `next.`, `prev.`, `first` overloads, an overload after the definition, `defaults` and `init` order, `t += 0.5` with a limit of 0.3 and no read (steps of 0.25), `__LINE__` in a body after a header over two lines | exact log |
 | `event_sched.c` | `i = 2`; `i = 1, i += every, i <= 10` gives 1 4 7 10; the same with `;` and `i < 10` gives 1 4 7; conditions; `t += 0.1, t <= 1` equal to `0.1 k` bit for bit, 11 times; `t = 0.35` exact; `t < 0.1`; every step in [0.025, 0.03] | exact log, 0 misses |
-| `event_land.c` | steps of `events_dtnext (1)` landing on 0.03 then 0.29 exactly (`t + (tn - t)` would miss), on a bound `t <= 0.97`; a `last` slot defined first and a `first` one defined last | exact log |
+| `event_land.c` | steps with a limit of 1 landing on 0.03 then 0.29 exactly (`t + (tn - t)` would miss), on a bound `t <= 0.97`; a `last` slot defined first and a `first` one defined last | exact log |
 | `event_fail.c` | a failure at step 2 skips the slot's next body and the later steps, `end` runs and sees 3; a failing `end` body seen by the next; `events_stop ()` finishing its step; `event_cancel ()`; the reduce hook called after each body (25 and 14 calls) | exact logs |
+| `event_dt.c` | three bodies' limits (0.5, 0.2 + 0.1 i, 0.45): the lowest, landed on 0.65 exactly, read twice the same; errors: a limit after this body read dt, after another event fixed it (`make 'late' prev.advance`), 0, in `init`, a read with no limit and nothing ahead | exact logs, 6 modes |
+| `event_sync.c` | a sync of its own on one process, each word logged: sent at each step's end, read at the next's; a failure at step 2 in step 2's word, the run stopped after step 3; in `init`, no step; a signature read back changed: out of sync, `abort ()`; `CWRAP_EVENTS_TIMEOUT` over `events_set_sync_timeout ()`; `stop ()` before `end` | exact logs |
+| `event_mpi.c`, 3 OpenMPI processes | in step; process 1 fails at step 2: all three run step 3 and stop, `end` and rc 3 on each; process 2 fails in `init`: no step; a dt limit of one process: out of sync, `MPI_Abort`; process 1 stuck at step 2 with a 2 s limit: all ended in under 20 s, each saying its step | exact logs, messages |
+| `event_failcall.c` | `event_fail (4)` at step 2: the body goes on to its end, the slot's next body and the later steps are skipped, the reduce sees 4, `end` sees 4, the run returns 4 and not the 5 returned; `event_fail (0)` and a call from `main` do nothing | exact log |
 | `event_main.c`, `event_lib.c`, `event_solver.h` | three files: a slot defined in one, declared and overloaded in another; the defining file's body after `first` and before the rest; `next.` across files; `init` bodies of three files ordered by `first` and `last` | exact log |
 | the same, `-DTIE`, `-DSOLVER` | `init` bodies of two files at one rank: an error; the solver's header in two files: the linker's multiple definition | errors |
 | `event_undef.c` | an overload of an event linked from nowhere: undefined reference | error |
@@ -1361,7 +1475,11 @@ checked line by line:
 | `event_lines.c`, `event_none.c` | gcc's error on the body's own line; a program with no event | line 10; rc 0 |
 | ASan and UBSan, -O2 | the run cases again, the runtime built with the sanitizers too | same logs |
 
-Deliberate bugs, one line each, in a copy of libc-pp: all 22 are caught.
+Deliberate bugs, one line each, in a copy of libc-pp: 39 caught (the two
+landing ones run again on the new code), and one that changes nothing (dt computed again at each read: the limits cannot
+change once it is fixed, so the value is the same; fixing it once only
+saves the work), and one the tests cannot see: the world for the sync's
+communicator. In step, both keep their order; it matters only out of sync.
 The checks that fail for each:
 
 | Bug | Checks |
@@ -1388,6 +1506,25 @@ The checks that fail for each:
 | no `return 0` at the end of a body | 9 |
 | `return` in `foreach ()` in an event allowed | 1 |
 | `next.` on an overload allowed | 1 |
+| `event_fail ()`'s code ignored | 2 |
+| the code returned kept over `event_fail ()`'s | 2 |
+| the last limit wins, not the lowest | 2 |
+| no fix at the end of a step with limits | 3 |
+| a limit after this body read dt allowed | 2 |
+| a limit after another event fixed dt allowed | 2 |
+| a limit not > 0 accepted | 2 |
+| a limit in a phase accepted | 2 |
+| bounds `t <= b` not landed on (again, in the new code) | 2 |
+| `t + (tn - t)` instead of `tn` (again) | 2 |
+| a local failure dropped (sync) | 3 |
+| no signature check | 3 |
+| a signature of `i` only | 3 |
+| a failure read back from the sync ignored | 3 |
+| no sync after `init` | 3 |
+| the last step's sync not read | 2 |
+| `stop ()` not called | 2 |
+| no time limit given | 3 |
+| no timer armed (MPI) | 1 |
 
 Those caught by one check are each a rule with an error of its own, which
 that check's message matches.
@@ -1399,8 +1536,12 @@ that check's message matches.
   would do.
 - **Clocks** (`sub`, `super`, `shift`; levels for subcycling): the design is
   in the notes of 2026-11-25, nothing built.
-- **The reduce hook for libb-amr:** `tree-mpi.c` could set
-  `events_set_reduce ()` itself. That is a change to libb-amr, left to ask.
+- **`events_stop ()` on one process only:** that process leaves the run,
+  the others wait for its next word, and the time limit ends them. It
+  could instead go in the status word, as a stop of every process.
+- **The wall time of a job** (a cluster's limit): a word entry, the
+  processes stopping together before it, with `end` to write a restart.
+- **A process killed** is seen by the others only through the time limit.
 - **A start time** other than 0 (a restart): `events_t` is set to 0.
 - **cwrap could read the `cwrap_events` sections before linking,** to report
   a definition in two files in its own words rather than the linker's.
@@ -1507,7 +1648,7 @@ on it. The tests cover:
   definitions three levels deep, names passed on from two levels down, break
   and continue at every level, parameters the block sees, statics, caches and
   scalars; with their errors and line numbers
-- `@event`: 13 checks (`event_*.c`), see [Events](#events-event): the
+- `@event`: 17 checks (`event_*.c`), see [Events](#events-event): the
   order, schedules, failures, three files, every error at translation, link
   and startup, and the run cases again under ASan and UBSan
 
