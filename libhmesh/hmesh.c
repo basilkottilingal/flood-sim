@@ -266,6 +266,7 @@ uint32_t hm_vertex_add (Hmesh * M, const double * x)
   if (M->dim > 0)
     M->level[0].use[s] = HM_NONE;
   M->generation++;
+  M->points_generation++;
   return s;
 }
 
@@ -428,7 +429,7 @@ int hm_remove (Hmesh * M, int k, uint32_t s)
     unlink_half (M, k, hm_half (k, s, i));
   level_release (M, k, s);
   if (k == 0)
-    M->generation++;
+    M->generation++, M->points_generation++;
   return 0;
 }
 
@@ -550,6 +551,7 @@ int hm_compact_order (Hmesh * M, uint32_t * const * order, uint32_t ** remap)
       free (map[k]);
   }
   M->generation++;
+  M->points_generation++;
   return 0;
 }
 

@@ -2,8 +2,6 @@
 .. Morton keys and their sort: see hmesh-morton.h.
 */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "hmesh-morton.h"
@@ -65,16 +63,22 @@ uint64_t hm_morton_cell (const int * ijk, int level)
   return hm_morton_encode (q);
 }
 
-/* insertion by the bits from lo up, giving up (0) once it has moved budget
+/* bits lo to hi - 1 of the keys, as a mask after the shift by lo */
+static inline uint64_t field_mask (int lo, int hi)
+{
+  return hi - lo >= 64 ? ~(uint64_t) 0 : ((uint64_t) 1 << (hi - lo)) - 1;
+}
+
+/* insertion by bits lo to hi - 1, giving up (0) once it has moved budget
    entries */
 static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
-                      uint64_t budget)
+                      uint64_t m, uint64_t budget)
 {
   uint64_t moved = 0;
   for (uint32_t i = 1; i < n; i++) {
-    uint64_t k = key[i];
+    uint64_t k = key[i], f = k >> lo & m;
     uint32_t v = id[i], j = i;
-    while (j > 0 && key[j - 1] >> lo > k >> lo) {
+    while (j > 0 && (key[j - 1] >> lo & m) > f) {
       key[j] = key[j - 1];
       id[j] = id[j - 1];
       j--;
@@ -125,8 +129,9 @@ static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
 .. for sorted input before sorting; here hm_sort_keys () does, and tries
 .. insertion for a few descents.
 ..
-.. Two buffers, swapped each pass ("ping-pong"); after an odd number of
-.. passes the result is in the second, and is copied back. The histogram of
+.. Two buffers, swapped each pass ("ping-pong"), the second the caller's
+.. scratch; after an odd number of passes the result is in it, and is
+.. copied back. The histogram of
 .. every digit could be made in one read of the keys before the first pass
 .. (Terdiman, Herf), a further saving of up to a pass of reads; not done.
 ..
@@ -135,8 +140,10 @@ static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
 ..     small and suits keys of many bits; it is not stable without care,
 ..     and recursion costs where buckets are large.
 ..   - On a GPU, or in parallel, the same LSD scheme with per-block
-..     histograms and a scan: Merrill and Grimshaw (2011), CUB's
-..     DeviceRadixSort.
+..     histograms and a scan: Merrill and Grimshaw (2011), Adinets and
+..     Merrill, Onesweep (2022), CUB's DeviceRadixSort. A plain OpenMP
+..     offload of it, and of the tree's cache, is on the branch
+..     worktree-hmesh-gpu (README, "On the GPU: set aside").
 ..   - For the leaves alone, the points could be counted into the leaves
 ..     (one counting sort keyed by the leaf, nleaves buckets) instead of
 ..     sorted along the whole curve; the curve order is kept as it also
@@ -150,6 +157,8 @@ static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
 ..   M. Herf, Radix Tricks, 2001 (stereopsis.com/radix.html).
 ..   D. Merrill, A. Grimshaw, High performance and scalable radix sorting,
 ..     Parallel Processing Letters 21 (2), 2011.
+..   A. Adinets, D. Merrill, Onesweep: a faster least significant digit
+..     radix sort for GPUs, arXiv:2206.01784, 2022.
 ..   G. M. Morton, A computer oriented geodetic data base and a new
 ..     technique in file sequencing, IBM, 1966: the curve.
 ..   H. Sundar, R. S. Sampath, G. Biros, Bottom-up construction and 2:1
@@ -163,19 +172,22 @@ static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
 ..     bithacks.html): the interleaving by masks of spread () above.
 */
 
-/* 11 bits a digit: 6 passes over 64 bit keys, the counts in L1 */
+/* 11 bits a digit: 6 passes over 64 bit keys, the counts (8 KiB, on the
+   stack) in L1 */
 #define RADIX_BITS 11
 #define RADIX      (1 << RADIX_BITS)
 
-static void radix (uint64_t * key, uint32_t * id, uint32_t n, int lo,
-                   int hi)
+size_t hm_sort_scratch (uint32_t n)
 {
-  uint64_t * k2 = malloc ((size_t) n * sizeof (uint64_t));
-  uint32_t * i2 = malloc ((size_t) n * sizeof (uint32_t));
-  if (!k2 || !i2) {
-    fprintf (stderr, "hmesh: out of memory\n");
-    abort ();
-  }
+  return (size_t) n * (sizeof (uint64_t) + sizeof (uint32_t));
+}
+
+/* the scratch: the second buffer of keys, then of ids */
+static void radix (uint64_t * key, uint32_t * id, uint32_t n, int lo,
+                   int hi, void * scratch)
+{
+  uint64_t * k2 = scratch;
+  uint32_t * i2 = (uint32_t *) (k2 + n);
   uint64_t * k = key;
   uint32_t * v = id;
   for (int shift = lo; shift < hi; shift += RADIX_BITS) {
@@ -205,23 +217,23 @@ static void radix (uint64_t * key, uint32_t * id, uint32_t n, int lo,
   if (k != key) {
     memcpy (key, k, (size_t) n * sizeof (uint64_t));
     memcpy (id, v, (size_t) n * sizeof (uint32_t));
-    free (k), free (v);
   }
-  else
-    free (k2), free (i2);
 }
 
 void hm_sort_keys (uint64_t * key, uint32_t * id, uint32_t n, int lo,
-                   int hi)
+                   int hi, void * scratch)
 {
+  if (n < 2 || lo >= hi)
+    return;
   /* the descents: none, sorted; a few, insertion (which gives up if they
      go far); else radix */
+  const uint64_t m = field_mask (lo, hi);
   uint32_t descents = 0;
   for (uint32_t i = 1; i < n; i++)
-    descents += key[i] >> lo < key[i - 1] >> lo;
+    descents += (key[i] >> lo & m) < (key[i - 1] >> lo & m);
   if (!descents)
     return;
-  if (descents <= n / 256 && insertion (key, id, n, lo, 2 * (uint64_t) n))
+  if (descents <= n / 256 && insertion (key, id, n, lo, m, 2 * (uint64_t) n))
     return;
-  radix (key, id, n, lo, hi);
+  radix (key, id, n, lo, hi, scratch);
 }

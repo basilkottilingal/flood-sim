@@ -178,6 +178,9 @@
     /* changes with the points: added, removed, moved, renumbered, or the
        box changed; a cache of the points compares it */
     unsigned  generation;
+    /* changes when points are added, removed or renumbered, not moved: a
+       cache keeps the order of the points while only this holds */
+    unsigned  points_generation;
   #ifdef EULERIAN_LAGRANGIAN
     /* the size of the cell at x, an edge's bound: hm_set_cell_size () */
     double (* cell_size) (const double * x, void * ctx);
@@ -267,7 +270,10 @@
   ..
   .. hm_vertex_move (M, v, x): v moved to x; -1 if v is not in use or x is
   .. outside. hm_touch (M): the points were written through hm_x (), for
-  .. the caches of them (M->generation).
+  .. the caches of them (M->generation). M->points_generation changes only
+  .. when points are added, removed or renumbered (hm_vertex_add (),
+  .. hm_remove (), hm_compact_order ()), not when they move: a cache keeps
+  .. the order of its points while it holds.
   */
   int  hm_set_domain (Hmesh * M, const double * origin, double size);
   int  hm_vertex_move (Hmesh * M, uint32_t v, const double * x);

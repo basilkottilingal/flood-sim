@@ -1,5 +1,7 @@
 /*
 .. libhmesh's tests, in the euclidean dimension it is built with:
+..   the counters: generation on any change of the points,
+..   points_generation only on adds, removals and renumbering
 ..   the pool (ids reused, holes skipped, compaction's map)
 ..   a curve with a junction, a triangulated square, a closed surface (3D),
 ..   a cube of tetrahedra (3D): counts, Euler characteristic, cycles, signs,
@@ -679,8 +681,56 @@ static void bench (void)
   hmesh_free (M);
 }
 
+/* the two counters: generation on any change of the points, and
+   points_generation only when points are added, removed or renumbered */
+static void test_generations (void)
+{
+  Hmesh * M = hmesh_new (1);
+  unsigned g = M->generation, pg = M->points_generation;
+#define CHANGED(what, gen, pgen) do {                                     \
+    CHECK ((M->generation != g) == (gen), "%s: generation %s", what,        \
+           (gen) ? "kept" : "changed");                                     \
+    CHECK ((M->points_generation != pg) == (pgen),                          \
+           "%s: points_generation %s", what, (pgen) ? "kept" : "changed");  \
+    g = M->generation, pg = M->points_generation;                           \
+  } while (0)
+  uint32_t a = point (M, 0., 0., 0.);
+  CHANGED ("a point added", 1, 1);
+  uint32_t b = point (M, 1., 0., 0.), c = point (M, 2., 0., 0.);
+  CHANGED ("two more", 1, 1);
+  double x[3] = { 0.5, 0., 0. };
+  CHECK (hm_vertex_move (M, a, x) == 0, "moved");
+  CHANGED ("a point moved", 1, 0);
+  hm_x (M, 0)[b] = 1.5;
+  hm_touch (M);
+  CHANGED ("written and touched", 1, 0);
+  double o[3] = { -1., -1., -1. };
+  CHECK (hm_set_domain (M, o, 10.) == 0, "the box");
+  CHANGED ("the box set", 1, 0);
+  uint32_t v[2] = { a, b };
+  uint32_t e = hm_add (M, 1, v);
+  CHANGED ("an edge added", 0, 0);
+  CHECK (hm_remove (M, 0, a) == -1, "a point in use removed");
+  CHANGED ("a removal refused", 0, 0);
+  CHECK (hm_remove (M, 1, e) == 0, "the edge removed");
+  CHANGED ("an edge removed", 0, 0);
+  e = hm_add (M, 1, v);
+  g = M->generation, pg = M->points_generation;
+  CHECK (hm_remove_closure (M, 1, e) == 0, "the edge and its points");
+  CHANGED ("an edge and its points removed", 1, 1);
+  CHECK (hm_remove (M, 0, c) == 0, "a point removed");
+  CHANGED ("a point removed", 1, 1);
+  point (M, 3., 0., 0.), point (M, 4., 0., 0.);
+  g = M->generation, pg = M->points_generation;
+  hm_compact (M, NULL);
+  CHANGED ("compacted", 1, 1);
+#undef CHANGED
+  hmesh_free (M);
+}
+
 int main (void)
 {
+  test_generations ();
   test_pool ();
   test_curve ();
   test_square ();

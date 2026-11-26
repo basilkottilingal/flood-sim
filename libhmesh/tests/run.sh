@@ -10,6 +10,7 @@
 #   test_vof.c     volume fractions from the manifold (hm_vof ()), 2D, 3D
 #   test_implicit.c  the interface f = 0 (hm_from_function ()), 2D, 3D
 #   test_advect.c  the manifold moved and c updated (manifold_advect ())
+#   test_sort.c    the sort of Morton keys (hm_sort_keys ())
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
 # on the PATH).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -25,6 +26,7 @@ warn="-Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Wno-float-conversio
 flags="-D_GNU_SOURCE -std=gnu11 -I$lib -I$lib/.."
 san="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
 fails=0
+msrc="$lib/hmesh-morton.c $src"
 
 run () {   # name, dimension, test, sources, flags...
   name=$1 d=$2 test=$3 sources=$4
@@ -42,6 +44,13 @@ run () {   # name, dimension, test, sources, flags...
 }
 
 for d in ${DIMS:-1 2 3}; do
+  # the sort
+  run "sort, sanitizers" $d tests/test_sort.c "$msrc" $warn $san
+  if [ -z "$QUICK" ]; then
+    export HM_SORT_BENCH=1
+    run "sort, -O2, times" $d tests/test_sort.c "$msrc" $warn -O2
+    unset HM_SORT_BENCH
+  fi
   # the mesh alone, every warning of its own
   run "mesh, double, sanitizers" $d tests/test_hmesh.c "$src" $warn $san
   run "mesh, float, sanitizers" $d tests/test_hmesh.c "$src" $warn $san -DBAMR_SINGLE

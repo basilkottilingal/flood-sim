@@ -15,11 +15,11 @@
   .. The node of level l at (i, j, k) covers the keys whose top D l bits are
   .. those of hm_morton_cell (ijk, l), a range of 2^(D (b - l)) keys.
   ..
-  .. hm_sort_keys (key, id, n, lo, hi): key[] ascending by its bits lo to
-  .. hi - 1, id[] along, the order of keys equal there kept (stable): with
-  .. lo = D (b - c), hi = D b, the order of the cells of 2^c a side, which
-  .. is all the tree needs and costs (hi - lo) / 11 passes. The sort chooses
-  .. by what it is given:
+  .. hm_sort_keys (key, id, n, lo, hi, scratch): key[] ascending by its
+  .. bits lo to hi - 1, id[] along, the order of keys equal there kept
+  .. (stable): with lo = D (b - c), hi = D b, the order of the cells of 2^c
+  .. a side, which is all the tree needs and costs (hi - lo) / 11 passes.
+  .. The sort chooses by what it is given:
   ..
   ..   sorted already          one pass that counts the descents (a key
   ..                           below the one before), about 0.6 ns a key
@@ -32,8 +32,19 @@
   ..
   .. Points that all moved, even a little, are not nearly sorted at the
   .. keys' resolution (the curve's jumps), and take the radix sort.
+  ..
+  .. No allocation: the caller gives scratch of hm_sort_scratch (n) bytes
+  .. (any malloc'd block, 8 byte aligned), which the sort overwrites. The
+  .. tree's cache keeps one and grows it with the points.
+  ..
+  .. Bits above hi are ignored everywhere: the sorted check, insertion and
+  .. the radix.
+  ..
+  ..   hm_sort_scratch (n)    bytes of scratch for n keys
+  ..   hm_sort_keys (...)     sorted check, insertion or radix
   */
 
+  #include <stddef.h>
   #include <stdint.h>
   #include "hmesh.h"
 
@@ -49,7 +60,8 @@
   uint64_t hm_morton_key (const double * x, const double * origin,
                           double size);
   uint64_t hm_morton_cell (const int * ijk, int level);
+  size_t   hm_sort_scratch (uint32_t n);
   void     hm_sort_keys (uint64_t * key, uint32_t * id, uint32_t n, int lo,
-                         int hi);
+                         int hi, void * scratch);
 
 #endif

@@ -31,6 +31,7 @@ static void cache_free (void * p)
   free (C->key), free (C->order), free (C->leaf_of);
   free (C->start), free (C->stop);
   free (C->table_key), free (C->table_level);
+  free (C->scratch);
   free (C);
 }
 
@@ -154,11 +155,24 @@ static int same_box (const Hmesh * M)
   return 1;
 }
 
-/* the points sorted again, from the last order: those still in use in it,
-   then the others */
-static void sort_points (Hmesh * M, HmTreeCache * C)
+/* the sort's scratch for n keys, kept and grown (hm_sort_keys () allocates
+   nothing) */
+static void * scratch_for (HmTreeCache * C, uint32_t n)
 {
-  uint32_t n = hm_count (M, 0), end = hm_end (M, 0);
+  size_t bytes = hm_sort_scratch (n);
+  if (bytes > C->scratch_bytes || !C->scratch) {
+    C->scratch_bytes = bytes > 2 * C->scratch_bytes ? bytes :
+      2 * C->scratch_bytes;
+    free (C->scratch);
+    C->scratch = grow (NULL, C->scratch_bytes, 1);
+  }
+  return C->scratch;
+}
+
+/* room on the host for n points, ids below end, nl leaves */
+static void host_room (HmTreeCache * C, uint32_t n, uint32_t end,
+                       uint32_t nl)
+{
   if (n > C->cap || C->cap == 0) {
     C->cap = n > 2 * C->cap ? n : 2 * C->cap;
     C->key = grow (C->key, C->cap, sizeof (uint64_t));
@@ -168,6 +182,18 @@ static void sort_points (Hmesh * M, HmTreeCache * C)
     C->leaf_cap = end > 2 * C->leaf_cap ? end : 2 * C->leaf_cap;
     C->leaf_of = grow (C->leaf_of, C->leaf_cap, sizeof (uint32_t));
   }
+  if (nl > C->nleaves_cap || C->nleaves_cap == 0) {
+    C->nleaves_cap = nl > 2 * C->nleaves_cap ? nl : 2 * C->nleaves_cap;
+    C->start = grow (C->start, C->nleaves_cap, sizeof (uint32_t));
+    C->stop = grow (C->stop, C->nleaves_cap, sizeof (uint32_t));
+  }
+}
+
+/* the order to sort from, in C->order: the last order's points still in
+   use, then the others (leaf_of is the marks, made again after) */
+static void host_order (Hmesh * M, HmTreeCache * C)
+{
+  uint32_t end = hm_end (M, 0);
   uint32_t * mark = C->leaf_of, a = 0;
   memset (mark, 0, (size_t) end * sizeof (uint32_t));
   for (uint32_t b = 0; C->valid && b < C->n; b++) {
@@ -180,6 +206,14 @@ static void sort_points (Hmesh * M, HmTreeCache * C)
   hm_foreach (M, 0, v)
     if (!mark[v])
       C->order[a++] = v;
+}
+
+/* the points sorted again, from the last order */
+static void sort_points (Hmesh * M, HmTreeCache * C)
+{
+  uint32_t n = hm_count (M, 0), end = hm_end (M, 0);
+  host_room (C, n, end, 0);
+  host_order (M, C);
   /* the keys in the order of the ids, reading the coordinates in memory
      order, then one key gathered a point (not D coordinates) */
   uint64_t * byid = grow (NULL, end, sizeof (uint64_t));
@@ -189,14 +223,30 @@ static void sort_points (Hmesh * M, HmTreeCache * C)
       x[d] = M->x[d][v];
     byid[v] = hm_morton_key (x, M->origin, M->size);
   }
-  for (a = 0; a < n; a++)
+  for (uint32_t a = 0; a < n; a++)
     C->key[a] = byid[C->order[a]];
   free (byid);
   /* to the finest cells: the bits below them left out */
   int lo = HM_DIMENSION * (HM_MORTON_BITS - C->cell_bits);
-  hm_sort_keys (C->key, C->order, n, lo, HM_DIMENSION * HM_MORTON_BITS);
+  hm_sort_keys (C->key, C->order, n, lo, HM_DIMENSION * HM_MORTON_BITS,
+                scratch_for (C, n));
   C->n = n;
   C->duplicates = duplicates (C, lo);
+}
+
+/* leaf q's first key and the bits below its prefix */
+static uint64_t leaf_key (const TreeCaches * tc, uint32_t q, int * shift)
+{
+  Index p = tc->leaves[q].p;
+  int ijk[3] = { p.i, 0, 0 };
+#if HM_DIMENSION > 1
+  ijk[1] = p.j;
+#endif
+#if HM_DIMENSION > 2
+  ijk[2] = p.k;
+#endif
+  *shift = HM_DIMENSION * (HM_MORTON_BITS - p.level);
+  return hm_morton_cell (ijk, p.level);
 }
 
 /* the leaves' ranges: the leaves and the keys are both along the curve */
@@ -204,25 +254,13 @@ static void leaves_walk (Hmesh * M, HmTreeCache * C)
 {
   const TreeCaches * tc = tree_caches ();
   uint32_t nl = (uint32_t) tc->nleaves, n = C->n, a = 0;
-  if (nl > C->nleaves_cap || C->nleaves_cap == 0) {
-    C->nleaves_cap = nl > 2 * C->nleaves_cap ? nl : 2 * C->nleaves_cap;
-    C->start = grow (C->start, C->nleaves_cap, sizeof (uint32_t));
-    C->stop = grow (C->stop, C->nleaves_cap, sizeof (uint32_t));
-  }
+  host_room (C, 0, 0, nl);
   for (uint32_t v = 0; v < hm_end (M, 0); v++)
     C->leaf_of[v] = HM_NONE;
   C->outside = 0;
   for (uint32_t q = 0; q < nl; q++) {
-    Index p = tc->leaves[q].p;
-    int ijk[3] = { p.i, 0, 0 };
-#if HM_DIMENSION > 1
-    ijk[1] = p.j;
-#endif
-#if HM_DIMENSION > 2
-    ijk[2] = p.k;
-#endif
-    int shift = HM_DIMENSION * (HM_MORTON_BITS - p.level);
-    uint64_t lo = hm_morton_cell (ijk, p.level);
+    int shift;
+    uint64_t lo = leaf_key (tc, q, &shift);
     while (a < n && C->key[a] < lo)        /* in no leaf: a pruned part */
       a++, C->outside++;
     C->start[q] = a;
@@ -269,7 +307,8 @@ int hm_compact_morton (Hmesh * M, uint32_t ** remap)
                                   NULL, NULL, NULL };
   memcpy (key0, C->key, (size_t) n0 * sizeof (uint64_t));
   memcpy (order[0], C->order, (size_t) n0 * sizeof (uint32_t));
-  hm_sort_keys (key0, order[0], n0, 0, HM_DIMENSION * HM_MORTON_BITS);
+  hm_sort_keys (key0, order[0], n0, 0, HM_DIMENSION * HM_MORTON_BITS,
+                scratch_for (C, n0));
   uint64_t * key = NULL;
   for (int k = 1; k <= M->dim; k++) {
     uint32_t n = hm_count (M, k), a = 0;
@@ -281,7 +320,8 @@ int hm_compact_morton (Hmesh * M, uint32_t ** remap)
       key[a] = hm_morton_key (c, M->origin, M->size);
       order[k][a++] = s;
     }
-    hm_sort_keys (key, order[k], n, 0, HM_DIMENSION * HM_MORTON_BITS);
+    hm_sort_keys (key, order[k], n, 0, HM_DIMENSION * HM_MORTON_BITS,
+                  scratch_for (C, n));
   }
   free (key);
   int r = hm_compact_order (M, order, remap);

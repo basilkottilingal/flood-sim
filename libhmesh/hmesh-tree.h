@@ -101,6 +101,9 @@
     uint32_t   table_n, table_cap;
     uint64_t * table_key;
     int      * table_level;
+    /* the sort's scratch (hm_sort_scratch ()) */
+    void     * scratch;
+    size_t     scratch_bytes;
   } HmTreeCache;
 
   int                 hm_tree_bind (Hmesh * M);

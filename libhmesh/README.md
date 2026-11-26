@@ -124,6 +124,8 @@ top simplices alone.
 | `hm_from_function (M, f, lo, size, n)`, `hm_tree_from_function (M, f)` | the interface f = 0 of `f (x, y)` or `f (x, y, z)` |
 | `hm_set_cell_size`, `hm_edge_fits`, `hm_long_edges` | with `-DEULERIAN_LAGRANGIAN`: edges shorter than the cells |
 | `hm_vof_box`, `hm_vof_face`, `hm_vof_inside` | one cell's fraction, one face's, and the side of the closest element |
+| `hm_morton_key (x, origin, size)`, `hm_morton_cell (ijk, level)` | a point's Morton key, a node's first key |
+| `hm_sort_keys (key, id, n, lo, hi, scratch)` | keys by bits `lo ... hi - 1`, ids along, stable; scratch of `hm_sort_scratch (n)` bytes, nothing allocated |
 
 The library and the program must agree on `D`: a program built with
 another dimension does not link (`hmesh_dimension_is_D`).
@@ -442,7 +444,9 @@ crossed the domain's boundary.
 - **The sort.** To the tree's finest cells only (`D (depth_max + log2 m)`
   bits, 11 a radix pass), as that is all the leaves and cells need. It
   starts from the last order: nothing to do if no point changed its cell,
-  insertion if a few did, else radix.
+  insertion if a few did, else radix. It allocates nothing: the cache
+  keeps the scratch (`hm_sort_scratch (n)` bytes) and grows it with the
+  points.
 - **The imaginary tree** with at most one point a leaf is the sorted keys:
   the smallest cell about a point holding no other is set by the longest
   common prefix of its key with its neighbours'. Nothing more is stored.
@@ -468,6 +472,21 @@ memory traffic, not the sort itself: computing the keys (about 10 ns a
 point), the radix passes (about 4 ns a point each, 2 to 6 of them), and
 the walk.
 
+### On the GPU: set aside
+
+An OpenMP offload of the sort and of the whole cache (`-DHM_GPU`: the
+coordinates and the order kept on the device, the keys, the sort and the
+leaves' ranges made there, the host below a number of points) is on the
+branch `worktree-hmesh-gpu`, tested bit for bit against the host. It is
+not in main: on an RTX A3000 Laptop GPU its radix ran at about 5% of the
+device's bandwidth (a thread a chunk of 256 keys: too few threads, each
+waiting on memory), the cache was 1.3 to 1.6 times one host thread at
+2^20 points and slower below 3.5e5, and while the advection and the
+volume fractions run on the host, the copies alone (about 4.6 ns a point
+a step) cost about what a threaded host cache would. The topology changes
+to come (remeshing, MPI partitions) are host work. The branch's README and
+commit messages keep the design, the tests and the measurements.
+
 ## Tests
 
 ```sh
@@ -475,6 +494,12 @@ sh tests/run.sh            # 1-3D, double and float, ASan and UBSan, then -O2
 QUICK=1 sh tests/run.sh    # without the -O2 runs
 ```
 
+- **Counters.** `generation` changes on any change of the points;
+  `points_generation` only on adds (`hm_vertex_add ()`), removals
+  (`hm_remove ()`, `hm_remove_closure ()`) and renumbering
+  (`hm_compact ()`), not on moves, `hm_touch ()`, the box, or edges added
+  and removed. Each bump dropped (add, remove, compact), and one added to
+  a move, is caught.
 - **Pool.** Ids reused, the last freed first. Holes skipped in order.
   Compaction's map, with the coordinates moved along.
 - **Meshes.** A curve with a junction (three edges at a point, the sum of
@@ -498,6 +523,25 @@ QUICK=1 sh tests/run.sh    # without the -O2 runs
   `hm_x ()`, were removed and added, after the tree was refined, after the
   domain moved from under a point and back; `hm_compact_morton ()`. A
   cache made wrong on purpose (one leaf off) is caught.
+- **The sort** (`test_sort.c`). Against `qsort` by the field then by the
+  position (the one stable order), the keys and ids `hm_sort_keys ()`
+  gives, bit for bit: random 64 bit
+  keys (bits above `hi` set), all equal, sorted, reversed, nearly sorted,
+  a few moved far (insertion gives up), five distinct fields, the lowest
+  digit only; 12 sizes from 0 to 65537; 7 ranges of bits (whole keys,
+  cells of 2^10 and 2^4, odd ranges). 672 checks, scratch of exactly
+  `hm_sort_scratch (n)` bytes filled with garbage, 1-3D, ASan and UBSan.
+  Deliberate bugs, each caught (checks failed of 672):
+
+  | Bug | Fails |
+  |---|---|
+  | radix: inclusive prefix sum | crash |
+  | radix: a pass skipped on half the keys | 99 |
+  | radix: no narrow last digit | 138 |
+  | radix: odd passes not copied back | 242 |
+  | insertion: unstable (`>=`) | 35 |
+  | insertion: the key lost on giving up | 22 |
+  | descents: bits above `hi` counted | 6 |
 
 Measured at -O2 on a loaded laptop (taking out a random simplex and adding
 it back; the time is dominated by memory misses at random ids, not by the
@@ -516,6 +560,12 @@ else in memory.
 
 ## Next
 
+- **Threads.** The cache on every core (OpenMP: the keys, the radix's
+  counts and scatter by blocks, the walk by leaves): one thread is
+  latency bound (54 ns a point in 2D), the memory gives about 20 GB/s
+  here (`STREAM`-like triad, saturated at 2 threads).
+- **The GPU.** Set aside on `worktree-hmesh-gpu` (see "On the GPU: set
+  aside"); worth taking up again only with the solver on the device.
 - **Periodic boxes.** The boundary halves on a face linked to those on the
   opposite one. Their facets are distinct simplices, a translation apart,
   so the twin cycle, which joins the halves of one facet, would need an
