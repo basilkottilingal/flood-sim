@@ -204,8 +204,13 @@ Bugs made on purpose, each caught (checks failed):
 - **The mesh saved too:** a file of libhmesh's points and simplices beside
   the `.bamr`, so a saved run shows grid and interface together.
 - **Time series:** several snapshots in one page, a slider.
-- **Live:** the same viewer fed through a WebSocket during a run (a
-  minimal server of our own, or libws: wsServer, its origin, is GPL-3.0).
+- **Live:** the same viewer fed during a run through `libws/` (a
+  WebSocket server, wsServer, already in the repository for this): the
+  scene's arrays as binary frames instead of embedded, the textures and
+  vertex arrays updated in place, the server in a thread of its own,
+  frames dropped when the browser lags. Its licence: `ws.c` and
+  `handshake.c` are GPL-3.0-or-later (wsServer), `base64.c` BSD, `utf8.c`
+  MIT, so a program linking libws is GPL-3.0 when distributed.
 - **MPI from a program:** the processes' parts gathered on rank 0
   (`webgl_tree` draws one process's leaves and halo today; a `.bamr` file
   needs none of it).

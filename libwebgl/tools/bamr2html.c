@@ -6,7 +6,7 @@
 .. else the page loads it from jsDelivr. 2D for now.
 ..
 ..   gcc -O2 -I.. bamr2html.c ../webgl.c ../webgl-bamr.c ../webgl-assets.c \
-..       -o bamr2html                       (or: make bamr2html, libwebgl)
+..       -o bamr2html -lm                   (or: make bamr2html, libwebgl)
 */
 
 #include <stdio.h>
