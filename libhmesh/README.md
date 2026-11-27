@@ -5,6 +5,9 @@ A simplicial manifold of dimension `m` immersed in `R^D`, `0 <= m <= D <= 3`
 volume. A half-edge mesh, generalised to every level of the complex, with
 fields on every level stored as a structure of arrays.
 
+A longer description, with figures and the plans to come, is
+`doc/hmesh.tex` (`make` in `doc/` for `hmesh.pdf`).
+
 ```c
 manifold (2);                          /* hmesh: a surface in R^D */
 uint32_t a = hm_vertex_add (hmesh, xa), b = ..., c = ...;

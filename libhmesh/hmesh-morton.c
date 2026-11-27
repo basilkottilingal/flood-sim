@@ -71,6 +71,26 @@ static inline uint64_t field_mask (int lo, int hi)
 
 /* insertion by bits lo to hi - 1, giving up (0) once it has moved budget
    entries */
+/*
+.. Scope of improvement: the comparison (k >> lo & m).
+..
+.. The shift is needed: the bits below lo are a point's place inside its
+.. finest cell, and keys equal from lo up keep their order (the last
+.. cache's), as the radix, which sorts bits lo to hi - 1 only, keeps it.
+.. Comparing whole keys orders the points within a cell: insertion and
+.. radix then disagree on the same input (test_sort: 31 of 672 checks
+.. fail), and the descents check would see every move within a cell.
+..
+.. The mask is a no-op for every caller today: hi = D b (64 in 2D, 3D;
+.. 52 in 1D, with keys below 2^52), so no key has a bit at or above hi.
+.. It keeps the contract "bits above hi are ignored" in all three of the
+.. sorted check, insertion and radix (without it, 14 of 672 checks fail,
+.. all on the test's keys with bits above hi). It could go if the contract
+.. became "keys below 2^hi" (an assert in the tests). Equally, one AND
+.. instead of a shift and an AND: (a & M) < (b & M) with M = m << lo.
+.. Neither saves anything measurable: insertion costs its branches and
+.. moves, not one operation a compare. Kept as it is.
+*/
 static int insertion (uint64_t * key, uint32_t * id, uint32_t n, int lo,
                       uint64_t m, uint64_t budget)
 {
@@ -186,34 +206,42 @@ size_t hm_sort_scratch (uint32_t n)
 static void radix (uint64_t * key, uint32_t * id, uint32_t n, int lo,
                    int hi, void * scratch)
 {
+  /* buffers: k, v the input of a pass, k2, i2 its output */
   uint64_t * k2 = scratch;
   uint32_t * i2 = (uint32_t *) (k2 + n);
   uint64_t * k = key;
   uint32_t * v = id;
+  /* a pass a digit, the lowest first (LSD) */
   for (int shift = lo; shift < hi; shift += RADIX_BITS) {
     /* the digit's bits below hi only */
     uint64_t mask = hi - shift >= RADIX_BITS ? RADIX - 1 :
       ((uint64_t) 1 << (hi - shift)) - 1;
+    /* histogram: the keys of each digit value */
     uint32_t c[RADIX] = { 0 };
     for (uint32_t i = 0; i < n; i++)
       c[(k[i] >> shift) & mask]++;
+    /* skip: every key has the first key's digit, nothing would move */
     if (c[(k[0] >> shift) & mask] == n)
       continue;
+    /* exclusive prefix sum: each digit's first place in the output */
     uint32_t s = 0;
-    for (int d = 0; d < RADIX; d++) {
+    for (int d = 0; d <= (int) mask; d++) {
       uint32_t t = c[d];
       c[d] = s;
       s += t;
     }
+    /* scatter in input order (stable), each id along with its key */
     for (uint32_t i = 0; i < n; i++) {
       uint32_t p = c[(k[i] >> shift) & mask]++;
       k2[p] = k[i];
       i2[p] = v[i];
     }
+    /* ping-pong: this pass's output is the next one's input */
     uint64_t * tk = k;
     uint32_t * tv = v;
     k = k2, v = i2, k2 = tk, i2 = tv;
   }
+  /* an odd number of passes: the result is in the scratch, copied back */
   if (k != key) {
     memcpy (key, k, (size_t) n * sizeof (uint64_t));
     memcpy (id, v, (size_t) n * sizeof (uint32_t));
