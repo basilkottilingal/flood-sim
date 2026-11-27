@@ -1,0 +1,11 @@
+webgl-assets.c
+*.o
+*.a
+tests/*.html
+tests/*.png
+# three.js is not kept: vendor/fetch.sh gets it (else the page loads it
+# from jsDelivr)
+vendor/*.js
+# the sandbox's placeholders
+.claude/
+.mcp.json

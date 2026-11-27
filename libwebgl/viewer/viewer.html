@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@TITLE@</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    background: #1b1d22; color: #e6e6e6;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #view { position: absolute; inset: 0; }
+  .box { position: absolute; background: rgba(27, 29, 34, 0.92);
+    border: 1px solid #3a3d45; border-radius: 6px; padding: 8px 10px; }
+  #panel { top: 8px; left: 8px; width: 270px;
+    max-height: calc(100% - 34px); overflow: auto; }
+  #panel h1 { font-size: 14px; margin: 0 0 4px; }
+  .hint { color: #9aa0aa; font-size: 12px; margin-bottom: 4px; }
+  .layer { border-top: 1px solid #3a3d45; padding: 6px 0 2px; }
+  .layer b { display: block; margin-bottom: 2px; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
+  .row > span { width: 52px; color: #9aa0aa; }
+  select, input[type=number], button { background: #2a2d34; color: #e6e6e6;
+    border: 1px solid #454953; border-radius: 3px; font: inherit; }
+  select { flex: 1; min-width: 0; }
+  input[type=number] { width: 78px; }
+  canvas.bar { width: 100%; height: 10px; border-radius: 2px;
+    display: block; }
+  #info { right: 8px; bottom: 8px; max-width: min(460px, 60%);
+    white-space: pre; overflow: auto; max-height: 45%;
+    font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  #error { left: 50%; top: 40%; transform: translateX(-50%);
+    color: #ff7b7b; white-space: pre-wrap; display: none; max-width: 80%; }
+</style>
+<script type="importmap">@IMPORTMAP@</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel" class="box">
+  <h1 id="title"></h1>
+  <div class="hint">drag: pan &middot; wheel: zoom &middot; click: pick
+    &middot; r: reset view</div>
+  <div id="layers"></div>
+</div>
+<div id="info" class="box">click a cell, a point or an element</div>
+<div id="error" class="box"></div>
+<script>
+  /* errors on the page itself, and a viewer that never started */
+  function viewerError (msg) {
+    const d = document.getElementById ('error');
+    d.style.display = 'block';
+    d.textContent += msg + '\n';
+  }
+  window.addEventListener ('error', e => viewerError (e.message || String (e)));
+  window.addEventListener ('unhandledrejection',
+                           e => viewerError (String (e.reason)));
+  setTimeout (() => { if (!window.viewerReady)
+    viewerError ('the viewer did not start: no WebGL2, or three.js not ' +
+                 'in this page and no network to load it from jsDelivr ' +
+                 '(libwebgl: sh vendor/fetch.sh, then build again)');
+  }, 4000);
+</script>
+@DATA@
+<script type="module">
+@VIEWER@
+</script>
+</body>
+</html>
