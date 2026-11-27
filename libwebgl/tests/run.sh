@@ -8,6 +8,10 @@
 #   test_scene.c   the adapters, 2D: a libb-amr tree and a libhmesh circle,
 #                  against the cells' function and the mesh's own data,
 #                  double and float
+#   test_bamr.c    webgl_bamr () reading what libb-amr's tree_output ()
+#                  writes, every cell bit for bit, broken files refused,
+#                  double and float; then tools/bamr2html's page against
+#                  the API's, byte for byte
 #   check_json.py  the manifest and the import map, by Python's parser
 #   viewer.js      parsed as a module by gjs (SpiderMonkey, Firefox's
 #                  engine) when gjs is there: syntax only
@@ -26,7 +30,7 @@ sh gen-assets.sh || exit 1
 san="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
 warn="-Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Wno-float-conversion"
 hsrc="$hm/hmesh.c $hm/hmesh-clip.c $hm/hmesh-morton.c $hm/hmesh-tree.c $hm/hmesh-vof.c $hm/hmesh-implicit.c $lib/../libutils/bits.c"
-asrc="$amr/tree.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
+asrc="$amr/tree.c $amr/tree-output.c $amr/grid-scalar.c $amr/memindex.c $amr/voxel-memindex.c $amr/nano-vdb.c $amr/pool.c $amr/block-ghosts.c $amr/adapt.c"
 fails=0
 
 run () {   # name, compiler, html, sources and flags...
@@ -57,6 +61,25 @@ for prec in "" "-DBAMR_SINGLE"; do
     -Wextra -Wno-unused-parameter $san $prec -I. -Itests -I$amr -I$hm \
     -I$lib/.. tests/test_scene.c webgl.c webgl-tree.c webgl-hmesh.c \
     webgl-assets.c $hsrc $asrc
+done
+
+# webgl_bamr () against libb-amr's tree_output (), then bamr2html's page
+# against the API's, byte for byte
+gcc -std=gnu11 -D_GNU_SOURCE $warn -I. tools/bamr2html.c webgl.c webgl-bamr.c \
+  webgl-assets.c -lm -o "$dir/bamr2html" 2> "$dir/log" || { cat "$dir/log"; exit 1; }
+for prec in "" "-DBAMR_SINGLE"; do
+  api=tests/test_bamr${prec:+_float}_api.html
+  run "bamr${prec:+, float}" "$cwrap -dimension=2" $api -D_GNU_SOURCE \
+    -std=gnu11 -Wall -Wextra -Wno-unused-parameter $san $prec -I. -Itests \
+    -I$amr -I$lib/.. tests/test_bamr.c webgl.c webgl-bamr.c webgl-assets.c \
+    $asrc
+  if "$dir/bamr2html" tests/test_bamr.bamr > /dev/null &&
+     cmp -s "$api" tests/test_bamr.html; then
+    echo "ok   bamr2html${prec:+, float}: its page the API's, byte for byte"
+  else
+    echo "FAIL bamr2html${prec:+, float}: its page not the API's"
+    fails=$((fails + 1))
+  fi
 done
 
 if command -v gjs > /dev/null; then

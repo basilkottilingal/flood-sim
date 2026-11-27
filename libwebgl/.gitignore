@@ -3,6 +3,8 @@ webgl-assets.c
 *.a
 tests/*.html
 tests/*.png
+tests/*.bamr
+bamr2html
 # three.js is not kept: vendor/fetch.sh gets it (else the page loads it
 # from jsDelivr)
 vendor/*.js
