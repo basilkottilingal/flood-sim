@@ -48,7 +48,7 @@
 \title{libhmesh\\[2pt]
   \large a simplicial manifold in a block-AMR tree}
 \author{libhmesh notes}
-\date{}
+\date{27 November 2026}
 
 \begin{document}
 \maketitle
@@ -750,6 +750,773 @@ The library and the program must agree on $D$, and on
 (\fn{hmesh\_dimension\_is\_D}, \fn{hmesh\_is\_eulerian\_lagrangian}).
 
 % ======================================================================
+\section{Partitioned hmesh: design}
+\label{sec:part}
+
+The design agreed on 27 November 2026, not implemented yet. A partitioned
+hmesh works only with libb-amr's tree (\fn{tree.[ch]}, under \fn{\_MPI})
+and with \fn{-DEULERIAN\_LAGRANGIAN}: every edge shorter than its cell is
+what keeps each process's needs within its own leaves and the leaves
+around them. The code is built only with both, and refuses to run
+otherwise.
+
+\subsection{What is decided}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.22\textwidth}X@{}}
+  \toprule
+  question & decision \\
+  \midrule
+  the cut & the tree's: its leaves along the Morton curve, one run a
+    process (\fn{tree\_mpi\_repartition}); the mesh is not cut on its own \\
+  a point's owner & the owner of its leaf: $\mathrm{own}(v) =
+    \mathrm{pid}(\mathrm{leaf}(v))$, from the partition table $K$ and
+    the point's Morton key \\
+  a simplex's owner & $\mathrm{own}(s) = \min_{v \in s} \mathrm{own}(v)$,
+    $k \ge 1$ (section~\ref{sec:part-owner}) \\
+  ghosts & every simplex that may cut an owned leaf, with its faces and
+    points; dropped and rebuilt after every advection
+    (section~\ref{sec:part-ghost}) \\
+  global ids & on points only: $\mathrm{gid}(v) = (r \ll S) \mid
+    \mathrm{counter}_r$, a per-process counter that never repeats
+    (section~\ref{sec:part-id}) \\
+  migration & every step, after advection: points and simplices whose
+    owner changed go to the new owner; never deferred to the tree's
+    repartition \\
+  load balance & libb-amr's alone (tuned later if needed) \\
+  storage & contiguous arrays, owned simplices first, ghosts after \\
+  topology changes & a later stage (section~\ref{sec:topo}) \\
+  tests & bit for bit where the result does not depend on order,
+    tolerances where sums do (section~\ref{sec:part-test}) \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+Leaving migration to the tree's repartition would let the two grids drift
+apart: the tree repartitions seldom, the mesh moves every step.
+
+\subsection{Owners}
+\label{sec:part-owner}
+
+\begin{definition}[owner]
+  A point is owned by the owner of the leaf it lies in. A $k$-simplex $s$,
+  $k \ge 1$, is owned by the smallest owner of its points:
+  $\mathrm{own}(s) = \min_{v \in s} \mathrm{own}(v)$.
+\end{definition}
+
+The rule needs no geometry and gives every process the same answer. Owning
+by the leaf of the centroid would make the cut zig-zag through the mesh:
+a simplex across the cut would fall on either side by where its centroid
+lands. With the smallest owner, every simplex across the cut goes to the
+lower rank, and the cut follows the points (figure~\ref{fig:part}).
+
+\begin{proposition}
+  A process owns at least one point of every simplex it owns; and a face
+  $f \subset s$ is owned by $\mathrm{own}(s)$ or a higher rank.
+\end{proposition}
+\begin{proof}
+  The minimum is attained at some point. A face has fewer points, so its
+  minimum is not smaller.
+\end{proof}
+
+So a process may own a triangle and not one of its edges: a quantity on
+edges (a flux) is computed by the edge's owner. A simplex changes owner
+whenever one of its points does, so owners are made again after every
+move.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  % leaves 4 x 4, Morton order (x the lowest bit); rank 0 the first six
+  \foreach \i/\j in {0/0, 1/0, 0/1, 1/1, 2/0, 3/0}
+    \fill[c0!12] (\i,\j) rectangle ++(1,1);
+  \foreach \i/\j in {2/1, 3/1, 0/2, 1/2, 2/2, 3/2, 0/3, 1/3, 2/3, 3/3}
+    \fill[c1!12] (\i,\j) rectangle ++(1,1);
+  \draw[black!25] (0,0) grid (4,4);
+  \draw[black!70, line width=1pt] (0,2) -- (2,2) -- (2,1) -- (4,1);
+  \node[c0, font=\small] at (0.5,0.4) {rank 0};
+  \node[c1, font=\small] at (0.5,3.6) {rank 1};
+  % the curve: points and edges coloured by owner
+  \coordinate (p0) at (0.3,1.7); \coordinate (p1) at (0.9,1.55);
+  \coordinate (p2) at (1.5,1.4); \coordinate (p3) at (2.15,1.2);
+  \coordinate (p4) at (2.7,0.85); \coordinate (p5) at (3.3,1.15);
+  \coordinate (p6) at (3.85,1.45);
+  \draw[c0, line width=1.3pt] (p0) -- (p1) -- (p2) -- (p3) -- (p4) --
+    (p5);
+  \draw[c1, line width=1.3pt] (p5) -- (p6);
+  \foreach \p in {p0, p1, p2, p4}
+    \node[circle, fill=c0, inner sep=1.6pt] at (\p) {};
+  \foreach \p in {p3, p5, p6}
+    \node[circle, fill=c1, inner sep=1.6pt] at (\p) {};
+\end{tikzpicture}
+\caption{Two processes on a tree of $4 \times 4$ leaves cut along the Morton
+  curve (the thick line). Points are owned by their leaf's process; an
+  edge by the smaller owner of its two points, so the edges across the cut
+  all go to rank 0 and only the last one to rank 1. Not to scale: edges are
+  shorter than a cell, a leaf is 16 cells wide.}
+\label{fig:part}
+\end{figure}
+
+\subsection{Ghosts}
+\label{sec:part-ghost}
+
+A process needs every simplex that may cut one of its leaves: the volume
+fractions of its cells need them all, the advection reads the mesh around
+its points, and twin cycles across the cut need both sides.
+
+\begin{definition}[ghosts]
+  The owner of a simplex $s$ sends it to the owner of every leaf that
+  touches (by a face, an edge or a corner) a leaf holding one of the points
+  of $s$ it owns, with the faces and points of $s$. What a process holds
+  and does not own are its ghosts.
+\end{definition}
+
+\begin{proposition}
+  With edges shorter than their cells and the tree 2:1 balanced, a process
+  receives every simplex that cuts a leaf it owns.
+\end{proposition}
+\begin{proof}
+  Let $s$ cut a leaf $L$ at a point $y$, and let $v$ be a point of $s$,
+  in a leaf $V$ with cells of size $h(V)$. The distance to $v$ is convex,
+  so on $s$ it is largest at a vertex of $s$: $|v - y|$ is at most the
+  longest edge at $v$, which is shorter than $h(V)$. The leaves touching
+  $V$ cover every point within $w(V)/2 = 8\,h(V)$ of $V$ (2:1 balance
+  makes each at least half as wide as $V$, and a block is 16 cells wide).
+  So $y$ lies in $V$ or in a leaf touching $V$: $L$ is $V$ or touches it.
+  Taking for $v$ the point of $s$ that $\mathrm{own}(s)$ owns, the owner
+  sends $s$ to $L$'s owner.
+\end{proof}
+
+The rule is conservative: a process also gets some simplices that touch
+only its halo, and a few of their points may lie beyond its halo, in leaves
+its tree does not hold. The cache already counts such points as
+\fn{outside}; nothing reads their leaf, as ghosts are moved by their owners.
+
+\textbf{Rebuilt, not patched.} libhmesh finds every face from point ids
+(\fn{hm\_add} through \fn{hm\_find} on the twin cycles), so only points
+need global ids: re-adding the top simplices by their points' local ids
+reconnects edges, triangles and twin cycles across the cut by itself. So
+after every advection the ghosts are dropped and made again from what the
+owners send.
+
+\textbf{Cycles cut by the partition.} At the outer rim of the ghosts a twin
+cycle may be incomplete locally, and $\twin(h) = h$ would read as the
+manifold's own boundary. Each facet's owner holds all its cofaces (they all
+have the owner's point, so they are all sent to it), so it knows the
+facet's coface count $n_f$; ghosts carry it. A half with a local cycle
+shorter than $n_f$ is cut by the partition and marked, as halves on the box
+are (\fn{hm\_half\_on\_domain}); a true boundary has $n_f = 1$.
+
+\begin{algorithm}[H]
+  \caption{\textsc{GhostRebuild}, on every process}
+  \label{alg:ghost}
+  \begin{algorithmic}[1]
+    \State drop every ghost simplex, then every ghost point no simplex uses
+    \For{each owned simplex $s$ (top level), each owned point $v \in s$}
+      \For{each leaf $L$ touching $\mathrm{leaf}(v)$ (\fn{tree\_neighbours},
+        corners included)}
+        \State add $s$ to the message for $\mathrm{pid}(L)$ if not me (once)
+      \EndFor
+    \EndFor
+    \State send to the peers: for each simplex its points' global ids,
+      coordinates and fields, its fields, its facets' $n_f$
+    \For{each simplex received}
+      \State each point: its local id by its global id (a sorted list or a
+        hash), added if new
+      \State \fn{hm\_add}$(s)$ by local point ids \Comment{faces and twins
+        found or made}
+    \EndFor
+    \State mark the halves with a local cycle shorter than $n_f$;\quad
+      compact (owned first);\quad rebuild the cache
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{Global ids}
+\label{sec:part-id}
+
+$\mathrm{gid}(v) = (r \ll S) \mid c$, with $r$ the process that made the
+point and $c$ its counter, read back by a mask and a shift. The counter,
+not the point's slot: slots are reused after a removal, and a new point
+must not take the id of one that still exists as a ghost elsewhere. A point
+keeps its id when it moves to another process; the id names the point, its
+position gives its owner. $S = 32$ gives $4 \cdot 10^9$ points made by a
+process; with remeshing over long runs, $S = 44$ ($2^{20}$ processes) is
+the alternative, fixed at build time.
+
+\subsection{One step}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Step}$(dt)$, under MPI}
+  \label{alg:part-step}
+  \begin{algorithmic}[1]
+    \State \fn{ghosts\_update} of the face velocity \Comment{libb-amr}
+    \State move the owned points (\fn{manifold\_advect}'s rule, CFL 0.5)
+    \State refused $\gets \textsc{Allreduce}_{\max}$(refused here)
+      \Comment{all move, or none}
+    \If{refused} \Return \EndIf
+    \State send the new positions of owned points that are ghosts elsewhere
+    \State owners of every local point from $K$ and its key;\quad of every
+      simplex by the min rule
+    \State send simplices (with their points and fields) whose owner is now
+      another process \Comment{migration}
+    \State \textsc{GhostRebuild}
+    \State update $c$ in the owned cells near the interface
+      \Comment{all the simplices cutting them are local}
+    \State long edges $\gets \textsc{Allreduce}_{+}$(local count)
+  \end{algorithmic}
+\end{algorithm}
+
+The CFL limit (half a cell a step) keeps every point within its old leaf
+or one touching it, so within the process's owned and halo leaves, and its
+owner is always found from $K$ (\fn{tree\_partition\_owner}).
+
+\subsection{Volume fractions from scratch}
+
+The update of each step is local (algorithm~\ref{alg:part-step}). Making
+$c$ from scratch, the first \fn{hm\_vof} or a full one later, is not: the
+state (0 or 1) of the cells no element cuts spreads from the cut cells, and
+a process whose part holds no interface (a bubble entirely on another
+process, water everywhere else) has nothing to spread from.
+
+\begin{algorithm}[H]
+  \caption{\textsc{InitialC}}
+  \label{alg:initc}
+  \begin{algorithmic}[1]
+    \State $c \gets$ the exact fraction in every cut cell \Comment{local}
+    \If{the mesh came from a function $f$}
+      \State each uncut cell: $c \gets 1$ if $f < 0$ at its centre, else 0
+        \Comment{no communication}
+    \Else \Comment{a distributed flood fill}
+      \Repeat
+        \State spread known states across faces, within the process
+        \State exchange the halo cells' states with the peers
+        \State changed $\gets \textsc{Allreduce}_{\max}$(a state set here)
+      \Until{not changed}
+      \State cells still unknown $\gets 0$ \Comment{as on one process}
+    \EndIf
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{Tests}
+\label{sec:part-test}
+
+The traversal order differs between one process and many, so the mesh as
+a whole is not the same bit for bit; its parts that do not depend on order
+are.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.3\textwidth}X@{}}
+  \toprule
+  checked against one process & how \\
+  \midrule
+  point positions, every step & bit for bit, by global id: a move reads
+    only its point and the velocity field, whose ghosts libb-amr makes
+    bit for bit (ids given the same way for the test, e.g.\ by initial
+    Morton order) \\
+  connectivity & the simplices as sorted lists of global point ids,
+    compared as sets; counts, Euler characteristic \\
+  owners, ghosts & every simplex owned once over all processes; every
+    simplex cutting an owned leaf present (brute force); cycles complete
+    or marked \\
+  $c$ in every cell & to about $10^{-15}$: sums of pieces in another
+    order \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+% ======================================================================
+\section{Topology changes: the known algorithms}
+\label{sec:topo}
+
+Not in libhmesh yet: this section gathers the published algorithms that
+the plans of section~\ref{sec:future} would build on, written as
+pseudo-code in libhmesh's terms (\fn{hm\_add}, \fn{hm\_remove},
+\fn{hm\_find}, twin cycles, uses). Two kinds of change go by the name:
+\begin{itemize}
+  \item \textbf{local operations} (split, collapse, flip, smoothing) change
+    the mesh's connectivity, not the topology of the shape: they keep the
+    mesh good as it moves (section~\ref{sec:topo-local});
+  \item \textbf{changes of the interface's topology}: two drops merging
+    (coalescence), a thread pinching off (breakup): the number of pieces or
+    holes changes (section~\ref{sec:topo-change}).
+\end{itemize}
+The pictures are of a surface ($m = 2$), seen flat; on a curve ($m = 1$) a
+split inserts a point, a collapse removes one, and there is no flip.
+
+% ----------------------------------------------------------------------
+\subsection{Local operations}
+\label{sec:topo-local}
+
+\subsubsection{Edge split}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.05]
+  \begin{scope}
+    \coordinate (a) at (0,0); \coordinate (b) at (0,2);
+    \coordinate (c) at (-1.5,1); \coordinate (d) at (1.5,1);
+    \draw[black!50] (a) -- (c) -- (b) -- (d) -- cycle;
+    \draw[c1, line width=1.2pt] (a) -- (b) node[midway, right=1pt,
+      font=\small] {$e$};
+    \foreach \p/\a/\l in {a/below/a, b/above/b, c/left/c, d/right/d}
+      \node[pt, label=\a:{$\l$}] at (\p) {};
+  \end{scope}
+  \draw[-{Stealth[length=6pt]}, line width=0.8pt] (2.2,1) -- (3.2,1);
+  \begin{scope}[xshift=5.2cm]
+    \coordinate (a) at (0,0); \coordinate (b) at (0,2);
+    \coordinate (c) at (-1.5,1); \coordinate (d) at (1.5,1);
+    \coordinate (m) at (0,1);
+    \draw[black!50] (a) -- (c) -- (b) -- (d) -- cycle;
+    \draw[c0, line width=1pt] (a) -- (b) (c) -- (d);
+    \foreach \p/\a/\l in {a/below/a, b/above/b, c/left/c, d/right/d}
+      \node[pt, label=\a:{$\l$}] at (\p) {};
+    \node[pt, fill=c0, label={[c0]above right:{$m$}}] at (m) {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Edge split: the point $m$ on $e = (a, b)$, and each triangle on
+  $e$ (two here; one on a boundary, three or more at a junction) cut in
+  two.}
+\label{fig:split}
+\end{figure}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Split}$(e = (a, b))$}
+  \label{alg:split}
+  \begin{algorithmic}[1]
+    \State $m \gets$ \fn{hm\_vertex\_add} at the midpoint, or on the smooth
+      surface (projected along the interpolated normal)
+    \For{each triangle $t = (a, b, c)$ in $e$'s twin cycle}
+      \Comment{every coface, junctions too}
+      \State keep $t$'s fields;\quad \fn{hm\_remove}$(t)$
+      \State \fn{hm\_add}$((a, m, c))$;\quad \fn{hm\_add}$((m, b, c))$
+        \Comment{$t$'s orientation}
+      \State fields of the two: intensive ones copied, extensive ones
+        shared by area
+    \EndFor
+    \State \fn{hm\_remove}$(e)$ \Comment{$(a, m)$, $(m, b)$ were made by
+      \fn{hm\_add}}
+    \State point fields at $m$: interpolated from $a$ and $b$
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Edge collapse}
+
+The delicate operation: merging $b$ into $a$ must not make the surface
+non-manifold, fold it, or stretch an edge beyond its cell. The test for the
+first is the \emph{link condition} \cite{dey}: the link $\mathrm{Lk}(v)$ of
+a point is the set of simplices opposite it in the triangles and edges at
+it, and the collapse keeps the topology if and only if
+\[
+  \mathrm{Lk}(a) \cap \mathrm{Lk}(b) = \mathrm{Lk}(e).
+\]
+On a surface: the points adjacent to both $a$ and $b$ are exactly the third
+points of the triangles on $e$ ($c$ and $d$ in figure~\ref{fig:collapse}).
+A third common neighbour would make two triangles with the same three
+points after the collapse, or a pinch.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.0]
+  \begin{scope}
+    \coordinate (a) at (0,0); \coordinate (b) at (1.2,0);
+    \coordinate (c) at (0.6,1.0); \coordinate (q1) at (-0.6,1.0);
+    \coordinate (q2) at (-1.2,0); \coordinate (q3) at (-0.6,-1.0);
+    \coordinate (d) at (0.6,-1.0); \coordinate (r1) at (1.8,-1.0);
+    \coordinate (r2) at (2.4,0); \coordinate (r3) at (1.8,1.0);
+    \draw[black!50] (c) -- (q1) -- (q2) -- (q3) -- (d) -- (r1) -- (r2) --
+      (r3) -- cycle;
+    \foreach \q in {c, q1, q2, q3, d} \draw[black!50] (a) -- (\q);
+    \foreach \q in {d, r1, r2, r3, c} \draw[black!50] (b) -- (\q);
+    \draw[c1, line width=1.2pt] (a) -- (b);
+    \foreach \q in {q1, q2, q3, r1, r2, r3} \node[pt] at (\q) {};
+    \node[pt, label=above:{$c$}] at (c) {};
+    \node[pt, label=below:{$d$}] at (d) {};
+    \node[pt, label={[label distance=-1pt]below left:{$a$}}] at (a) {};
+    \node[pt, label={[label distance=-1pt]below right:{$b$}}] at (b) {};
+  \end{scope}
+  \draw[-{Stealth[length=6pt]}, line width=0.8pt] (2.9,0) -- (3.9,0);
+  \begin{scope}[xshift=5.6cm]
+    \coordinate (a) at (0.6,0);
+    \coordinate (c) at (0.6,1.0); \coordinate (q1) at (-0.6,1.0);
+    \coordinate (q2) at (-1.2,0); \coordinate (q3) at (-0.6,-1.0);
+    \coordinate (d) at (0.6,-1.0); \coordinate (r1) at (1.8,-1.0);
+    \coordinate (r2) at (2.4,0); \coordinate (r3) at (1.8,1.0);
+    \draw[black!50] (c) -- (q1) -- (q2) -- (q3) -- (d) -- (r1) -- (r2) --
+      (r3) -- cycle;
+    \foreach \q in {q1, q2, q3, r1, r2, r3} \draw[c0] (a) -- (\q);
+    \draw[black!50] (a) -- (c) (a) -- (d);
+    \foreach \q in {q1, q2, q3, r1, r2, r3} \node[pt] at (\q) {};
+    \node[pt, label=above:{$c$}] at (c) {};
+    \node[pt, label=below:{$d$}] at (d) {};
+    \node[pt, fill=c0, label={[c0, label distance=-1pt]below right:{$a$}}]
+      at (a) {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Edge collapse: $b$ merged into $a$ (here moved to the midpoint).
+  The two triangles on $e$ go, $b$'s other triangles take $a$ instead.
+  Allowed here: $\mathrm{Lk}(a) \cap \mathrm{Lk}(b) = \{c, d\} =
+  \mathrm{Lk}(e)$.}
+\label{fig:collapse}
+\end{figure}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Collapse}$(e = (a, b))$: $b$ into $a$}
+  \label{alg:collapse}
+  \begin{algorithmic}[1]
+    \Require a position $x^*$ for $a$: $x_a$, $x_b$, the midpoint, or the
+      minimiser of a quadric error \cite{garland}
+    \If{$\mathrm{Lk}(a) \cap \mathrm{Lk}(b) \ne \mathrm{Lk}(e)$}
+      \Return refused \Comment{the link condition \cite{dey}}
+    \EndIf
+    \If{some triangle at $b$ (or $a$) has $n_{old} \cdot n_{new} \le \cos
+      \theta_{\max}$} \Return refused \Comment{a fold}
+    \EndIf
+    \If{some new edge does not fit its cell} \Return refused
+      \Comment{\fn{-DEULERIAN\_LAGRANGIAN}}
+    \EndIf
+    \If{$a$ and $b$ are both on the boundary (or on one face of the box),
+      and $e$ is not} \Return refused
+    \EndIf
+    \For{each triangle on $e$} \fn{hm\_remove} \EndFor
+    \For{each triangle $t$ at $b$}
+      \State \fn{hm\_remove}$(t)$;\quad \fn{hm\_add}$(t$ with $b$ replaced
+        by $a)$ \Comment{fields carried}
+    \EndFor
+    \State $x_a \gets x^*$;\quad \fn{hm\_remove\_closure} of $b$'s faces
+      nothing uses
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Edge flip}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.05]
+  \begin{scope}
+    \coordinate (a) at (0,0); \coordinate (b) at (2.4,0);
+    \coordinate (c) at (1.0,1.3); \coordinate (d) at (1.4,-1.3);
+    \draw[black!50] (a) -- (c) -- (b) -- (d) -- cycle;
+    \draw[c1, line width=1.2pt] (a) -- (b) node[pos=0.3, above,
+      font=\small] {$e$};
+    \foreach \p/\an/\l in {a/left/a, b/right/b, c/above/c, d/below/d}
+      \node[pt, label=\an:{$\l$}] at (\p) {};
+  \end{scope}
+  \draw[-{Stealth[length=6pt]}, line width=0.8pt] (3.1,0) -- (4.1,0);
+  \begin{scope}[xshift=4.8cm]
+    \coordinate (a) at (0,0); \coordinate (b) at (2.4,0);
+    \coordinate (c) at (1.0,1.3); \coordinate (d) at (1.4,-1.3);
+    \draw[black!50] (a) -- (c) -- (b) -- (d) -- cycle;
+    \draw[c0, line width=1.2pt] (c) -- (d);
+    \foreach \p/\an/\l in {a/left/a, b/right/b, c/above/c, d/below/d}
+      \node[pt, label=\an:{$\l$}] at (\p) {};
+  \end{scope}
+\end{tikzpicture}
+\caption{Edge flip: the triangles $(a, b, c)$, $(b, a, d)$ become $(a, d,
+  c)$, $(d, b, c)$; orientations stay consistent ($d \to c$ in one, $c
+  \to d$ in the other).}
+\label{fig:flip}
+\end{figure}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Flip}$(e = (a, b))$, $e$ inside a surface}
+  \label{alg:flip}
+  \begin{algorithmic}[1]
+    \Require exactly two triangles on $e$: $(a, b, c)$ and $(b, a, d)$
+    \If{\fn{hm\_find}$(1, (c, d)) \ne$ \fn{HM\_NONE}} \Return refused
+      \Comment{the edge would be doubled}
+    \EndIf
+    \If{the quad $a\,d\,b\,c$ is folded (dihedral angle) or the flip does
+      not improve} \Return refused
+    \EndIf
+    \Statex \Comment{improve: Delaunay (the angles at $c$ and $d$ sum to
+      more than $\pi$), or valence (closer to 6 inside, 4 on a boundary)}
+    \State \fn{hm\_remove} both;\quad \fn{hm\_add}$((a, d, c))$;\quad
+      \fn{hm\_add}$((d, b, c))$
+  \end{algorithmic}
+\end{algorithm}
+
+In a tetrahedral volume ($m = 3$) the counterparts of the flip are the
+2--3, 3--2 and 4--4 swaps \cite{freitag}; smoothing then moves points to
+improve quality.
+
+\subsubsection{The remeshing loop}
+
+With a target length $L$ (here below the local cell size, so that edges
+stay shorter than their cells), the isotropic remeshing of Botsch and
+Kobbelt \cite{botsch} repeats a few times:
+
+\begin{algorithm}[H]
+  \caption{\textsc{Remesh}$(L)$ \cite{botsch, hoppe}}
+  \label{alg:remesh}
+  \begin{algorithmic}[1]
+    \For{a few iterations}
+      \State \textsc{Split} every edge longer than $\tfrac{4}{3} L$
+      \State \textsc{Collapse} every edge shorter than $\tfrac{4}{5} L$
+        (where the checks pass)
+      \State \textsc{Flip} edges that bring valences nearer 6 (4 on a
+        boundary)
+      \State smooth: move each point tangentially toward its neighbours'
+        centroid
+      \State project the points back onto the surface (the one before the
+        loop)
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+\fn{manifold\_advect} already returns the number of edges longer than their
+cells: this loop is what would run after it.
+
+% ----------------------------------------------------------------------
+\subsection{Changes of the interface's topology}
+\label{sec:topo-change}
+
+\subsubsection{Detection}
+
+Two parts of the interface come within a distance $\delta$ (about a cell)
+though they are far apart along the mesh.
+
+\begin{algorithm}[H]
+  \caption{\textsc{Detect}$(\delta)$}
+  \label{alg:detect}
+  \begin{algorithmic}[1]
+    \For{pairs of points (or triangles) in one leaf or in adjacent ones}
+      \Comment{the Morton cache}
+      \If{closer than $\delta$ in space and more than $k$ rings apart along
+        the mesh}
+        \State a candidate: a \emph{merge} if they face each other (normals
+          opposed, different pieces), a \emph{neck} if one piece folds on
+          itself
+      \EndIf
+    \EndFor
+    \Statex \Comment{or on the grid: a cell holding pieces of two sheets
+      (the per-cell lists of \fn{hm\_vof}, edges shorter than the cells)}
+  \end{algorithmic}
+\end{algorithm}
+
+Three families of methods then change the topology (table~\ref{tab:routes}).
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.2\textwidth}
+    >{\raggedright}p{0.3\textwidth}X@{}}
+  \toprule
+  route & how & for and against \\
+  \midrule
+  A. global rebuild \cite{shin, tryggvason} & every $N$ steps, the mesh
+    rebuilt from a grid field ($c$, a distance) by marching simplices &
+    simple and robust, every change happens by itself; smooths features to
+    the grid, loses the mesh's fields, changes the mesh everywhere \\
+  B. local rebuild \cite{du, glimm, wojtan} & only in the boxes where
+    \textsc{Detect} fires: the mesh cut out, rebuilt from the grid,
+    stitched on the box's faces & the mesh kept elsewhere; libhmesh has
+    both tools (\fn{hm\_clip}, marching simplices); grid-scale smoothing
+    inside the boxes \\
+  C. explicit surgery \cite{brochu} & close patches removed and zippered;
+    necks collapsed and the singular point separated & no grid, sharp
+    features and fields kept; the hardest to make robust (collision
+    detection, many corner cases) \\
+  \bottomrule
+\end{tabularx}
+\caption{Three routes to merging and breakup. A fourth, the deformable
+  simplicial complex \cite{misztal}, meshes the whole domain into
+  tetrahedra and makes the interface the faces between labelled ones, so
+  that topology changes are tetrahedron operations: a different model from
+  libhmesh's.}
+\label{tab:routes}
+\end{table}
+
+\subsubsection{A. Global rebuild}
+
+\begin{algorithm}[H]
+  \caption{\textsc{RebuildGlobal} \cite{shin}}
+  \label{alg:rebuild-global}
+  \begin{algorithmic}[1]
+    \State $\phi \gets c - \tfrac12$ at the nodes (or a signed distance)
+    \State discard the mesh;\quad marching simplices on $\phi = 0$
+      \Comment{\fn{hm\_tree\_from\_function} with $\phi$ interpolated}
+    \State fields: interpolated from the grid, or lost
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{B. Local rebuild}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.0]
+  \draw[black!15] (0,0) grid (6,4);
+  \fill[c2!12] (2,1) rectangle (4,3);
+  \draw[c2, line width=1pt, dashed] (2,1) rectangle (4,3);
+  \node[c2, font=\small] at (3,3.25) {$R$};
+  % kept outside R
+  \draw[black, line width=0.9pt] (0,2.6) -- (1.5,2.4) -- (2,2.2);
+  \draw[black, line width=0.9pt] (4,2.2) -- (4.5,2.4) -- (6,2.6);
+  \draw[black, line width=0.9pt] (6,1.4) -- (4.5,1.6) -- (4,1.8);
+  \draw[black, line width=0.9pt] (2,1.8) -- (1.5,1.6) -- (0,1.4);
+  % the old mesh inside R, removed
+  \draw[black!40, dashed] (2,2.2) -- (3,2.05) -- (4,2.2);
+  \draw[black!40, dashed] (4,1.8) -- (3,1.95) -- (2,1.8);
+  % rebuilt inside R
+  \draw[c0, line width=1.1pt] (2,2.2) -- (2.45,2.0) -- (2,1.8);
+  \draw[c0, line width=1.1pt] (4,1.8) -- (3.55,2.0) -- (4,2.2);
+  \foreach \p in {(2,2.2), (2,1.8), (4,2.2), (4,1.8)}
+    \node[circle, fill=c3, inner sep=1.5pt] at \p {};
+  \node[font=\scriptsize, black!60] at (0.8,3.6) {grid cells};
+\end{tikzpicture}
+\caption{Local rebuild: two interfaces come within a cell in the box $R$.
+  The mesh inside $R$ (dashed) is cut out, the interface rebuilt there from
+  the grid (blue, here the two drops joined by a bridge), and stitched to
+  the mesh kept outside at the points on $R$'s faces (dots).}
+\label{fig:local}
+\end{figure}
+
+\begin{algorithm}[H]
+  \caption{\textsc{RebuildLocal}$(R)$ \cite{du, glimm, wojtan}}
+  \label{alg:rebuild-local}
+  \begin{algorithmic}[1]
+    \Require $R$: a box of cells around a candidate of \textsc{Detect}
+      (cells merged into one box where boxes meet)
+    \State cut the mesh along $R$'s faces \Comment{as \fn{hm\_clip}: one
+      point per crossed edge, boundary halves tagged by face}
+    \State remove the part inside $R$, keep its fields for interpolation
+    \State $\phi \gets$ the grid field at $R$'s nodes;\quad marching
+      simplices inside $R$
+    \State on $R$'s faces: take the cut points as the new mesh's points
+      there (one point per grid edge, so both sides agree)
+    \State stitch: join the halves on $R$'s faces from both sides (their
+      twin cycles)
+    \State carry fields into $R$ (interpolated);\quad \textsc{Remesh}
+      near $R$'s faces
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{C. Explicit surgery}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Merge}: two facing sheets \cite{brochu}}
+  \label{alg:merge}
+  \begin{algorithmic}[1]
+    \Require a close pair of edges or triangles from two sheets
+    \State delete a small patch around each: two boundary loops facing
+      each other
+    \State zipper: join the two loops with a band of triangles (an
+      annulus), its points matched by angle about the axis
+    \State check orientation (normals out of the phase) and no
+      intersection;\quad undo otherwise
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Breakup}: a thinning neck \cite{brochu}}
+  \label{alg:breakup}
+  \begin{algorithmic}[1]
+    \State collapse the short edges around the neck (the link condition
+      relaxed there) until the neck is one point
+    \State that point is non-manifold: two fans of triangles meet only at
+      it
+    \State separate it: duplicate the point, one copy per fan \Comment{two
+      pieces}
+  \end{algorithmic}
+\end{algorithm}
+
+On a curve both are the same \emph{crossover} (figure~\ref{fig:crossover}):
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.0, mid/.style={postaction={decorate},
+    decoration={markings, mark=at position 0.55 with
+    {\arrow{Stealth[length=4pt]}}}}]
+  \begin{scope}
+    \draw[black, line width=0.9pt, mid] (0,0.9) -- (1.2,0.25);
+    \draw[c1, line width=1.2pt, mid] (1.2,0.25) -- (2.2,0.25);
+    \draw[black, line width=0.9pt, mid] (2.2,0.25) -- (3.4,0.9);
+    \draw[black, line width=0.9pt, mid] (3.4,-0.9) -- (2.2,-0.25);
+    \draw[c1, line width=1.2pt, mid] (2.2,-0.25) -- (1.2,-0.25);
+    \draw[black, line width=0.9pt, mid] (1.2,-0.25) -- (0,-0.9);
+    \node[pt, label=above:{$a_1$}] at (1.2,0.25) {};
+    \node[pt, label=above:{$a_2$}] at (2.2,0.25) {};
+    \node[pt, label=below:{$b_1$}] at (2.2,-0.25) {};
+    \node[pt, label=below:{$b_2$}] at (1.2,-0.25) {};
+  \end{scope}
+  \draw[-{Stealth[length=6pt]}, line width=0.8pt] (3.8,0) -- (4.8,0);
+  \begin{scope}[xshift=5.4cm]
+    \draw[black, line width=0.9pt, mid] (0,0.9) -- (1.2,0.25);
+    \draw[c0, line width=1.2pt, mid] (1.2,0.25) -- (1.2,-0.25);
+    \draw[black, line width=0.9pt, mid] (1.2,-0.25) -- (0,-0.9);
+    \draw[black, line width=0.9pt, mid] (3.4,-0.9) -- (2.2,-0.25);
+    \draw[c0, line width=1.2pt, mid] (2.2,-0.25) -- (2.2,0.25);
+    \draw[black, line width=0.9pt, mid] (2.2,0.25) -- (3.4,0.9);
+    \node[pt, label=above:{$a_1$}] at (1.2,0.25) {};
+    \node[pt, label=above:{$a_2$}] at (2.2,0.25) {};
+    \node[pt, label=below:{$b_1$}] at (2.2,-0.25) {};
+    \node[pt, label=below:{$b_2$}] at (1.2,-0.25) {};
+  \end{scope}
+\end{tikzpicture}
+\caption{The crossover on a curve: the close edges $(a_1, a_2)$ and $(b_1,
+  b_2)$ become $(a_1, b_2)$ and $(b_1, a_2)$, orientation kept. Two closed
+  curves facing each other become one (a merge); one curve folding on
+  itself becomes two (a breakup).}
+\label{fig:crossover}
+\end{figure}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Crossover}$((a_1, a_2), (b_1, b_2))$, a curve}
+  \label{alg:crossover}
+  \begin{algorithmic}[1]
+    \Require the two edges closer than $\delta$, running in opposite
+      directions
+    \State \fn{hm\_remove} both;\quad \fn{hm\_add}$((a_1, b_2))$;\quad
+      \fn{hm\_add}$((b_1, a_2))$
+    \State a merge if they were on two curves, a breakup if on one
+  \end{algorithmic}
+\end{algorithm}
+
+% ----------------------------------------------------------------------
+\subsection{In parallel: batches of independent operations}
+\label{sec:topo-parallel}
+
+Each operation reads and writes a neighbourhood: a ring of triangles, a box
+of cells. Done in batches whose neighbourhoods do not overlap, they need no
+locks, and the result does not depend on the number of threads
+\cite{rokos}. Under MPI, an operation that reaches across a partition's
+boundary waits until the partition moves (ParMmg's iterative remeshing and
+repartitioning \cite{parmmg}) or is done by the owner of its simplices with
+ghosts.
+
+\begin{algorithm}[H]
+  \caption{\textsc{Batch} \cite{rokos, parmmg}}
+  \label{alg:batch}
+  \begin{algorithmic}[1]
+    \Repeat
+      \State $C \gets$ the candidates (edges to split, collapse or flip;
+        regions to rebuild)
+      \State $I \subseteq C$: neighbourhoods disjoint \Comment{a colouring,
+        or a choice by Morton key}
+      \State apply every operation of $I$ \Comment{any order, any thread}
+      \State halo exchange;\quad rebuild the caches
+    \Until{$C$ is empty}
+  \end{algorithmic}
+\end{algorithm}
+
+% ----------------------------------------------------------------------
+\subsection{What libhmesh has for them}
+
+\begin{itemize}
+  \item twin cycles: an operation on an edge sees all its triangles,
+    junctions included, with no special case;
+  \item \fn{hm\_find}: ``does this edge already exist'' (flip, collapse)
+    without a hash table;
+  \item stable ids through \fn{hm\_add} and \fn{hm\_remove}, and the alive
+    bitmap with a stack of freed ids;
+  \item clipping to a box with boundary halves tagged by face, and
+    marching simplices: route B's two tools;
+  \item the long-edge count returned by \fn{manifold\_advect}, and the edge
+    check of \fn{-DEULERIAN\_LAGRANGIAN}.
+\end{itemize}
+
+% ======================================================================
 \section{Future plans}
 \label{sec:future}
 
@@ -788,6 +1555,9 @@ The library and the program must agree on $D$, and on
 
 \subsection*{Other}
 \begin{itemize}
+  \item storage for topology change and migration: contiguous reserved
+    arrays (stable pointers, today's API) or chunked arrays (colony-style),
+    decided with the partitioned hmesh
   \item threads (OpenMP) for the cache, the sort and the advection
   \item periodic boxes
   \item clipping only near the box as points move
@@ -824,6 +1594,47 @@ The library and the program must agree on $D$, and on
 \bibitem{herf} M.~Herf, Radix tricks, 2001 (stereopsis.com/radix.html).
 \bibitem{terdiman} P.~Terdiman, Radix sort revisited, 2000
   (codercorner.com).
+\bibitem{hoppe} H.~Hoppe, T.~DeRose, T.~Duchamp, J.~McDonald,
+  W.~Stuetzle, Mesh optimization, Proc.\ SIGGRAPH '93, Computer Graphics
+  Proceedings, 19--26, 1993.
+\bibitem{botsch} M.~Botsch, L.~Kobbelt, A remeshing approach to
+  multiresolution modeling, Proc.\ Eurographics/ACM SIGGRAPH Symposium on
+  Geometry Processing (SGP), 185--192, 2004.
+\bibitem{garland} M.~Garland, P.~S.~Heckbert, Surface simplification using
+  quadric error metrics, Proc.\ SIGGRAPH '97, 209--216, 1997.
+\bibitem{dey} T.~K.~Dey, H.~Edelsbrunner, S.~Guha, D.~V.~Nekhayev,
+  Topology preserving edge contraction, Publications de l'Institut
+  Math\'ematique (Beograd) 66 (80), 23--45, 1999.
+\bibitem{freitag} L.~A.~Freitag, C.~Ollivier-Gooch, Tetrahedral mesh
+  improvement using swapping and smoothing, Int.\ J.\ Numer.\ Meth.\ Engng
+  40 (21), 3979--4002, 1997.
+\bibitem{tryggvason} G.~Tryggvason, B.~Bunner, A.~Esmaeeli, D.~Juric,
+  N.~Al-Rawahi, W.~Tauber, J.~Han, S.~Nas, Y.-J.~Jan, A front-tracking
+  method for the computations of multiphase flow, J.\ Comput.\ Phys.\ 169
+  (2), 708--759, 2001.
+\bibitem{shin} S.~Shin, D.~Juric, Modeling three-dimensional multiphase
+  flow using a level contour reconstruction method for front tracking
+  without connectivity, J.\ Comput.\ Phys.\ 180 (2), 427--470, 2002.
+\bibitem{glimm} J.~Glimm, J.~W.~Grove, X.~L.~Li, D.~C.~Tan, Robust
+  computational algorithms for dynamic interface tracking in three
+  dimensions, SIAM J.\ Sci.\ Comput.\ 21 (6), 2240--2256, 2000.
+\bibitem{du} J.~Du, B.~Fix, J.~Glimm, X.~Jia, X.~Li, Y.~Li, L.~Wu, A simple
+  package for front tracking, J.\ Comput.\ Phys.\ 213 (2), 613--628, 2006.
+\bibitem{wojtan} C.~Wojtan, N.~Th\"urey, M.~Gross, G.~Turk, Deforming meshes
+  that split and merge, ACM Trans.\ Graph.\ 28 (3), article 76
+  (SIGGRAPH 2009), 2009.
+\bibitem{brochu} T.~Brochu, R.~Bridson, Robust topological operations for
+  dynamic explicit surfaces, SIAM J.\ Sci.\ Comput.\ 31 (4), 2472--2493,
+  2009 (the library El Topo).
+\bibitem{misztal} M.~K.~Misztal, J.~A.~B\ae rentzen, Topology-adaptive
+  interface tracking using the deformable simplicial complex, ACM Trans.\
+  Graph.\ 31 (3), article 24, 2012.
+\bibitem{rokos} G.~Rokos, G.~J.~Gorman, J.~Southern, P.~H.~J.~Kelly, A
+  thread-parallel algorithm for anisotropic mesh adaptation, arXiv
+  preprint, 2013.
+\bibitem{parmmg} L.~Cirrottola, A.~Froehly, Parallel unstructured mesh
+  adaptation using iterative remeshing and repartitioning, Inria Research
+  Report RR-9307, 2019 (the library ParMmg).
 \end{thebibliography}
 
 \end{document}
