@@ -30,6 +30,10 @@
   ..   MPI_Type_contiguous, MPI_Type_commit, MPI_Type_free
   ..                                       count items of a type above, as one
   ..   MPI_Op_create, MPI_Op_free          a user's function, commutative
+  ..   MPI_File_open, MPI_File_set_size,   on the file system the forked
+  ..   MPI_File_get_size,                  processes share: open, ftruncate,
+  ..   MPI_File_write_at,                  fstat, pwrite, pread, close;
+  ..   MPI_File_read_at, MPI_File_close    MPI_BYTE only
   */
 
   typedef int MPI_Comm;
@@ -37,6 +41,14 @@
   typedef int MPI_Op;
   typedef struct { int dummy; } MPI_Status;
   typedef int MPI_Request;
+  typedef int MPI_File;
+  typedef int MPI_Info;
+  typedef long long MPI_Offset;
+  #define MPI_SUCCESS         0
+  #define MPI_INFO_NULL       0
+  #define MPI_MODE_CREATE     1
+  #define MPI_MODE_RDONLY     2
+  #define MPI_MODE_WRONLY     4
 
   #define MPI_COMM_WORLD      0
   #define MPI_BYTE            1
@@ -92,5 +104,14 @@
   int MPI_Type_free (MPI_Datatype * type);
   int MPI_Op_create (MPI_User_function * f, int commute, MPI_Op * op);
   int MPI_Op_free (MPI_Op * op);
+  int MPI_File_open (MPI_Comm comm, const char * name, int amode,
+                     MPI_Info info, MPI_File * fh);
+  int MPI_File_set_size (MPI_File fh, MPI_Offset size);
+  int MPI_File_write_at (MPI_File fh, MPI_Offset offset, const void * buf,
+                         int count, MPI_Datatype type, MPI_Status * status);
+  int MPI_File_get_size (MPI_File fh, MPI_Offset * size);
+  int MPI_File_read_at (MPI_File fh, MPI_Offset offset, void * buf,
+                        int count, MPI_Datatype type, MPI_Status * status);
+  int MPI_File_close (MPI_File * fh);
 
 #endif

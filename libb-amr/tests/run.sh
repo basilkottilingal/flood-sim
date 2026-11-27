@@ -4,7 +4,9 @@
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap).
 # JOBS: the tests built and run at once (default: the processors).
 # QUICK=1: the pool, then tree, blocks, ghosts, adapt, stencil, faces,
-# vertices, partition (tree-mpi.h), morton (keys) and mpi (with tree_start) (-D_MPI, on 1 and 3 processes
+# vertices, partition (tree-mpi.h), morton (keys), output and restart
+# (tree-output.h) and mpi (with tree_start, output, restart) (-D_MPI, on 1
+# and 3 processes
 # forked by tests/mpi-fork) in 1, 2
 # and 3 dimensions, double and float, only: no OpenMP, alignment, other
 # level indices or MADV_FREE. After each change; the whole before a commit,
@@ -90,6 +92,31 @@ run () {   # name, dimension, extra flags, the test, library sources...
   drain
 }
 
+# tree_output ()'s files, after the runs: the serial build's the same as
+# those of 1 and 3 (13) processes, byte for byte, and read by tools/bamr.py
+outputs () {
+  for prec in "" "-DBAMR_SINGLE"; do
+    for d in 1 2 3; do
+      s=$dir/out-${d}D$prec.bamr ok=1
+      for f in "$dir/out-${d}D$prec"-np*.bamr; do
+        if ! [ -e "$s" ] || ! [ -e "$f" ] || ! cmp -s "$s" "$f"; then
+          echo "FAIL output, ${d}D ${prec:-double}: $(basename "$f") not the serial file"
+          ok=0
+        fi
+      done
+      if ! python3 -I tools/bamr.py "$s" --verify > "$dir/bamr.log" 2>&1; then
+        echo "FAIL output, ${d}D ${prec:-double}: tools/bamr.py"; cat "$dir/bamr.log"
+        ok=0
+      fi
+      if [ $ok = 1 ]; then
+        echo "ok   output, ${d}D ${prec:-double}: the serial file = the processes', byte for byte; tools/bamr.py verified"
+      else
+        fails=$((fails + 1))
+      fi
+    done
+  done
+}
+
 finish () {   # wait for every test, print the rest, count the failures
   wait
   drain
@@ -152,6 +179,11 @@ for prec in "" "-DBAMR_SINGLE"; do
     run vertices $d "$prec" tests/test_vertices.c "$lib/tree.c" $src
     run partition $d "$prec" tests/test_partition.c "$lib/tree.c" "$lib/tree-mpi.c" $src
     run morton $d "$prec" tests/test_morton.c "$lib/tree.c" $src
+    runenv="BAMR_OUT=$dir/out-${d}D$prec.bamr"
+    run output $d "$prec" tests/test_output.c "$lib/tree.c" "$lib/tree-output.c" $src
+    runenv="BAMR_OUT=$dir/restart-${d}D$prec.bamr"
+    run restart $d "$prec" tests/test_restart.c "$lib/tree.c" "$lib/tree-output.c" $src
+    runenv=
     # with -D_MPI, on processes forked by the stand-in tests/mpi-fork
     # 1D on 13 processes too: more than its 12 leaves, some own none
     nps="1 3"; [ "$d" = 1 ] && nps="1 3 13"
@@ -165,12 +197,19 @@ for prec in "" "-DBAMR_SINGLE"; do
         "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
       run tree_start $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_tree_start.c \
         "$lib/tree.c" "$lib/tree-mpi.c" $src "$lib/tests/mpi-fork/mpi.c"
+      runenv="MPI_FORK_NP=$np BAMR_OUT=$dir/out-${d}D$prec-np$np.bamr"
+      run output_mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_output.c \
+        "$lib/tree.c" "$lib/tree-mpi.c" "$lib/tree-output.c" $src "$lib/tests/mpi-fork/mpi.c"
+      runenv="MPI_FORK_NP=$np BAMR_OUT=$dir/restart-${d}D$prec-np$np.bamr"
+      run restart_mpi $d "$prec -D_MPI -I$lib/tests/mpi-fork" tests/test_restart.c \
+        "$lib/tree.c" "$lib/tree-mpi.c" "$lib/tree-output.c" $src "$lib/tests/mpi-fork/mpi.c"
       runenv=
     done
   done
 done
 if [ -n "$QUICK" ]; then
   finish
+  outputs
   [ "$fails" = 0 ] && echo "all passed (quick)"
   exit "$fails"
 fi
@@ -228,5 +267,6 @@ for d in 2 3; do
   run adapt  $d "-D_BAMR_MADV_DONTNEED_RECOMMENDED_=0" tests/test_adapt.c "$lib/tree.c" $src
 done
 finish
+outputs
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"

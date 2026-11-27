@@ -1049,6 +1049,165 @@ What the distributed tree cannot do yet, most important first.
 Suggested order: 1 and 2 (milestone 5), then 6 on OpenMPI ranks, then 7
 for libvof.
 
+## Output and restart: the tree to a file and back (tree-output.h)
+
+```c
+scalar list [] = { h, u.x, u.y };
+tree_output ("step-120", list, 3);      /* step-120.bamr */
+```
+
+`tree_output (name, list, n)` writes every leaf's index and, for each
+scalar, every cell's value, exactly (the Reals as they are), along the
+Morton curve, to `name` (`.bamr` added when the name has no extension).
+Under MPI every process calls it and writes its own leaves at their place:
+their first leaf's place by `MPI_Exscan` of the counts, the total by
+`MPI_Allreduce`, then MPI-IO (`MPI_File_write_at`, in pieces under 1 GiB).
+The processes' pieces are runs of the curve in rank order, so **the file
+is the same, byte for byte, whatever the number of processes**. A tree not
+partitioned yet (`tree_replicated ()`, whole on every process) is written
+once, by the first process. It returns 0, or -1 on every process if one
+failed (arguments, a scalar not in use, a file not written).
+
+**Names.** The file holds each scalar's own name (`scalar_name ()`: `h`,
+`u.x`), each once, so that a restart finds every field by its name
+(`scalar_find ()`). A scalar with no name (one from `scalar_new ()`: cwrap
+names only those it declares) or two with one name are refused.
+
+The file, little-endian (the header written byte by byte, no struct):
+
+| offset | size | what |
+|---|---|---|
+| 0 | 8 | `BAMRGRID` |
+| 8 | 4 | version, 1 |
+| 12 | 4 | `0x01020304`: the byte order |
+| 16 | 4 | dimension D |
+| 20 | 4 | m, cells a block side |
+| 24 | 4 | the size of a Real, 8 or 4 |
+| 28 | 4 | n, the scalars |
+| 32 | 8 | N, the leaves |
+| 40 | 24 | the domain's origin (doubles) |
+| 64 | 8 | its size h0 |
+| 72 | 4 | codec, 0 (none) |
+| 76 | 4 | 0 |
+| 80 | | the names: n of (u32 length, bytes), zeros to a multiple of 8: H bytes |
+| H | 16 N | the leaves: (level, i, j, k), int32 each |
+| H + 16 N | | scalar s: N m^D Reals, leaf by leaf, a leaf's cells i fastest, then j, then k (no ghosts) |
+
+**Reading it.** `tools/bamr.py` reads a file in Python with the standard
+library alone (no numpy): `read ()`, `cells ()` (every cell's centre, size
+and value), and `python3 tools/bamr.py FILE [--verify]` prints the header
+and each scalar's range, and checks the file's size, that the leaves run
+along the curve and cover the domain.
+
+**No compression yet.** The header has a codec field (0) for it. Deflate
+(zlib is on this PC) on double precision fields usually saves little
+unless the bytes are shuffled first, and compressed sizes would make each
+process's place depend on the others' compressed sizes (still possible, by
+the same prefix sums). Not measured; left until a file's size matters.
+
+**The stand-in MPI** (`tests/mpi-fork`) gained `MPI_File_open`,
+`MPI_File_set_size`, `MPI_File_write_at` and `MPI_File_close`, on the file
+system its forked processes share (`open`, `ftruncate`, `pwrite`).
+
+Tested (`tests/test_output.c`, 1-3D, double and float, ASan and UBSan,
+serial and on 1 and 3 processes, 13 in 1D where some own no leaf): a tree
+refined over half its domain, moved and resized, two scalars; the file read
+back by the test's own reader: the header field by field; the leaves along
+the curve, as many as the tree has, covering the domain; the first scalar
+the function at each cell's centre and the second the cell's size, from the
+leaf's index alone; each process's part bit for bit against its blocks;
+the names the scalars' own; `.bamr` added only to a name with no
+extension; an older, longer file at the name cut; six calls refused (among
+them a scalar with no name, and one name twice). Then `tests/run.sh` compares the files of
+the serial build and of 1, 3 (13) processes byte for byte, and runs
+`tools/bamr.py --verify` on them. Bugs made on purpose, each caught:
+
+| Bug | serial | 3 processes | files |
+|---|---|---|---|
+| each process at offset 0 | | 6 of 23 | differ |
+| a scalar after `own`, not N, leaves | | 4 of 23 | differ |
+| a leaf's j for its i | 3 of 22 | 3 of 23 | |
+| cells j fastest | 2 of 22 | 2 of 23 | |
+| the header not to a multiple of 8 | crash | crash | |
+| `.bamr` always added | 1 of 22 | 1 of 23 | |
+| an older, longer file not cut | 2 of 22 | | differ |
+| a scalar with no name accepted | 1 of 24 | 1 of 25 | |
+| one name twice accepted | 1 of 24 | 1 of 25 | |
+
+### Restart: `tree_restart (path)`
+
+```c
+tree (depthmax, blockdepth);           /* as ever */
+int n = tree_restart ("step-120.bamr");  /* the scalars filled, or -1 */
+```
+
+1. **Read and checked, before anything changes:** the header (version,
+   byte order, codec 0), the dimension and `m` the tree's, the file's size
+   what the sections need; the leaves' levels at most the tree's depth
+   max, their indices in range, strictly along the curve, covering the
+   domain (an integer sum). A failed check returns -1 with **the
+   program's tree as it was**.
+2. **The tree replaced:** the same depth max and blocks, the file's
+   domain, refined level by level to the file's leaves. The file's tree is
+   2:1 balanced, so the refinements the balance adds stay within it, and
+   the tree is checked leaf for leaf against the file. Under MPI it is
+   made whole, then partitioned (`tree_mpi_partition ()`): the number of
+   processes need not be the writer's.
+3. **The scalars filled by name:** each name in the file that is a global
+   scalar in use (`scalar_find ()`, an id below `n_global_scalars`) gets its
+   cells, converted if the file is in the other precision, and its ghosts
+   marked stale. Other names, local scalars' among them, are left.
+
+It returns the number of scalars filled, or -1 on every process: no tree,
+a file that cannot be read or fails a check, or one whose leaves the
+refinement does not give (then the tree is replaced and not usable). A
+process holding no leaf of a distributed tree still takes part. The
+simulation's time and step are not in the file.
+
+Tested (`tests/test_restart.c`, 1-3D, double and float, ASan and UBSan,
+serial and on 1 and 3 processes, 13 in 1D where some own none and a
+restart starts from a tree they hold nothing of): a tree refined over half
+its domain, moved and resized, global scalars `f`, `g`, `h` and a local
+one, written; refused with the tree and its values left as they were: no
+file, and copies broken one way each (the magic, the dimension, `m`, cut
+short, a level past depth max, two leaves out of order, a codec, a leaf
+missing), and a true file of blocks of 32 cells for a tree of 16;
+restarted onto another tree (uniform, another domain): 2 filled (`f`, `g`;
+the local one and `h`, not written, not), the domain and the leaves the
+file's, `f` the function and `g` the cell's size at every cell bit for
+bit, their ghosts marked stale; from a copy in the other precision, within
+a float's rounding; a tree of one leaf, the root (serial); refused with no
+tree. Bugs made on purpose, each caught (checks failed: serial, 3
+processes):
+
+| Bug | serial | 3 processes |
+|---|---|---|
+| leaves out of order accepted | 3 of 33 | 3 of 31 |
+| the cover not checked | 1 of 33 | 1 of 31 |
+| a level past depth max accepted | 4 of 33 | 4 of 31 |
+| local scalars filled too | 3 of 33 | 3 of 31 |
+| ghosts not marked stale | 1 of 33 | (the partition marks them) |
+| a float read as a double | crash | crash |
+| the first own leaf one on | 6 of 33 | 4 of 31 |
+| the domain not restored | 3 of 33 | 3 of 31 |
+| another `m` accepted | 1 of 33 | 1 of 31 |
+
+Two bugs found by these tests and fixed: `tree_output ()` wrote a tree not
+partitioned yet once a process (each owned every leaf), now once (a
+check in `test_output.c`, caught when undone: 1 of 27 on 3 processes); and
+`tree_restart ()` took a process holding no leaf for "no tree" (the 1D run
+on 13 processes, caught when undone).
+
+**Scalability.** The restart builds the whole tree on every process before
+partitioning it, as `tree_replicated ()` does: fine for the meshes of the
+tests and of a workstation, not for a tree larger than one process's
+memory. A restart that makes only each process's part (as
+`tree_mpi_start ()` does for a uniform start) is the next step there.
+
+Not done yet: the time and step in the file; compression; ghosts, faces
+and vertex scalars; a restart that builds only each process's part; a
+converter to VTK for ParaView (from `tools/bamr.py`).
+
 ## Tests
 
     QUICK=1 sh tests/run.sh      # after a change: about 40 s

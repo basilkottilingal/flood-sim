@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -503,4 +504,82 @@ int MPI_Allgather (const void * sbuf, int scount, MPI_Datatype stype,
     counts [r] = rcount, displs [r] = r * rcount;
   return MPI_Allgatherv (sbuf, scount, stype, rbuf, counts, displs, rtype,
                          comm);
+}
+
+/* -------- files: every process opens the same file and writes its own
+   part with pwrite, as MPI-IO's independent writes do -------- */
+
+int MPI_File_open (MPI_Comm comm, const char * name, int amode,
+                   MPI_Info info, MPI_File * fh)
+{
+  (void) comm, (void) info;
+  int f = open (name, (amode & MPI_MODE_RDONLY ? O_RDONLY : O_WRONLY) |
+                (amode & MPI_MODE_CREATE ? O_CREAT : 0), 0644);
+  if (f < 0)
+    return 1;
+  *fh = f;
+  return MPI_SUCCESS;
+}
+
+/* every process sets the same size: in any order, nothing written below
+   it is cut */
+int MPI_File_set_size (MPI_File fh, MPI_Offset size)
+{
+  return ftruncate (fh, (off_t) size) ? 1 : MPI_SUCCESS;
+}
+
+int MPI_File_write_at (MPI_File fh, MPI_Offset offset, const void * buf,
+                       int count, MPI_Datatype type, MPI_Status * status)
+{
+  (void) status;
+  if (type != MPI_BYTE || count < 0)
+    fail ("MPI_File_write_at: MPI_BYTE only");
+  const char * c = buf;
+  size_t left = (size_t) count;
+  while (left) {
+    ssize_t w = pwrite (fh, c, left, (off_t) offset);
+    if (w < 0 && errno == EINTR)
+      continue;
+    if (w <= 0)
+      return 1;
+    c += w, offset += w, left -= (size_t) w;
+  }
+  return MPI_SUCCESS;
+}
+
+int MPI_File_get_size (MPI_File fh, MPI_Offset * size)
+{
+  struct stat st;
+  if (fstat (fh, &st))
+    return 1;
+  *size = (MPI_Offset) st.st_size;
+  return MPI_SUCCESS;
+}
+
+/* fewer bytes than asked (the end of the file) is a failure here: the
+   callers check the file's size first */
+int MPI_File_read_at (MPI_File fh, MPI_Offset offset, void * buf, int count,
+                      MPI_Datatype type, MPI_Status * status)
+{
+  (void) status;
+  if (type != MPI_BYTE || count < 0)
+    fail ("MPI_File_read_at: MPI_BYTE only");
+  char * c = buf;
+  size_t left = (size_t) count;
+  while (left) {
+    ssize_t r = pread (fh, c, left, (off_t) offset);
+    if (r < 0 && errno == EINTR)
+      continue;
+    if (r <= 0)
+      return 1;
+    c += r, offset += r, left -= (size_t) r;
+  }
+  return MPI_SUCCESS;
+}
+
+int MPI_File_close (MPI_File * fh)
+{
+  int r = close (*fh);
+  *fh = -1;
+  return r ? 1 : MPI_SUCCESS;
 }
