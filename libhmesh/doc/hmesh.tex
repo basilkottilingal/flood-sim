@@ -29,6 +29,7 @@
 \theoremstyle{definition}
 \newtheorem{definition}{Definition}
 \newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
 
 % Okabe-Ito colours, safe for colour blindness
 \definecolor{c0}{HTML}{0072B2}
@@ -770,22 +771,31 @@ otherwise.
   \midrule
   the cut & the tree's: its leaves along the Morton curve, one run a
     process (\fn{tree\_mpi\_repartition}); the mesh is not cut on its own \\
-  a point's owner & the owner of its leaf: $\mathrm{own}(v) =
-    \mathrm{pid}(\mathrm{leaf}(v))$, from the partition table $K$ and
-    the point's Morton key \\
-  a simplex's owner & $\mathrm{own}(s) = \min_{v \in s} \mathrm{own}(v)$,
-    $k \ge 1$ (section~\ref{sec:part-owner}) \\
-  ghosts & every simplex that may cut an owned leaf, with its faces and
-    points; dropped and rebuilt after every advection
-    (section~\ref{sec:part-ghost}) \\
-  global ids & on points only: $\mathrm{gid}(v) = (r \ll S) \mid
-    \mathrm{counter}_r$, a per-process counter that never repeats
-    (section~\ref{sec:part-id}) \\
-  migration & every step, after advection: points and simplices whose
-    owner changed go to the new owner; never deferred to the tree's
-    repartition \\
+  a point's owner & its leaf's: $\rho(v) = \max\{r : K_r \le
+    \kappa(x_v)\}$, from the partition table and the point's key \\
+  a simplex's owner & $\varrho(s) = \min_{v \in s} \rho(v)$
+    (section~\ref{sec:part-owner}) \\
+  held, ghosts & $\mathcal{M}_r$: the closure of the owned simplices and
+    of those whose box grown by one step's move meets an owned leaf
+    (section~\ref{sec:part-ghost}); kept from step to step, refreshed
+    by the owners \\
+  identity & global ids on points only, $g(v) = (r_0 \ll S) \mid c$
+    from a per-process counter; a simplex is its tuple $\tau(s)$ of point
+    ids (section~\ref{sec:part-id}) \\
+  migration & every step, after advection: a change of the owned flag
+    (the new owner holds the simplex already) and the field values;
+    never deferred to the tree's repartition (section~\ref{sec:part-step})
+    \\
+  the tree changes & adaptation: nothing moves (the interface at the
+    finest level, (A4)); repartition: simplices ride with their carrier
+    point's leaf along the tree's migration pairs
+    (section~\ref{sec:part-tree}) \\
+  edge length & of the order of the cell, $0.56\,h$ to $0.93\,h$ ((E):
+    split and collapse, the next stage) \\
   load balance & libb-amr's alone (tuned later if needed) \\
   storage & contiguous arrays, owned simplices first, ghosts after \\
+  the cache & one, over owned and ghost points; the points of a cell in
+    $O(1)$ by per-leaf cell offsets (section~\ref{sec:part-cell}) \\
   topology changes & a later stage (section~\ref{sec:topo}) \\
   tests & bit for bit where the result does not depend on order,
     tolerances where sums do (section~\ref{sec:part-test}) \\
@@ -796,34 +806,113 @@ otherwise.
 Leaving migration to the tree's repartition would let the two grids drift
 apart: the tree repartitions seldom, the mesh moves every step.
 
+\subsection{Notation}
+\label{sec:part-notation}
+
+The tree's notation is that of libb-amr's note on partitioning
+\cite{bamrpart}; this section adds the mesh's (table~\ref{tab:part-notation}).
+From the tree: the ranks $\mathcal{P} = \{0, \ldots, n_{pe} - 1\}$ and
+$me$; the partition table $K = (K_0, \ldots, K_{n_{pe}})$ and the ownership
+of indices $\rho(p) = \max\{ r : K_r \le M(p) \}$, with $M$ the Morton key;
+the own leaves $\mathcal{L}_r = \mathcal{L} \cap \rho^{-1}(r)$; the box
+$\Omega(q)$ of a node; the neighbourhood $N(p)$, the halo $H_r = N(T_r)
+\setminus T_r$ and the peers $Q_r = \rho(H_r)$.
+
+For the mesh:
+\begin{itemize}
+  \item $\mathcal{M}$ is the whole complex over all processes, $\mathcal{M}^k$
+    its $k$-simplices, $\mathcal{V} = \mathcal{M}^0$ its points, $x_v$ the
+    position of $v$. A simplex is $s = (v_0, \ldots, v_k)$, the order its
+    orientation; $f \subseteq s$ is a face.
+  \item $\overline{X} = \{ f : f \subseteq s,\ s \in X \}$ is the closure of
+    a set of simplices, $\mathrm{St}(f) = \{ s \in \mathcal{M} : f
+    \subseteq s \}$ the star of $f$ (its cofaces and itself).
+  \item $\kappa(x)$ is the key of a point (\fn{hm\_morton\_key}),
+    $\mathrm{leaf}(x)$ the leaf $q \in \mathcal{L}$ whose key interval holds
+    $\kappa(x)$; $h(q)$ its cell size, $w(q) = m\,h(q)$ its width ($m$ cells
+    a block side); for a point $h(v) = h(\mathrm{leaf}(x_v))$.
+  \item $\mathcal{N}_L(q) = \{ q' \in \mathcal{L} : \overline{\Omega(q)}
+    \cap \overline{\Omega(q')} \ne \emptyset \}$, the leaves touching $q$
+    (by a face, an edge or a corner), $q$ among them;
+    $\mathcal{N}_L(S) = \bigcup_{q \in S} \mathcal{N}_L(q)$.
+  \item $B(s)$ is the bounding box of $s$'s points, $\varepsilon(s) =
+    \tfrac12 \max_{v \in s} h(v)$, and $B_\varepsilon(s) = \{ y :
+    \mathrm{dist}_\infty(y, B(s)) \le \varepsilon(s) \}$ the box grown by
+    the largest move of a step.
+  \item A superscript $n$ marks the step: $x^n_v$, $\rho^n$,
+    $\mathcal{M}^n_r$. The tree does not change within a step.
+\end{itemize}
+
+Assumptions, all checked by the code (\fn{-DEULERIAN\_LAGRANGIAN},
+\fn{manifold\_advect}, libb-amr):
+\begin{description}[leftmargin=2.6em, style=nextline]
+  \item[(A1)] every edge $(a, b)$ has $|x_a - x_b|_2 < \min(h(a), h(b))$;
+  \item[(A2)] a step moves a point by $|x^{n+1}_v - x^n_v|_\infty <
+    \tfrac12 \min\big(h^n(v), h^{n+1}(v)\big)$ (the CFL limit);
+  \item[(A3)] the tree is 2:1 balanced and $m \ge 8$ (libb-amr has $m \ge
+    16$).
+\end{description}
+
+\begin{table}[H]
+  \centering\small
+  \begin{tabular}{@{}l l l@{}}
+    \toprule
+    symbol & meaning & in the code \\
+    \midrule
+    $\mathcal{M}$, $\mathcal{M}^k$, $\mathcal{V}$ & the complex, its
+      $k$-simplices, its points & \fn{Hmesh}, levels \\
+    $\overline{X}$, $\mathrm{St}(f)$ & closure, star & faces, twin cycles \\
+    $\kappa$, $\mathrm{leaf}$ & a point's key, its leaf &
+      \fn{hm\_morton\_key}, \fn{leaf\_of} \\
+    $h$, $w$ & cell size, leaf width & \\
+    $\mathcal{N}_L(q)$ & the leaves touching $q$ & \fn{tree\_neighbours} \\
+    $B$, $\varepsilon$, $B_\varepsilon$ & bounding box, margin, grown box
+      & \\
+    $\rho(v)$, $\varrho(s)$ & owner of a point, of a simplex & \\
+    $\mathcal{O}_r$, $\mathcal{A}_r$, $\mathcal{M}_r$, $\mathcal{G}_r$ &
+      owned, reached, held, ghosts & \\
+    $g$, $\tau(s)$, $\iota_r$, $\gamma_r$ & global id, global tuple,
+      local id, the map $g \mapsto \iota_r$ & \\
+    $\Phi(s)$, $n_f$ & a simplex's field values, $|\mathrm{St}(f)| - 1$ &
+      \fn{hm\_val} \\
+    \bottomrule
+  \end{tabular}
+  \caption{The mesh's notation; the tree's is \cite{bamrpart}'s.}
+  \label{tab:part-notation}
+\end{table}
+
 \subsection{Owners}
 \label{sec:part-owner}
 
-\begin{definition}[owner]
-  A point is owned by the owner of the leaf it lies in. A $k$-simplex $s$,
-  $k \ge 1$, is owned by the smallest owner of its points:
-  $\mathrm{own}(s) = \min_{v \in s} \mathrm{own}(v)$.
+\begin{definition}[owners]
+  A point is owned as its leaf is: $\rho(v) = \rho(\mathrm{leaf}(x_v)) =
+  \max\{ r : K_r \le \kappa(x_v) \}$, a search in $K$, no message. A
+  simplex is owned by the smallest owner of its points:
+  \[
+    \varrho(s) = \min_{v \in s} \rho(v), \qquad \mathcal{O}_r =
+      \varrho^{-1}(r) \subseteq \mathcal{M},
+  \]
+  ($\varrho(v) = \rho(v)$ for a point). The $\mathcal{O}_r$ partition
+  $\mathcal{M}$.
 \end{definition}
 
-The rule needs no geometry and gives every process the same answer. Owning
-by the leaf of the centroid would make the cut zig-zag through the mesh:
-a simplex across the cut would fall on either side by where its centroid
-lands. With the smallest owner, every simplex across the cut goes to the
-lower rank, and the cut follows the points (figure~\ref{fig:part}).
-
 \begin{proposition}
-  A process owns at least one point of every simplex it owns; and a face
-  $f \subset s$ is owned by $\mathrm{own}(s)$ or a higher rank.
+  \label{prop:owner}
+  (a) For $s \in \mathcal{O}_r$ some $v \in s$ has $\rho(v) = r$. (b) For a
+  face $f \subseteq s$, $\varrho(f) \ge \varrho(s)$.
 \end{proposition}
 \begin{proof}
-  The minimum is attained at some point. A face has fewer points, so its
-  minimum is not smaller.
+  (a) The minimum is attained. (b) A minimum over fewer points is not
+  smaller.
 \end{proof}
 
-So a process may own a triangle and not one of its edges: a quantity on
-edges (a flux) is computed by the edge's owner. A simplex changes owner
-whenever one of its points does, so owners are made again after every
-move.
+The rule needs no geometry and gives every process the same answer. Owning
+by the leaf of the centroid would make the cut zig-zag through the mesh;
+with the smallest owner every simplex across the cut goes to the lower
+rank, and the cut follows the points (figure~\ref{fig:part}). By (b) a
+process may own a triangle and not one of its edges: a quantity on edges
+(a flux) is computed by the edge's owner. A simplex changes owner whenever
+one of its points does, so owners are made again after every move.
 
 \begin{figure}[H]
 \centering
@@ -858,118 +947,495 @@ move.
 \label{fig:part}
 \end{figure}
 
-\subsection{Ghosts}
+\subsection{Held sets}
 \label{sec:part-ghost}
 
-A process needs every simplex that may cut one of its leaves: the volume
-fractions of its cells need them all, the advection reads the mesh around
-its points, and twin cycles across the cut need both sides.
-
-\begin{definition}[ghosts]
-  The owner of a simplex $s$ sends it to the owner of every leaf that
-  touches (by a face, an edge or a corner) a leaf holding one of the points
-  of $s$ it owns, with the faces and points of $s$. What a process holds
-  and does not own are its ghosts.
-\end{definition}
-
-\begin{proposition}
-  With edges shorter than their cells and the tree 2:1 balanced, a process
-  receives every simplex that cuts a leaf it owns.
-\end{proposition}
+\begin{lemma}[band]
+  \label{lem:band}
+  For $q \in \mathcal{L}$, every $y$ with $\mathrm{dist}_\infty(y,
+  \Omega(q)) < w(q)/2$ lies in $\Omega(q')$ for some $q' \in
+  \mathcal{N}_L(q)$.
+\end{lemma}
 \begin{proof}
-  Let $s$ cut a leaf $L$ at a point $y$, and let $v$ be a point of $s$,
-  in a leaf $V$ with cells of size $h(V)$. The distance to $v$ is convex,
-  so on $s$ it is largest at a vertex of $s$: $|v - y|$ is at most the
-  longest edge at $v$, which is shorter than $h(V)$. The leaves touching
-  $V$ cover every point within $w(V)/2 = 8\,h(V)$ of $V$ (2:1 balance
-  makes each at least half as wide as $V$, and a block is 16 cells wide).
-  So $y$ lies in $V$ or in a leaf touching $V$: $L$ is $V$ or touches it.
-  Taking for $v$ the point of $s$ that $\mathrm{own}(s)$ owns, the owner
-  sends $s$ to $L$'s owner.
+  By (A3) a leaf touching $q$ is at least half as wide as $q$. The leaves
+  touching $q$ tile the region around $\Omega(q)$, each reaching out from it
+  by its own width, so they cover every point closer than $w(q)/2$.
 \end{proof}
 
-The rule is conservative: a process also gets some simplices that touch
-only its halo, and a few of their points may lie beyond its halo, in leaves
-its tree does not hold. The cache already counts such points as
-\fn{outside}; nothing reads their leaf, as ghosts are moved by their owners.
+\begin{lemma}[span]
+  \label{lem:span}
+  For $a, b$ points of one simplex: $|x_a - x_b|_\infty < \min(h(a),
+  h(b))$, $\mathrm{leaf}(x_a) \in \mathcal{N}_L(\mathrm{leaf}(x_b))$, and
+  $h(a) \le 2\,h(b)$.
+\end{lemma}
+\begin{proof}
+  Two points of a simplex are an edge of it: (A1), and $|\cdot|_\infty \le
+  |\cdot|_2$. As $h(b) < w(b)/2$ (A3), lemma~\ref{lem:band} puts $x_a$ in a
+  leaf touching $\mathrm{leaf}(x_b)$; touching leaves differ by a level at
+  most (A3).
+\end{proof}
 
-\textbf{Rebuilt, not patched.} libhmesh finds every face from point ids
-(\fn{hm\_add} through \fn{hm\_find} on the twin cycles), so only points
-need global ids: re-adding the top simplices by their points' local ids
-reconnects edges, triangles and twin cycles across the cut by itself. So
-after every advection the ghosts are dropped and made again from what the
-owners send.
+\begin{definition}[held sets]
+  \label{def:held}
+  Process $r$ is \emph{reached} by the simplices
+  \[
+    \mathcal{A}_r = \mathcal{O}_r \ \cup\ \{ s \in \mathcal{M} :
+      B_\varepsilon(s) \cap \Omega(q) \ne \emptyset \text{ for some } q
+      \in \mathcal{L}_r \},
+  \]
+  and \emph{holds} their closure $\mathcal{M}_r = \overline{\mathcal{A}_r}$:
+  with every simplex, its faces and points. Its ghosts are $\mathcal{G}_r =
+  \mathcal{M}_r \setminus \mathcal{O}_r$.
+\end{definition}
 
-\textbf{Cycles cut by the partition.} At the outer rim of the ghosts a twin
-cycle may be incomplete locally, and $\twin(h) = h$ would read as the
-manifold's own boundary. Each facet's owner holds all its cofaces (they all
-have the owner's point, so they are all sent to it), so it knows the
-facet's coface count $n_f$; ghosts carry it. A half with a local cycle
-shorter than $n_f$ is cut by the partition and marked, as halves on the box
-are (\fn{hm\_half\_on\_domain}); a true boundary has $n_f = 1$.
+The margin $\varepsilon$ is one step's largest move (A2): a simplex is
+held a step before it can come to matter. Every simplex that cuts an owned
+leaf is in $\mathcal{A}_r$ ($B_\varepsilon(s) \supseteq s$), so the
+volume fractions of owned cells, the advection around owned points and the
+twin cycles across the cut are all local.
+
+\begin{proposition}[locality]
+  \label{prop:local}
+  Every point held by $r$ lies in a leaf of $\mathcal{N}_L(\mathcal{L}_r)
+  \subseteq T_r \cup H_r$. So the owners of the points $r$ holds are $r$
+  and its peers $Q_r$.
+\end{proposition}
+\begin{proof}
+  A held point $v$ is a point of some $s \in \mathcal{A}_r$. If $s \in
+  \mathcal{O}_r$, some $u \in s$ has $\mathrm{leaf}(x_u) \in \mathcal{L}_r$
+  (proposition~\ref{prop:owner}a), and lemma~\ref{lem:span} puts $v$ in a
+  leaf touching it. Otherwise $y \in B_\varepsilon(s) \cap \Omega(q)$, $q
+  \in \mathcal{L}_r$. Let $a \in s$ have the largest $h$. The box has
+  sides shorter than $h(a)$ (lemma~\ref{lem:span}), so $|x_a -
+  y|_\infty < h(a) + \tfrac12 h(a)$, less than $w(a)/2$: $q$ touches
+  $\mathrm{leaf}(x_a)$ (lemma~\ref{lem:band}) and $h(a) \le 2 h(q)$. Then
+  $|x_v - y|_\infty < \tfrac32 h(a) \le 3 h(q) < w(q)/2$ ($m \ge 8$), and
+  $v$ lies in a leaf touching $q$. Last, a leaf touching a leaf $p$ is
+  $p$'s neighbour of the same level, the coarser leaf covering it, or a
+  child touching $p$: all in $N(p)$, so $\mathcal{N}_L(\mathcal{L}_r)
+  \subseteq N(T_r) \cup T_r = T_r \cup H_r$.
+\end{proof}
+
+So every message below goes between peers, point to point, as libb-amr's
+ghosts do, and every held point has its leaf in the local tree: no point
+is outside.
+
+\begin{proposition}[stars]
+  \label{prop:star}
+  If $\varrho(f) = r$ then $\mathrm{St}(f) \subseteq \mathcal{A}_r$: the
+  owner of a simplex holds all its cofaces.
+\end{proposition}
+\begin{proof}
+  Some $p \in f$ has $\rho(p) = r$, so $x_p \in \Omega(\mathrm{leaf}(x_p))$,
+  a leaf of $\mathcal{L}_r$. Every $s \supseteq f$ has $p$, so $x_p \in
+  B(s) \subseteq B_\varepsilon(s)$, and $s \in \mathcal{A}_r$.
+\end{proof}
+
+So the owner of $f$ decides alone, from what it holds, which processes hold
+$f$: $f \in \mathcal{M}_r \iff \mathrm{St}(f) \cap \mathcal{A}_r \ne
+\emptyset$, and for each coface $s$ it knows $\varrho(s)$ and the leaves
+near $s$ (proposition~\ref{prop:local}). It also knows $n_f =
+|\mathrm{St}(f)| - 1$, the number of cofaces: a half of a local simplex
+whose facet $f$ has fewer than $n_f$ cofaces held is cut by the partition,
+and is marked so (as halves on the box are, \fn{hm\_half\_on\_domain}); a
+true boundary has $n_f = 1$.
+
+\begin{proposition}[migration is a change of flag]
+  \label{prop:migrate}
+  If $\varrho^{n+1}(s) = q \ne \varrho^n(s)$, then $s \in \mathcal{M}^n_q$:
+  the new owner already holds $s$, connected.
+\end{proposition}
+\begin{proof}
+  Some $u \in s$ has $\rho^{n+1}(u) = q$: $x^{n+1}_u \in \Omega(q')$, $q'
+  \in \mathcal{L}_q$. By (A2) $|x^{n+1}_u - x^n_u|_\infty < \tfrac12
+  h^n(u) \le \varepsilon^n(s)$, and $x^n_u \in B^n(s)$, so $x^{n+1}_u \in
+  B^n_\varepsilon(s) \cap \Omega(q')$: $s \in \mathcal{A}^n_q$.
+\end{proof}
+
+\subsection{Identity}
+\label{sec:part-id}
+
+A point's identity is its global id, fixed for its life:
+\[
+  g(v) = (r_0 \ll S) \mid c, \qquad r_0 \text{ the process that made it},
+    \quad c \text{ its counter there},
+\]
+read back by a mask and a shift. The counter, not the point's slot: slots
+are reused after a removal, and a new point must not take the id of one
+that still exists as a ghost elsewhere. $S = 32$ allows $4 \cdot 10^9$
+points made by a process; $S = 44$ ($2^{20}$ processes) is the
+alternative, fixed at build time. A point keeps $g(v)$ when it changes
+owner; $g$ names the point, $\rho$ its owner.
+
+A simplex's identity across processes is the tuple of its points' ids, in
+its stored order:
+\[
+  \tau(s) = \big( g(v_0), \ldots, g(v_k) \big).
+\]
+On process $r$, $\iota_r(v)$ is a held point's local id and $\gamma_r =
+\iota_r \circ g^{-1}$ the map from global to local ids (a hash), updated as
+points come, go and are renumbered. A held simplex is $(\iota_r(v_0),
+\ldots, \iota_r(v_k))$, in the order of $\tau(s)$; its faces and twin
+cycles are libhmesh's, found from local point ids by \fn{hm\_add} and
+\fn{hm\_find}. Nothing else is global: no simplex has an id of its own.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.3\textwidth}
+    >{\raggedright}p{0.3\textwidth}X@{}}
+  \toprule
+  what & its identity & changes when \\
+  \midrule
+  a point $v$ & $g(v)$ & never \\
+  $v$ on process $r$ & $\iota_r(v)$ & $v$ comes to or leaves $r$;
+    compaction \\
+  a simplex, across processes & $\tau(s)$ & never, while it exists \\
+  a simplex on $r$ & its local id; faces, twins by \fn{hm\_add} &
+    it comes or leaves; compaction \\
+  owners $\rho(v)$, $\varrho(s)$ & from $K$ and the positions & every
+    step \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Points of a cell in O(1)}
+\label{sec:part-cell}
+
+Ghost reconnection, the volume fractions and the topology changes to come
+all ask ``which points are in this cell, or in the cells around it''. The
+cache answers it per leaf in $O(1)$ (\fn{start[q]}, \fn{stop[q]}), but for a
+cell, or for any key interval $[k_0, k_0 + 2^j)$, only by a binary search
+in the keys, $O(\log n)$: the points of a cell-aligned interval are one run
+of \fn{key[]} (sorted to the finest cells), but where the run starts must be
+searched.
+
+\textbf{One cache for owned and ghost points.} On a distributed tree,
+\fn{tree\_caches ()->leaves} holds every leaf the process has, owned and
+halo (\fn{owned} is the subset \fn{foreach} visits). So the cache is made
+over all local points: ghosts fall in their halo leaves with the same
+\fn{leaf\_of}, ranges and offsets as owned points, a neighbourhood is one
+lookup whichever side of the cut it is on, and owned or ghost is a flag on
+the point, not a second structure. Two caches would make every query near
+the cut search two lists, and lose the one order along the curve. Every
+held point lies in an owned or halo leaf
+(proposition~\ref{prop:local}), so none is \fn{outside}.
+
+\textbf{Cell offsets.} For each leaf $q$ that holds points, a table of
+$m^D + 1$ offsets indexed by the cell's Morton index $c$ inside the leaf's
+block:
+\[
+  \text{the points of cell } c = \fn{order}\big[\fn{start}[q] +
+    \mathrm{off}_q[c]\ \ldots\ \fn{start}[q] + \mathrm{off}_q[c + 1]\big).
+\]
+\begin{itemize}
+  \item The keys inside a leaf are sorted by cell already, so the counts come
+    from the leaf walk in one pass, no sort more.
+  \item $c$ from a key, for a leaf at level $\ell$: $c = \big(\mathrm{key}
+    \gg (D (b - \ell) - D \log_2 m)\big) \wedge (m^D - 1)$; from the cell's
+    local indices: $c = \mathrm{spread}(i) \mid \mathrm{spread}(j) \ll 1
+    \mid \mathrm{spread}(k) \ll 2$, bit operations.
+  \item Any Morton-aligned group of $2^{D j}$ cells inside a leaf is one
+    range too: $[\mathrm{off}_q[c_0], \mathrm{off}_q[c_0 + 2^{D j}])$.
+  \item Only occupied leaves have a table (\fn{slot\_of[q]}, or none): 257
+    offsets (1~KiB) a leaf in 2D, 4097 (16~KiB) in 3D, about 50 to 60
+    bytes a point for a surface crossing a $16^3$ block. If that weighs in
+    3D, a sparse table of the occupied cells alone (about $m^{D-1}$ a leaf)
+    with a small hash keeps $O(1)$.
+\end{itemize}
+
+\textbf{From a leaf's \fn{Index} to $q$.} \fn{tree\_neighbours} gives a
+neighbour's \fn{Index}, not its position $q$ in \fn{tree\_caches
+()->leaves}, and a node holds no such number (\fn{BAMRNode}: \fn{flags},
+\fn{pid}, \fn{s}). libb-amr's API stays as it is: libhmesh keeps a hash map
+from a leaf's key to $q$, made again when \fn{tree\_generation} changes,
+$O(1)$ a query (today \fn{hm\_tree\_locate} searches the leaves' keys,
+$O(\log n_{leaves})$).
+
+\textbf{Names.} \fn{Index} stays libb-amr's name for a node: libhmesh takes
+an \fn{Index} where it means a leaf. A cell inside a block stays its local
+\fn{ijk} in $[0, m)^D$, as \fn{block\_at} and \fn{foreach} have it; using
+\fn{Index} for cells too would make one type mean a block at one place and
+a cell at another.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.47\textwidth}X@{}}
+  \toprule
+  call (proposed) & what \\
+  \midrule
+  \fn{hm\_cell\_points (C, q, c, \&n)} & the points of cell $c$ of leaf $q$:
+    a pointer into \fn{C->order} and their number $n$, $O(1)$; $n = 0$ for
+    an empty cell or leaf \\
+  \fn{hm\_cells\_points (C, q, c0, j, \&n)} & the same for the $2^{D j}$
+    cells from $c_0$, Morton-aligned \\
+  \fn{hm\_cell\_index (ijk)} & a cell's Morton index in its block, from its
+    local indices \\
+  \fn{hm\_leaf\_of\_index (M, p)} & a leaf's $q$ from its \fn{Index}, $O(1)$;
+    \fn{HM\_NONE} if not a local leaf \\
+  \fn{hm\_foreach\_cell\_point (C, q, c, v)} & a loop over the points of a
+    cell \\
+  \bottomrule
+\end{tabularx}
+\end{center}
 
 \begin{algorithm}[H]
-  \caption{\textsc{GhostRebuild}, on every process}
-  \label{alg:ghost}
+  \caption{The points around a cell, $O(1)$ a cell}
+  \label{alg:nbhd}
   \begin{algorithmic}[1]
-    \State drop every ghost simplex, then every ghost point no simplex uses
-    \For{each owned simplex $s$ (top level), each owned point $v \in s$}
-      \For{each leaf $L$ touching $\mathrm{leaf}(v)$ (\fn{tree\_neighbours},
-        corners included)}
-        \State add $s$ to the message for $\mathrm{pid}(L)$ if not me (once)
-      \EndFor
+    \Require a cell: leaf $q$ (with \fn{Index} $p$), local indices
+      $\mathbf{i}$
+    \For{each offset $\mathbf{d} \in \{-1, 0, 1\}^D$}
+      \If{$\mathbf{i} + \mathbf{d}$ inside the block}
+        \State $(q', \mathbf{i}') \gets (q, \mathbf{i} + \mathbf{d})$
+      \Else \Comment{the block's rim}
+        \State $p' \gets$ the leaf that way (\fn{tree\_neighbours}: the
+          neighbour, the coarse leaf covering it, or, if finer, the child
+          holding that region);\quad $q' \gets$
+          \fn{hm\_leaf\_of\_index}$(p')$
+        \State $\mathbf{i}' \gets$ the cell of $p'$ there: as large, or
+          twice as large (a coarser neighbour), or the $2^D$ cells half as
+          large covering it (a finer one: $j = 1$ below), 2:1
+      \EndIf
+      \State \fn{hm\_cells\_points}$(C, q', \fn{hm\_cell\_index}(\mathbf{i}'),
+        j, \&n)$, $j = 1$ for a finer neighbour, else 0 \Comment{owned
+        and ghost alike}
     \EndFor
-    \State send to the peers: for each simplex its points' global ids,
-      coordinates and fields, its fields, its facets' $n_f$
-    \For{each simplex received}
-      \State each point: its local id by its global id (a sorted list or a
-        hash), added if new
-      \State \fn{hm\_add}$(s)$ by local point ids \Comment{faces and twins
-        found or made}
-    \EndFor
-    \State mark the halves with a local cycle shorter than $n_f$;\quad
-      compact (owned first);\quad rebuild the cache
   \end{algorithmic}
 \end{algorithm}
 
-\subsection{Global ids}
-\label{sec:part-id}
-
-$\mathrm{gid}(v) = (r \ll S) \mid c$, with $r$ the process that made the
-point and $c$ its counter, read back by a mask and a shift. The counter,
-not the point's slot: slots are reused after a removal, and a new point
-must not take the id of one that still exists as a ghost elsewhere. A point
-keeps its id when it moves to another process; the id names the point, its
-position gives its owner. $S = 32$ gives $4 \cdot 10^9$ points made by a
-process; with remeshing over long runs, $S = 44$ ($2^{20}$ processes) is
-the alternative, fixed at build time.
-
 \subsection{One step}
+\label{sec:part-step}
+
+Before the step every process $r$ holds $\mathcal{M}^n_r$
+(definition~\ref{def:held}), with the owners' field values. Fields are
+written by owners; ghosts get copies. $\Phi(s)$ is a simplex's field
+values, and for a point its position too.
 
 \begin{algorithm}[H]
-  \caption{\textsc{Step}$(dt)$, under MPI}
+  \caption{\textsc{Step}$(dt)$ on process $me$}
   \label{alg:part-step}
   \begin{algorithmic}[1]
     \State \fn{ghosts\_update} of the face velocity \Comment{libb-amr}
-    \State move the owned points (\fn{manifold\_advect}'s rule, CFL 0.5)
-    \State refused $\gets \textsc{Allreduce}_{\max}$(refused here)
-      \Comment{all move, or none}
-    \If{refused} \Return \EndIf
-    \State send the new positions of owned points that are ghosts elsewhere
-    \State owners of every local point from $K$ and its key;\quad of every
-      simplex by the min rule
-    \State send simplices (with their points and fields) whose owner is now
-      another process \Comment{migration}
-    \State \textsc{GhostRebuild}
-    \State update $c$ in the owned cells near the interface
-      \Comment{all the simplices cutting them are local}
-    \State long edges $\gets \textsc{Allreduce}_{+}$(local count)
+    \Statex \textbf{S1} \emph{move}
+    \State $x^{n+1}_v$ for $v \in \mathcal{V} \cap \mathcal{O}^n_{me}$
+      (\fn{manifold\_advect}'s rule)
+    \State refused $\gets \textsc{Allreduce}_{\max}$(a point here breaks
+      (A2));\quad \textbf{if} refused \textbf{return} \Comment{all move,
+      or none}
+    \Statex \textbf{S2} \emph{points}
+    \For{$r \in Q_{me}$}
+      \State send $P_{me \to r} = \{ (g(v), x^{n+1}_v, \rho^{n+1}(v)) :
+        \rho^n(v) = me,\ \mathrm{leaf}(x^n_v) \in \mathcal{N}_L(\mathcal{L}_r)
+        \}$
+    \EndFor
+    \State for each $(g, x, \rho)$ received with $g \in \gamma_{me}$: update
+      that point;\quad ignore the others \Comment{positions copied exactly}
+    \Statex \textbf{S3} \emph{owners}
+    \State $\varrho^{n+1}(s) = \min_{v \in s} \rho^{n+1}(v)$ for $s \in
+      \mathcal{M}^n_{me}$ \Comment{local}
+    \Statex \textbf{S4} \emph{migration}
+    \For{$s \in X_{me \to q} = \{ s : \varrho^n(s) = me,\ \varrho^{n+1}(s) =
+      q \ne me \}$}
+      \State send $(\tau(s), \Phi(s))$ to $q$ \Comment{$q$ holds $s$ already
+        (proposition~\ref{prop:migrate})}
+    \EndFor
+    \State receive: set $\Phi$; on every process only the owned flags change
+    \Statex \textbf{S5} \emph{refresh}
+    \For{$s \in \mathcal{O}^{n+1}_{me}$, all levels, and $r \ne me$ with $s
+      \in \mathcal{M}^{n+1}_r$} \Comment{decided by $me$
+      (proposition~\ref{prop:star})}
+      \State send $(k, \tau(s), \Phi(s), n_f)$ to $r$
+    \EndFor
+    \State receive from all peers;\quad then for $k = 0, 1, \ldots, m$:
+    \State \quad $k = 0$: $\iota \gets \gamma_{me}(g)$, or
+      \fn{hm\_vertex\_add} and insert into $\gamma_{me}$;\quad $k \ge 1$:
+      \fn{hm\_find}, or \fn{hm\_add} by $\gamma_{me}(\tau(s))$
+    \State \quad set $\Phi(s)$;\quad stamp $s$ seen
+    \For{$k = m, \ldots, 0$} \Comment{the sweep}
+      \State \fn{hm\_remove} every held $s \notin \mathcal{O}^{n+1}_{me}$
+        not seen;\quad points: also from $\gamma_{me}$
+    \EndFor
+    \Statex \textbf{S6} \emph{finish}
+    \State mark the halves cut by the partition ($n_f$);\quad compact, owned
+      first ($\gamma_{me}$ remapped);\quad rebuild the cache
+    \State update $c$ in the owned cells near the interface;\quad long
+      edges $\gets \textsc{Allreduce}_{+}$(local count)
   \end{algorithmic}
 \end{algorithm}
 
-The CFL limit (half a cell a step) keeps every point within its old leaf
-or one touching it, so within the process's owned and halo leaves, and its
-owner is always found from $K$ (\fn{tree\_partition\_owner}).
+\begin{proposition}[the step keeps the invariant]
+  \label{prop:step}
+  If before the step every $r$ holds $\mathcal{M}^n_r$, each held simplex
+  in the order of $\tau(s)$ with its owner's $\Phi(s)$, and (A1)--(A3)
+  hold, then after it every $r$ holds $\mathcal{M}^{n+1}_r$, in the same
+  sense.
+\end{proposition}
+\begin{proof}
+  \emph{S2 reaches every held point.} A point $v$ held by $me$ and owned by
+  $o \ne me$ has $\mathrm{leaf}(x^n_v) \in \mathcal{N}_L(\mathcal{L}_{me})$
+  (proposition~\ref{prop:local}), so $v \in P_{o \to me}$, and $o \in
+  Q_{me}$. So S3 knows $\varrho^{n+1}$ on all of $\mathcal{M}^n_{me}$.
+
+  \emph{Nothing needed is missing.} Let $s \in \mathcal{M}^{n+1}_r$. If
+  $\varrho^{n+1}(s) = r$, then $r$ held $s$ already, as its owner before or
+  by proposition~\ref{prop:migrate}, and the sweep keeps what $r$ owns.
+  Otherwise its owner sends it in S5 (proposition~\ref{prop:star}), $r$
+  adds it if new, stamps it, and the sweep keeps it.
+
+  \emph{Nothing more is held.} A held $s$ that is neither owned nor sent
+  is not in $\mathcal{M}^{n+1}_r$, and the sweep removes it. The removal
+  succeeds: a coface of $s$ still held would be in $\mathcal{M}^{n+1}_r$,
+  then $s$ too (a closure), and its owner would have sent it.
+
+  \emph{Orientation and fields.} S5 goes up the levels, so a new face is
+  made from its own $\tau$ before its cofaces look it up: every simplex has
+  its owner's orientation, and \fn{hm\_add} gives the halves their signs
+  from it. Kept simplices were made the same way. Fields come from owners
+  in S4 and S5.
+\end{proof}
+
+The connections are never cut: simplices kept keep their local ids, faces
+and twin cycles; new ones attach through \fn{hm\_add}, which finds the
+faces already there from local point ids; departures leave from the top
+level down. Most of the ghosts stay from one step to the next, and S5
+refreshes them.
+
+\textbf{Messages.} S2, S4 and S5 go to peers only
+(proposition~\ref{prop:local}), point to point; their size is the band of
+simplices near the cut, not the mesh. Positions travel as exact copies of
+the doubles, so that every process computes the same owners and the same
+boxes on both sides of the cut.
+
+\textbf{When the tree changes} (adaptation, repartition), the points stand
+still and the held sets follow the tree: section~\ref{sec:part-tree}.
+
+\subsection{When the tree changes}
+\label{sec:part-tree}
+
+The tree changes between steps, by adaptation (\fn{adapt\_wavelet}) or by
+repartition (\fn{tree\_mpi\_repartition}); the points stand still. Two
+rules keep the mesh simple through it.
+
+\begin{description}[leftmargin=2.6em, style=nextline]
+  \item[(A4)] \emph{The interface at the finest level}: every leaf a
+    simplex cuts, and every leaf holding a point, is at the tree's deepest
+    level. \fn{adapt\_wavelet}'s criterion keeps it (a refinement flag on
+    the cut cells); checked after each adaptation. So $h$ never changes
+    under the mesh.
+  \item[(E)] \emph{Edges of the order of the cell}: $0.56\,h \le |x_a -
+    x_b|_2 \le 0.93\,h$, the band of the remeshing loop
+    (algorithm~\ref{alg:remesh}) with target $L = 0.7\,h$ (split above
+    $\tfrac43 L$, collapse below $\tfrac45 L$). Edges much shorter than
+    the cells only multiply the simplices, and the cost of the volume
+    fractions with them; the upper end keeps (A1). Kept by split and
+    collapse, the next stage; until then the meshes from
+    \fn{hm\_tree\_from\_function} have edges below $0.71\,h$ (2D) and
+    $0.87\,h$ (3D).
+\end{description}
+
+\subsubsection{Adaptation}
+
+libb-amr's adaptation keeps $K$ \cite{bamrpart}: a leaf divided or merged
+keeps its key interval's owner, so each process covers the same region,
+$\bigcup_{q \in \mathcal{L}_r} \Omega(q)$, and by (A4) no leaf under the
+mesh changes. So $\rho$, $\varrho$, $\varepsilon$ and the held sets
+$\mathcal{M}_r$ do not change: nothing moves; only the cache is made again
+(the leaves' indices changed).
+
+\subsubsection{Repartition}
+
+A repartition replaces $K$ by $K'$ and moves whole nodes: a leaf $L$ goes
+from $\rho(L)$ to $\rho'(L)$, the tree's migration $X_{\rho(L) \to
+\rho'(L)}$ \cite{bamrpart}. The points stand still, so every holder knows
+their new owners at once:
+\[
+  \rho'(v) = \max\{ r : K'_r \le \kappa(x_v) \}, \qquad
+  \varrho'(s) = \min_{v \in s} \rho'(v).
+\]
+Proposition~\ref{prop:migrate} does not hold here (no move bounds where
+the new owner is), so simplices travel, and they travel with the tree's
+leaves.
+
+\begin{definition}[carrier]
+  \label{def:carrier}
+  The carrier of a simplex $s$ is its first point, in the order of
+  $\tau(s)$, owned by the new owner: $u^*(s) = $ the first $v \in s$ with
+  $\rho'(v) = \varrho'(s)$. Its sender is $o(s) = \rho(u^*)$, the old
+  owner of the carrier's leaf.
+\end{definition}
+
+\begin{proposition}[simplices ride with the leaves]
+  \label{prop:carrier}
+  Let $L = \mathrm{leaf}(x_{u^*})$, $q = \varrho'(s)$, $o = o(s)$. Then (a)
+  $\rho'(L) = q$ and $\rho(L) = o$; (b) if $o \ne q$, $L$ moves from $o$
+  to $q$ in the tree's migration, so $(o, q)$ is one of the tree's pairs;
+  (c) $o$ holds $s$, with its current fields; (d) if $o = q$, $q$ holds
+  $s$ already.
+\end{proposition}
+\begin{proof}
+  (a) A point is owned as its leaf (the leaf's key interval holds its
+  key), and $\rho'(u^*) = q$ by definition. (b) Then $L \in X_{o \to q}$.
+  (c) $x_{u^*} \in \Omega(L)$ with $L \in \mathcal{L}_o$, and $x_{u^*} \in
+  B(s) \subseteq B_\varepsilon(s)$: $s \in \mathcal{A}_o$. Its fields are
+  those of the last refresh, and nothing was computed since. (d) The same
+  with $q$.
+\end{proof}
+
+\begin{algorithm}[H]
+  \caption{\textsc{Repartition}: the mesh after \fn{tree\_mpi\_repartition}}
+  \label{alg:part-repart}
+  \begin{algorithmic}[1]
+    \Require the tree's nodes moved, $K'$ known, the peers $Q'_r$ made
+    \Statex \textbf{R1} \emph{owners}
+    \State $\rho'(v)$ for every held point, $\varrho'(s)$ for every held
+      simplex \Comment{local, no message}
+    \Statex \textbf{R2} \emph{migration, along the tree's pairs}
+    \For{each held $s$ with $o(s) = me$ and $q = \varrho'(s) \ne me$}
+      \State send $s$ with its closure, $(k, \tau, \Phi)$ for $s$ and every
+        face and point, to $q$ \Comment{proposition~\ref{prop:carrier}}
+    \EndFor
+    \State receive; insert going up the levels: $\gamma$ or
+      \fn{hm\_vertex\_add}, then \fn{hm\_find} or \fn{hm\_add} from $\tau$
+    \Statex \textbf{R3} \emph{the stars}
+    \For{each maximal $s$ (a face of nothing) with $\varrho'(s) = me$, each
+      $r \ne me$ with $B_\varepsilon(s) \cap \Omega(q) \ne \emptyset$ for
+      some $q \in \mathcal{L}'_r$}
+      \State send $s$ with its closure to $r$ \Comment{decided by the box
+        alone}
+    \EndFor
+    \State receive; insert going up the levels
+    \Statex \textbf{R4} \emph{refresh}
+    \State S5 and S6 of algorithm~\ref{alg:part-step}, on the new tree: the
+      fields from their owners, $n_f$, the sweep, the cache
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{proposition}
+  \label{prop:repart}
+  If every $r$ held $\mathcal{M}_r$ before the repartition, then after
+  R1--R4 every $r$ holds $\mathcal{M}'_r$ (definition~\ref{def:held} under
+  $K'$), with the owners' orientations and fields.
+\end{proposition}
+\begin{proof}
+  \emph{Owned.} $s$ with $\varrho'(s) = r$ is held by $r$ before (if $o(s)
+  = r$) or received in R2 (proposition~\ref{prop:carrier}).
+
+  \emph{Stars before R4.} S5 needs every owner to hold the stars of its
+  simplices (proposition~\ref{prop:star}). A coface $s' \supseteq f$ of a
+  simplex $f$ owned by $r$ is in $\mathcal{A}'_r$, so it lies in the
+  closure of a maximal $\hat s \supseteq s'$ in $\mathcal{A}'_r$ (a larger
+  simplex has a larger box). $\hat s$ is owned by $r$, and held since R2,
+  or reaches $r$ by the box and arrives in R3. So after R3 every owner
+  holds its stars.
+
+  \emph{R4.} Then S5 and its sweep make the held sets $\mathcal{M}'_r$
+  exactly, as in proposition~\ref{prop:step}. Orientations: every
+  insertion goes up the levels from $\tau$, faces before cofaces.
+\end{proof}
+
+R2 goes along the tree's own migration pairs, R3 and R4 between the new
+peers: no other message. A simplex sent twice (as a face in two closures)
+is found by \fn{hm\_find} and kept once.
 
 \subsection{Volume fractions from scratch}
 
@@ -1017,9 +1483,10 @@ are.
     Morton order) \\
   connectivity & the simplices as sorted lists of global point ids,
     compared as sets; counts, Euler characteristic \\
-  owners, ghosts & every simplex owned once over all processes; every
-    simplex cutting an owned leaf present (brute force); cycles complete
-    or marked \\
+  owners, held sets & every simplex owned once over all processes;
+    $\mathcal{M}_r$ equal to definition~\ref{def:held} computed from the
+    gathered mesh; orientations those of $\tau$; fields the owners';
+    cycles complete or marked \\
   $c$ in every cell & to about $10^{-15}$: sums of pieces in another
     order \\
   \bottomrule
@@ -1522,6 +1989,10 @@ ghosts.
 
 \subsection*{Topology changes}
 \begin{itemize}
+  \item split and collapse to edges of the order of the cell ($L = 0.7\,h$),
+    on one process, then in batches under MPI
+  \item the interface at any level of the tree: remeshing after each
+    adaptation (lifting (A4))
   \item edge split
   \item edge collapse
   \item edge flip
@@ -1570,6 +2041,9 @@ ghosts.
 
 % ======================================================================
 \begin{thebibliography}{99}
+\bibitem{bamrpart} libb-amr notes, Partitioning a distributed block-AMR
+  tree: the methods compared, in pictures, \fn{libb-amr/doc/partition/}
+  \fn{partition-methods.tex}, 2026.
 \bibitem{front2vof} J.~Pan et al., Exact computation of the color function
   for triangular element interfaces, Int.\ J.\ Numer.\ Meth.\ Fluids 98,
   1181--1194, 2026.
