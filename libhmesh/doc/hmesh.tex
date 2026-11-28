@@ -12,7 +12,7 @@
 \usepackage{tabularx}
 \usepackage{xcolor}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta, calc, decorations.markings}
+\usetikzlibrary{arrows.meta, calc, decorations.markings, angles, quotes}
 \usepackage{float}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
@@ -49,7 +49,7 @@
 \title{libhmesh\\[2pt]
   \large a simplicial manifold in a block-AMR tree}
 \author{libhmesh notes}
-\date{27 November 2026}
+\date{28 November 2026}
 
 \begin{document}
 \maketitle
@@ -375,7 +375,10 @@ centroid is in and the cells next to it. Built with
 \fn{hm\_add} refuses a simplex with an edge that does not fit, before it
 makes anything; \fn{hm\_vertex\_move} refuses a move that stretches an edge;
 \fn{hm\_check} fails on such an edge; \fn{hm\_long\_edges} counts them, after
-a refinement shrinks the cells or a clip.
+a refinement shrinks the cells or a clip. The partitioned design measures
+edges against the finest cell, $h_{\min}$, whatever the leaf
+(section~\ref{sec:part-tree}); \fn{hm\_set\_cell\_size} with a function
+returning $h_{\min}$ gives that check today, with no lookup in the tree.
 
 % ======================================================================
 \section{Volume fractions}
@@ -779,19 +782,31 @@ otherwise.
     of those whose box grown by one step's move meets an owned leaf
     (section~\ref{sec:part-ghost}); kept from step to step, refreshed
     by the owners \\
-  identity & global ids on points only, $g(v) = (r_0 \ll S) \mid c$
+  identity & global ids on points only, $g(v) = (r_0 \ll 44) \mid c$
     from a per-process counter; a simplex is its tuple $\tau(s)$ of point
     ids (section~\ref{sec:part-id}) \\
   migration & every step, after advection: a change of the owned flag
     (the new owner holds the simplex already) and the field values;
     never deferred to the tree's repartition (section~\ref{sec:part-step})
     \\
-  the tree changes & adaptation: nothing moves (the interface at the
-    finest level, (A4)); repartition: simplices ride with their carrier
-    point's leaf along the tree's migration pairs
+  the tree changes & adaptation: no point moves, no simplex is split or
+    merged, one refresh (the edges are measured against $h_{\min}$, so the
+    leaves under the mesh may be of any level); repartition: simplices
+    ride with their carrier point's leaf along the tree's migration pairs
     (section~\ref{sec:part-tree}) \\
-  edge length & of the order of the cell, $0.56\,h$ to $0.93\,h$ ((E):
-    split and collapse, the next stage) \\
+  edge length & against $h_{\min}$, the cell at the tree's maximum depth,
+    whatever the leaf: at most $0.93\,h_{\min}$, enforced by split;
+    $0.56\,h_{\min}$ a target of collapse, not a bound ((E): split and
+    collapse, the next stage) \\
+  (A1) when & checked after remeshing, not on each move; between them
+    edges below $2\min(h(a), h(b))$ ((A1$'$), checked with (A2) in S1),
+    which the proofs allow with $m \ge 16$ \\
+  remeshing & in rounds of independent operations: winners by length,
+    ties by $\tau$; the same on any number of processes
+    (section~\ref{sec:part-remesh}) \\
+  remeshing across the cut & decided by the edge's owner, applied by every
+    holder; a collapse only when the owner holds both points' stars whole,
+    else it waits \\
   load balance & libb-amr's alone (tuned later if needed) \\
   storage & contiguous arrays, owned simplices first, ghosts after \\
   the cache & one, over owned and ghost points; the points of a cell in
@@ -846,11 +861,22 @@ For the mesh:
 Assumptions, all checked by the code (\fn{-DEULERIAN\_LAGRANGIAN},
 \fn{manifold\_advect}, libb-amr):
 \begin{description}[leftmargin=2.6em, style=nextline]
-  \item[(A1)] every edge $(a, b)$ has $|x_a - x_b|_2 < \min(h(a), h(b))$;
+  \item[(A1)] every edge $(a, b)$ has $|x_a - x_b|_2 < h_{\min}$, the cell
+    size at the tree's maximum depth (so $< \min(h(a), h(b))$, whatever
+    the leaves), at the start of a step: checked after remeshing
+    (\fn{hm\_check}), not on each move. Advection stretches edges, and the
+    splits that follow restore it ((E), section~\ref{sec:part-tree});
+  \item[(A1$'$)] between the move and the remeshing, every edge has $|x_a
+    - x_b|_\infty < 2 \min(h(a), h(b))$: checked in S1 with (A2), the
+    step refused as a whole if an edge breaks it. With a time step set by
+    the finest cells (no subcycling) it always holds: each end moves by
+    less than $\tfrac12 h_{\min}$, and $0.93 + 1 < 2$. With moves of half
+    a coarser cell it holds unless an edge spans a level jump and
+    stretches by most of a coarse cell;
   \item[(A2)] a step moves a point by $|x^{n+1}_v - x^n_v|_\infty <
     \tfrac12 \min\big(h^n(v), h^{n+1}(v)\big)$ (the CFL limit);
-  \item[(A3)] the tree is 2:1 balanced and $m \ge 8$ (libb-amr has $m \ge
-    16$).
+  \item[(A3)] the tree is 2:1 balanced and $m \ge 16$ (libb-amr's
+    smallest block).
 \end{description}
 
 \begin{table}[H]
@@ -964,13 +990,13 @@ one of its points does, so owners are made again after every move.
 
 \begin{lemma}[span]
   \label{lem:span}
-  For $a, b$ points of one simplex: $|x_a - x_b|_\infty < \min(h(a),
+  For $a, b$ points of one simplex: $|x_a - x_b|_\infty < 2\min(h(a),
   h(b))$, $\mathrm{leaf}(x_a) \in \mathcal{N}_L(\mathrm{leaf}(x_b))$, and
   $h(a) \le 2\,h(b)$.
 \end{lemma}
 \begin{proof}
-  Two points of a simplex are an edge of it: (A1), and $|\cdot|_\infty \le
-  |\cdot|_2$. As $h(b) < w(b)/2$ (A3), lemma~\ref{lem:band} puts $x_a$ in a
+  Two points of a simplex are an edge of it: (A1$'$), which (A1) implies
+  ($|\cdot|_\infty \le |\cdot|_2$). As $2h(b) < w(b)/2$ (A3), lemma~\ref{lem:band} puts $x_a$ in a
   leaf touching $\mathrm{leaf}(x_b)$; touching leaves differ by a level at
   most (A3).
 \end{proof}
@@ -1006,10 +1032,10 @@ twin cycles across the cut are all local.
   (proposition~\ref{prop:owner}a), and lemma~\ref{lem:span} puts $v$ in a
   leaf touching it. Otherwise $y \in B_\varepsilon(s) \cap \Omega(q)$, $q
   \in \mathcal{L}_r$. Let $a \in s$ have the largest $h$. The box has
-  sides shorter than $h(a)$ (lemma~\ref{lem:span}), so $|x_a -
-  y|_\infty < h(a) + \tfrac12 h(a)$, less than $w(a)/2$: $q$ touches
+  sides shorter than $2h(a)$ (lemma~\ref{lem:span}), so $|x_a -
+  y|_\infty < 2h(a) + \tfrac12 h(a)$, less than $w(a)/2$: $q$ touches
   $\mathrm{leaf}(x_a)$ (lemma~\ref{lem:band}) and $h(a) \le 2 h(q)$. Then
-  $|x_v - y|_\infty < \tfrac32 h(a) \le 3 h(q) < w(q)/2$ ($m \ge 8$), and
+  $|x_v - y|_\infty < \tfrac52 h(a) \le 5 h(q) < w(q)/2$ ($m \ge 16$), and
   $v$ lies in a leaf touching $q$. Last, a leaf touching a leaf $p$ is
   $p$'s neighbour of the same level, the coarser leaf covering it, or a
   child touching $p$: all in $N(p)$, so $\mathcal{N}_L(\mathcal{L}_r)
@@ -1062,10 +1088,13 @@ A point's identity is its global id, fixed for its life:
 \]
 read back by a mask and a shift. The counter, not the point's slot: slots
 are reused after a removal, and a new point must not take the id of one
-that still exists as a ghost elsewhere. $S = 32$ allows $4 \cdot 10^9$
-points made by a process; $S = 44$ ($2^{20}$ processes) is the
-alternative, fixed at build time. A point keeps $g(v)$ when it changes
-owner; $g$ names the point, $\rho$ its owner.
+that still exists as a ghost elsewhere. $S = 44$: up to $2^{20}$
+processes, and $2^{44} \approx 1.8 \cdot 10^{13}$ points made by each.
+Counters only grow, as every split takes a new id: with $S = 32$, $10^5$
+splits a step on one process would use up its counter in about $4 \cdot
+10^4$ steps; with $S = 44$ in about $10^8$. Renumbering (at a restart)
+is left for when it is needed. A point keeps $g(v)$ when it changes owner;
+$g$ names the point, $\rho$ its owner.
 
 A simplex's identity across processes is the tuple of its points' ids, in
 its stored order:
@@ -1220,8 +1249,8 @@ values, and for a point its position too.
     \State $x^{n+1}_v$ for $v \in \mathcal{V} \cap \mathcal{O}^n_{me}$
       (\fn{manifold\_advect}'s rule)
     \State refused $\gets \textsc{Allreduce}_{\max}$(a point here breaks
-      (A2));\quad \textbf{if} refused \textbf{return} \Comment{all move,
-      or none}
+      (A2), or an edge (A1$'$));\quad \textbf{if} refused \textbf{return}
+      \Comment{all move, or none}
     \Statex \textbf{S2} \emph{points}
     \For{$r \in Q_{me}$}
       \State send $P_{me \to r} = \{ (g(v), x^{n+1}_v, \rho^{n+1}(v)) :
@@ -1260,14 +1289,17 @@ values, and for a point its position too.
       first ($\gamma_{me}$ remapped);\quad rebuild the cache
     \State update $c$ in the owned cells near the interface;\quad long
       edges $\gets \textsc{Allreduce}_{+}$(local count)
+    \Statex \textbf{S7} \emph{remesh} (the next stage)
+    \State \textsc{Remesh} (algorithm~\ref{alg:part-remesh}): splits in
+      rounds until no edge is long, then collapses: (A1) again
   \end{algorithmic}
 \end{algorithm}
 
 \begin{proposition}[the step keeps the invariant]
   \label{prop:step}
   If before the step every $r$ holds $\mathcal{M}^n_r$, each held simplex
-  in the order of $\tau(s)$ with its owner's $\Phi(s)$, and (A1)--(A3)
-  hold, then after it every $r$ holds $\mathcal{M}^{n+1}_r$, in the same
+  in the order of $\tau(s)$ with its owner's $\Phi(s)$, and (A1), (A2),
+  (A3) hold, then after it every $r$ holds $\mathcal{M}^{n+1}_r$, in the same
   sense.
 \end{proposition}
 \begin{proof}
@@ -1313,34 +1345,91 @@ still and the held sets follow the tree: section~\ref{sec:part-tree}.
 \label{sec:part-tree}
 
 The tree changes between steps, by adaptation (\fn{adapt\_wavelet}) or by
-repartition (\fn{tree\_mpi\_repartition}); the points stand still. Two
-rules keep the mesh simple through it.
+repartition (\fn{tree\_mpi\_repartition}); the points stand still. One
+rule keeps the mesh simple through it: the edges are measured against
+$h_{\min}$, the cell at the tree's maximum depth, not against the leaf
+they are in. The leaves under the mesh may be of any level, adaptation
+may coarsen them, and no edge ever has to be split or merged because the
+tree changed.
 
 \begin{description}[leftmargin=2.6em, style=nextline]
-  \item[(A4)] \emph{The interface at the finest level}: every leaf a
-    simplex cuts, and every leaf holding a point, is at the tree's deepest
-    level. \fn{adapt\_wavelet}'s criterion keeps it (a refinement flag on
-    the cut cells); checked after each adaptation. So $h$ never changes
-    under the mesh.
-  \item[(E)] \emph{Edges of the order of the cell}: $0.56\,h \le |x_a -
-    x_b|_2 \le 0.93\,h$, the band of the remeshing loop
-    (algorithm~\ref{alg:remesh}) with target $L = 0.7\,h$ (split above
-    $\tfrac43 L$, collapse below $\tfrac45 L$). Edges much shorter than
-    the cells only multiply the simplices, and the cost of the volume
-    fractions with them; the upper end keeps (A1). Kept by split and
-    collapse, the next stage; until then the meshes from
-    \fn{hm\_tree\_from\_function} have edges below $0.71\,h$ (2D) and
-    $0.87\,h$ (3D).
+  \item[(E)] \emph{Edges of the order of the finest cell}, with target $L
+    = 0.7\,h_{\min}$ (algorithm~\ref{alg:remesh}: split above $\tfrac43
+    L$, collapse below $\tfrac45 L$). The two ends are not alike:
+    \begin{itemize}
+      \item \emph{the upper end is a bound}: $|x_a - x_b|_2 \le
+        \tfrac43 L \approx 0.93\,h_{\min}$ after every remeshing. A split can
+        always be made, and it makes no edge longer than the longest of
+        its triangle's (a median is at most the longer of the two sides
+        beside it), so splitting the longest edge first ends with every
+        edge in the bound. The Eulerian-Lagrangian scheme needs it: the
+        two meshes resolve the interface alike, and it keeps (A1);
+      \item \emph{the lower end is a target}: $\tfrac45 L \approx
+        0.56\,h_{\min}$. A collapse can be refused: the link condition, a
+        triangle that would turn over, a new edge above the upper bound,
+        a point on a junction, a boundary or a feature. Short edges are
+        then left as they are; edges much shorter than the cells only
+        multiply the simplices, and the cost of the volume fractions with
+        them, so collapse removes as many as it may. Nothing in the
+        design relies on a lower bound: not the held sets (they need
+        (A1)), not the points of a cell (offsets, any number of points).
+    \end{itemize}
+    The operations are made in rounds of independent ones
+    (section~\ref{sec:part-remesh}). Under MPI an operation is decided by
+    the owner of its edge, $\varrho(e)$. A split needs only the simplices
+    on $e$, which the owner holds (proposition~\ref{prop:star}). A
+    collapse needs the stars of both points (the link condition, the
+    triangles that turn); the owner makes it a candidate only if it holds
+    them whole, every twin cycle at $a$ and $b$ complete (none marked cut
+    by the partition, $n_f$). Otherwise the collapse waits: the points move
+    and the owners change, and a later step, or the other process, makes
+    it. Between the move and the
+    remeshing (A1) does not hold, (A1$'$) does, and the volume fractions
+    do not need (A1): \fn{hm\_vof} bins an element to every leaf its box
+    meets, whatever its size.
+    Kept by split and collapse, the next stage; until then the meshes from
+    \fn{hm\_tree\_from\_function} (a lattice of half the finest cell)
+    have edges below $0.71\,h_{\min}$ (2D) and $0.87\,h_{\min}$ (3D), and
+    some far shorter.
 \end{description}
+
+\textbf{Why $h_{\min}$, not the leaf's $h$.} (1) The number of simplices
+is fixed by the interface alone, about its area over $h_{\min}^{D-1}$:
+predictable. (2) Adaptation and repartition never split or merge a
+simplex: a leaf divided or merged under the mesh changes no edge's bound.
+(3) In a leaf of level $\ell_{\max} - k$ the simplices are about
+$(2^k)^{D'}$ times more than the leaf's cells need ($D'$ the interface's
+approximate fractal dimension), but the interpolations to and from the
+grid stay $O(1)$ a point, and the volume fractions cost the pieces in each
+cut cell. (4) The dynamics near the interface keep its leaves near the
+maximum depth anyway.
+
+\textbf{The price.} The tree's coarsening no longer makes the mesh
+cheaper: a large interface in a calm, coarse region costs as much as in a
+fine one. A free surface of $100\,\mathrm{km} \times 100\,\mathrm{km}$
+is about $10^7$ triangles at $h_{\min} = 30\,\mathrm{m}$, but $10^{10}$
+at $1\,\mathrm{m}$. $h_{\min}$ is a budget for the mesh as much as for
+the grid.
 
 \subsubsection{Adaptation}
 
 libb-amr's adaptation keeps $K$ \cite{bamrpart}: a leaf divided or merged
 keeps its key interval's owner, so each process covers the same region,
-$\bigcup_{q \in \mathcal{L}_r} \Omega(q)$, and by (A4) no leaf under the
-mesh changes. So $\rho$, $\varrho$, $\varepsilon$ and the held sets
-$\mathcal{M}_r$ do not change: nothing moves; only the cache is made again
-(the leaves' indices changed).
+$\bigcup_{q \in \mathcal{L}_r} \Omega(q)$. So $\rho$ and $\varrho$ do not
+change, and no point moves; (A1) and (E) still hold, as they are measured
+against $h_{\min}$. What changes is the leaves under the mesh, and with
+their sizes the margins $\varepsilon(s)$ and the held sets: a leaf merged
+widens them, a leaf divided narrows them. So after an adaptation:
+\begin{itemize}
+  \item a refresh, S5 and S6 of algorithm~\ref{alg:part-step} with no
+    move: the owners send what the new held sets need, the sweep drops the
+    rest; the peers are the same (the regions did not change);
+  \item the cache made again (the leaves' indices changed);
+  \item $c$ in the cells the mesh cuts, of the leaves that changed: exact,
+    from the mesh, locally; the other cells of those leaves 0 or 1, by
+    restriction or prolongation of whole cells (no plane reconstruction
+    needed).
+\end{itemize}
 
 \subsubsection{Repartition}
 
@@ -1437,6 +1526,185 @@ R2 goes along the tree's own migration pairs, R3 and R4 between the new
 peers: no other message. A simplex sent twice (as a face in two closures)
 is found by \fn{hm\_find} and kept once.
 
+\subsection{Remeshing in rounds}
+\label{sec:part-remesh}
+
+Operations made one after another depend on their order: two collapses at
+one point, made in turn, see different meshes, and the second may be
+refused where, first, it would have been made; two splits of one triangle
+cut it differently in either order. The refusal itself is right (the
+criteria judge the mesh as it is); what must go is the dependence on which
+came first, the traversal's or the processes'. So the operations are made
+in rounds, and in a round only operations that do not touch each other.
+
+\begin{definition}[regions, conflicts, priority]
+  \label{def:region}
+  An operation $o$ on an edge $e = (a, b)$ has a \emph{region} $R(o)$,
+  the top simplices it removes or changes: for a split the triangles (in
+  1D, the edge) on $e$, $\mathrm{St}(e)$; for a collapse those at $a$ or
+  $b$, $\mathrm{St}(a) \cup \mathrm{St}(b)$. Two operations
+  \emph{conflict} if their regions share a simplex. The \emph{priority}
+  $\pi(o)$ orders them: for splits the longer edge first, for collapses
+  the shorter, ties by $\tau(e)$ in lexicographic order. $\pi$ is a
+  function of the positions and the global ids only.
+\end{definition}
+
+An operation is a \emph{candidate} if its edge passes the test of (E)
+(longer than $\tfrac43 L$; or shorter than $\tfrac45 L$ and the collapse
+allowed: link condition, no triangle turned, no edge above $\tfrac43 L$,
+no junction, boundary or feature), and a \emph{winner} if no candidate it
+conflicts with has a higher priority: a local maximum in the conflict
+graph, as in Luby's independent sets \cite{luby} and their use for
+colouring and smoothing \cite{jones, freitagpar}.
+
+\begin{algorithm}[H]
+  \caption{\textsc{Rounds}(kind), one process}
+  \label{alg:rounds}
+  \begin{algorithmic}[1]
+    \Repeat
+      \State $C \gets$ the candidates of this kind \Comment{split or
+        collapse}
+      \State $W \gets \{ o \in C : \pi(o) > \pi(o')$ for every $o' \in C$
+        conflicting with $o \}$
+      \State apply every $o \in W$ \Comment{disjoint regions: in any
+        order}
+    \Until{$C = \emptyset$ (or, for collapses, a cap on the rounds)}
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{proposition}[rounds]
+  \label{prop:rounds}
+  (a) The winners of a round have pairwise disjoint regions, so the mesh
+  after the round does not depend on the order they are applied in.
+  (b) The candidate of highest priority wins, so every round with a
+  candidate applies one: splits end, and every edge is then within
+  $\tfrac43 L$. (c) The winners depend only on positions, global ids and
+  the connectivity, not on the traversal or the number of processes.
+\end{proposition}
+\begin{proof}
+  (a) Two winners that conflicted would each have the higher priority;
+  $\pi$ is a strict order (the tie-break $\tau$ is unique). An operation
+  changes only its region, and its test reads only its region and the
+  points of it, so disjoint ones commute. (b) Nothing is above the
+  highest. A split is always allowed and makes no edge longer than its
+  triangle's longest ((E)); the edges above $\tfrac43 L$ halve, so they
+  run out. (c) Candidates, conflicts and $\pi$ are all functions of those.
+\end{proof}
+
+A loser is not refused: the next round tests it on the mesh as it then
+is. Splits come first, to the end, for the upper bound; collapses after,
+capped at a few rounds a step (the lower end is a target), and refuse
+whatever would make an edge long. In the case of two edges at a point:
+two splits conflict only if the edges are sides of one triangle (then the
+longer first, the other in the next round on the new triangles); two
+collapses always conflict, through $\mathrm{St}(a)$.
+
+\textbf{Under MPI.} The positions are exact copies on every process (S2)
+and the global ids the same, so every process computes the same $\pi$; no
+locks, no handshake. What a process cannot always compute is whether a
+competitor is a candidate: a collapse's test needs both stars, which only
+its owner may hold. So the candidates near the cut are announced, and the
+winners too, as in parallel refinement and coarsening \cite{decougny}.
+
+\begin{algorithm}[H]
+  \caption{\textsc{Remesh} on process $me$, after S6}
+  \label{alg:part-remesh}
+  \begin{algorithmic}[1]
+    \For{kind $\in$ (split, collapse)}
+      \Repeat
+        \State $C_{me} \gets$ the candidates on edges $e$ with
+          $\varrho(e) = me$ \Comment{collapse: both stars held whole}
+        \State \textbf{A} send $(\tau(e), \pi(o), \{\tau(t) : t \in
+          R(o)\})$ for $o \in C_{me}$ to every peer with a leaf meeting
+          $B(R(o))$ grown by $2h$
+        \State $W_{me} \gets \{ o \in C_{me}$ : no candidate, own or
+          received, conflicts with $o$ with a higher $\pi \}$
+        \State \textbf{B} for $o \in W_{me}$ send its update $U(o)$
+          (definition~\ref{def:update}) to every peer with a leaf meeting
+          $B_\varepsilon(t)$, $t$ a top simplex of $R(o)$ or of $R'(o)$
+        \State apply every update, own or received: remove the held tops
+          of $R(o)$ (and faces left unused), add those of $R'(o)$ by
+          \fn{hm\_add} \Comment{the same everywhere}
+        \State S3 \Comment{owners by the min rule, local}
+      \Until{$\textsc{Allreduce}_{\max}(C_{me} \ne \emptyset) = 0$ (or the
+        cap, for collapses)}
+    \EndFor
+    \State sweep: drop every held simplex not in $\overline{\mathcal{A}_{me}}$
+      \Comment{a box test, local}
+    \State S6: mark the cut halves, compact, rebuild the cache
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{definition}[update]
+  \label{def:update}
+  A winner $o$ replaces its region $R(o)$ by the new top simplices
+  $R'(o)$. Its update $U(o)$ is: $\tau$ of the tops of $R(o)$; the tops of
+  $R'(o)$ with their faces, as $(k, \tau, \Phi, n_f)$; and, for a split,
+  the new point $(g, x, \Phi)$, its id from the decider's counter and its
+  position computed by the decider, sent exact. The decider projects the
+  point onto the smooth surface only if it holds the stars of both ends
+  whole (the normals there); else it takes the midpoint.
+\end{definition}
+
+\begin{proposition}[no refresh between rounds]
+  \label{prop:noref}
+  If before a round every $r$ holds at least $\overline{\mathcal{A}_r}$
+  with the owners' fields and the exact $n_f$, it does after the round
+  too, with only the updates B sent.
+\end{proposition}
+\begin{proof}
+  \emph{Simplices outside the regions} keep their points, positions and
+  leaves, so their boxes, margins and owners: what held them still does.
+  \emph{A new simplex} $t \in \mathcal{A}_q$ is either owned by $q$, and
+  then a point of $t$ is in a leaf of $q$ and $B_\varepsilon(t)$ meets it,
+  or $B_\varepsilon(t)$ meets a leaf of $q$ by definition: either way $q$
+  is sent $U(o)$, with $t$ and its faces. \emph{An old simplex} of $R(o)$
+  is removed by every holder: each is sent $U(o)$ by the same box test.
+  \emph{Coface counts} change only inside the region: a split replaces
+  each triangle on $e$ by two, and the facets on the region's boundary
+  keep one coface each; a collapse keeps them by the link condition (and
+  is never made at a junction). The changed $n_f$ travel in $U(o)$.
+  \emph{Positions and fields} of new points and simplices come from the
+  decider, exact. So every $r$ holds at least $\overline{\mathcal{A}_r}$
+  on the new mesh, and every holder the same copy.
+\end{proof}
+
+So a round costs no refresh. A process may hold more than it needs (the
+tops of $R'(o)$ it was sent for their faces' sake); one local sweep at the
+end drops them, as $\mathcal{A}_r$ is a box test on the process's own
+leaves and an owner test, both local.
+
+\begin{itemize}
+  \item \emph{Decided by one, applied by all.} The owner of $e$ decides;
+    every holder applies, because a triangle on $e$ may have another
+    owner, and a lower one ($\varrho(t) \le \varrho(e)$, as $t \supseteq
+    e$): applied by $e$'s owner alone, the old triangle would come back
+    from its owner in the next refresh. Proposition~\ref{prop:noref}:
+    every holder is reached, and every copy makes the same points and
+    simplices.
+  \item \emph{Every competitor is seen.} If $R(o')$ shares a simplex $t$
+    with $R(o)$, its points are within one edge ($< 2h$, (A1$'$)) of $t$,
+    and the owner of $o$ has a leaf meeting $t$'s box or the box of one of
+    its edges (the owner's point is in $R(o)$'s simplices); A's box grown
+    by $2h$ reaches it. The region lists make the conflict test exact.
+  \item \emph{The same as on one process.} With every competitor seen,
+    the winners of each round are those of algorithm~\ref{alg:rounds}
+    (proposition~\ref{prop:rounds}c), whatever the number of processes:
+    after remeshing the connectivity, as sets of global ids, is the one of
+    a single process (section~\ref{sec:part-test}), the new points' ids
+    apart (they carry the deciding rank); compared by position, or with
+    ids given the same way for the test.
+  \item \emph{Cost, a round.} Two exchanges with peers (A, B: the
+    candidates and the winners' updates near the cut only) and one
+    \textsc{Allreduce}; no refresh. At the end one local sweep, the
+    compaction and the cache. After an ordinary step few edges are long,
+    so few rounds are expected; to be measured.
+  \item \emph{A collapse may wait for long.} Near a cut that does not
+    move, an edge whose owner never holds both stars whole is never a
+    candidate, and stays short. Allowed: the lower end of (E) is a
+    target.
+\end{itemize}
+
 \subsection{Volume fractions from scratch}
 
 The update of each step is local (algorithm~\ref{alg:part-step}). Making
@@ -1489,6 +1757,393 @@ are.
     cycles complete or marked \\
   $c$ in every cell & to about $10^{-15}$: sums of pieces in another
     order \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+% ======================================================================
+\section{Calculus on the mesh}
+\label{sec:calc}
+
+Planned, beyond the boundary operator: the calculus that curvature,
+surface tension and curvature-based smoothing need. The mesh is an
+oriented simplicial complex $K$ with positions $x_v$, a piecewise-linear
+picture of the smooth curve or surface $\Sigma$. Its calculus is discrete
+exterior calculus (DEC) \cite{hirani, dec, crane}, in two layers kept
+apart:
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.18\textwidth}
+    >{\raggedright}p{0.3\textwidth}X@{}}
+  \toprule
+  layer & made from & gives \\
+  \midrule
+  topological, exact & the halves: signs, facets, twin cycles &
+    $\partial$, the exterior derivative $d$, Stokes' theorem, $dd = 0$ \\
+  metric, approximate & the positions: lengths, areas, angles & the
+    Hodge stars $\star$, the Laplace-Beltrami operator, curvatures,
+    normals, the surface-tension force \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+What the first layer computes does not depend on where the points are;
+all the error is in the second.
+
+\subsection{Fields as forms}
+
+A field on level $k$ (\fn{hm\_field\_new (M, k, ...)}) is a value per
+$k$-simplex, a $k$-\emph{cochain}: read as a form, the integral of a
+$k$-form over each simplex,
+\[
+  \omega(s) = \int_s \omega, \qquad s \in K^k .
+\]
+
+\begin{center}
+\small
+\begin{tabular}{@{}l l l@{}}
+  \toprule
+  level & a form & for example \\
+  \midrule
+  0, points & a value at each point & a potential, a concentration, a
+    position \\
+  1, edges & an integral along the edge & a circulation, a potential's
+    difference \\
+  2, triangles & an integral over the triangle & a mass on it, its area,
+    a flux through it \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The split rule of section~\ref{sec:topo} (intensive values copied,
+extensive ones shared by area) is the same distinction: a density, or a
+form integrated over the simplex. A field does not say which it is yet; a
+tag on \fn{hm\_field\_new} (point value, density, integrated) would let
+the operators below check what they are given.
+
+\subsection{The exterior derivative}
+
+The signs of the halves are the incidence numbers $[s : f] = \pm 1$ of
+the boundary operator (section~\ref{sec:model}): $\partial_k$ is a sparse
+matrix with one nonzero a half. Its transpose is the exterior derivative,
+\[
+  d_k = \partial_{k+1}^{\mathsf T}: \qquad
+  (d\omega)(s) = \sum_{i=0}^{k+1} \fn{sign}(h_i)\;
+    \omega\big(\fn{facet}(h_i)\big), \quad h_i = (k+2)\,s + i,
+\]
+a loop over the halves of each $(k+1)$-simplex, no geometry in it.
+
+\begin{proposition}[exact]
+  (a) Stokes: $(d\omega)(s) = \omega(\partial s)$ for every simplex, as a
+  definition. (b) $d_{k+1} d_k = 0$, as $\partial_k \partial_{k+1} = 0$
+  (the tests check it). (c) A sum of $d\omega$ over a region is $\omega$ on
+  its boundary: the interior facets cancel, whatever their orientations.
+\end{proposition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  \begin{scope}
+    \coordinate (a) at (0,0); \coordinate (b) at (3,0);
+    \coordinate (c) at (1.3,2.2);
+    \draw[half, c0] (a) -- (b) node[midway, below=1pt, font=\small]
+      {$f_b - f_a$};
+    \draw[half, c0] (b) -- (c) node[midway, right=2pt, font=\small]
+      {$f_c - f_b$};
+    \draw[half, c0] (a) -- (c) node[midway, left=2pt, font=\small]
+      {$f_c - f_a$};
+    \node[pt, label=below left:{$f_a$}] at (a) {};
+    \node[pt, label=below right:{$f_b$}] at (b) {};
+    \node[pt, label=above:{$f_c$}] at (c) {};
+    \node[font=\small] at (1.45,-0.95) {$d_0 f$: a difference an edge};
+  \end{scope}
+  \begin{scope}[xshift=5.6cm]
+    \coordinate (a) at (0,0); \coordinate (b) at (3,0);
+    \coordinate (c) at (1.3,2.2);
+    \fill[c1!15] (a) -- (b) -- (c) -- cycle;
+    \draw[half] (a) -- (b) node[midway, below=1pt, font=\small] {$+1$};
+    \draw[half] (b) -- (c) node[midway, right=2pt, font=\small] {$+1$};
+    \draw[half] (a) -- (c) node[midway, left=2pt, font=\small] {$-1$};
+    \draw[-{Stealth[length=4pt]}, c1, line width=0.8pt] (1.43,0.75)
+      ++(0:0.38) arc (0:300:0.38);
+    \node[font=\scriptsize, c1] at (1.43,0.75) {$t$};
+    \foreach \p in {a, b, c} \node[pt] at (\p) {};
+    \node[font=\small, align=center] at (1.45,-1.05)
+      {$(d_1\omega)(t) = \omega(ab) + \omega(bc) - \omega(ac)$\\[1pt]
+       $d_1 d_0 f = (f_b - f_a) + (f_c - f_b) - (f_c - f_a) = 0$};
+  \end{scope}
+\end{tikzpicture}
+\caption{The exterior derivative. Left: $d_0$ of point values, a
+  difference on each edge, along the edge's stored orientation. Right:
+  $d_1$ on the triangle $t = (a, b, c)$, the signs of its three halves:
+  $-1$ on $ac$, stored against $t$'s orientation. $d_1 d_0 = 0$ term by
+  term.}
+\label{fig:dec-d}
+\end{figure}
+
+On a curve, $d_0 f$ on an edge is the tangential derivative times the
+length; on a surface, $d_0$ is the gradient integrated along edges, $d_1$
+the circulation about each triangle (the curl). Both survive any motion of
+the points, and any orientation of the stored edges.
+
+\subsection{The dual mesh and the Hodge stars}
+
+The metric enters through the \emph{dual} mesh: a dual vertex in each top
+simplex (its circumcentre, or its barycentre), a dual edge across each
+facet joining the two top simplices on it (the twins), a dual cell about
+each point. It need not be stored: the twin cycles are its connectivity,
+the positions its geometry. The Hodge star maps a primal $k$-form to a
+dual $(m-k)$-form, diagonal,
+\[
+  \star_k\, \omega(s) = \frac{|s^\star|}{|s|}\, \omega(s),
+\]
+$s^\star$ the dual cell of $s$. On a surface ($m = 2$), with the
+circumcentric dual:
+\begin{itemize}
+  \item $\star_0$: $A_i = |i^\star|$, the area of the dual cell about point
+    $i$: barycentric, $\sum_{t \ni i} |t|/3$, or the mixed Voronoi area of
+    \cite{meyer}, Voronoi where the triangles are not obtuse;
+  \item $\star_1$: for the edge $ij$ between the triangles $ijk$ and
+    $ijl$, $|e^\star| / |e| = \tfrac12 (\cot\alpha_{ij} + \cot\beta_{ij})$,
+    $\alpha, \beta$ the angles opposite $ij$ (figure~\ref{fig:dec-dual}): in
+    each triangle the circumcentre is $\tfrac12 |e| \cot\alpha$ from the
+    edge's midpoint;
+  \item $\star_2 = 1/|t|$.
+\end{itemize}
+On a curve ($m = 1$): $\star_0 = \ell^\star_i$, half the two edges at $i$;
+$\star_1 = 1/|e|$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  \coordinate (i) at (0,0); \coordinate (j) at (3,0);
+  \coordinate (k) at (1.2,2.6); \coordinate (l) at (1.9,-2.2);
+  \coordinate (ck) at (1.5,0.885); \coordinate (cl) at (1.5,-0.625);
+  \draw[black!50] (i) -- (k) -- (j) -- (l) -- cycle;
+  \draw[c0, line width=1.2pt] (i) -- (j)
+    node[pos=0.18, below=1pt, font=\small, c0] {$e$};
+  \draw[c1, line width=1.2pt, dashed] (ck) -- (cl);
+  \node[font=\small, c1, right=1pt] at ($(ck)!0.5!(cl)$) {$e^\star$};
+  \draw[black!40, densely dotted] (ck) -- (k) (ck) -- (i) (ck) -- (j);
+  \draw[black!40, densely dotted] (cl) -- (l) (cl) -- (i) (cl) -- (j);
+  \pic[draw, c2, angle radius=0.38cm, "$\alpha$", angle eccentricity=1.6]
+    {angle = i--k--j};
+  \pic[draw, c2, angle radius=0.38cm, "$\beta$", angle eccentricity=1.6]
+    {angle = j--l--i};
+  \foreach \p/\a/\n in {i/left/i, j/right/j, k/above/k, l/below/l}
+    \node[pt, label=\a:{$\n$}] at (\p) {};
+  \node[circle, fill=c1, inner sep=1pt] at (ck) {};
+  \node[circle, fill=c1, inner sep=1pt] at (cl) {};
+\end{tikzpicture}
+\caption{The primal edge $e = ij$ and its dual edge $e^\star$ between the
+  circumcentres of the two triangles on it (orange). $|e^\star| = \tfrac12
+  |e| (\cot\alpha + \cot\beta)$: the cotan weight $\star_1$.}
+\label{fig:dec-dual}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.35]
+  \coordinate (v) at (0,0);
+  \foreach \n/\a/\r in {1/0/1.6, 2/58/1.45, 3/118/1.7, 4/178/1.5,
+                        5/238/1.65, 6/298/1.5}
+    \coordinate (p\n) at (\a:\r);
+  \foreach \n/\m in {1/2, 2/3, 3/4, 4/5, 5/6, 6/1}
+    \coordinate (g\n) at ($0.3333*(p\n) + 0.3333*(p\m)$);
+  \fill[c0!18] ($0.5*(p1)$) -- (g1) -- ($0.5*(p2)$) -- (g2) --
+    ($0.5*(p3)$) -- (g3) -- ($0.5*(p4)$) -- (g4) -- ($0.5*(p5)$) --
+    (g5) -- ($0.5*(p6)$) -- (g6) -- cycle;
+  \draw[black!60] (p1) -- (p2) -- (p3) -- (p4) -- (p5) -- (p6) -- cycle;
+  \foreach \n in {1, ..., 6} \draw[black!60] (v) -- (p\n);
+  \draw[c0, line width=0.6pt] ($0.5*(p1)$) -- (g1) -- ($0.5*(p2)$) --
+    (g2) -- ($0.5*(p3)$) -- (g3) -- ($0.5*(p4)$) -- (g4) -- ($0.5*(p5)$)
+    -- (g5) -- ($0.5*(p6)$) -- (g6) -- cycle;
+  \pic[draw, c1, angle radius=0.45cm, "$\theta_j$", angle
+    eccentricity=1.45] {angle = p2--v--p3};
+  \foreach \n in {1, ..., 6} \node[pt] at (p\n) {};
+  \node[pt, label={[font=\small]below right:{$i$}}] at (v) {};
+  \node[font=\small, c0] at (-0.62,-0.12) {$A_i$};
+\end{tikzpicture}
+\caption{The barycentric dual cell of the point $i$ (blue): edge midpoints
+  and triangle centroids, area $A_i = \sum_{t \ni i} |t| / 3$. The angles
+  $\theta_j$ at $i$ give the angle defect $2\pi - \sum_j \theta_j$.}
+\label{fig:dec-cell}
+\end{figure}
+
+\subsection{Operators}
+
+With $d$ and $\star$, the operators of vector calculus on $\Sigma$:
+\begin{itemize}
+  \item \textbf{Laplace-Beltrami}, on 0-forms, $\Delta = \star_0^{-1}
+    d_0^{\mathsf T} \star_1 d_0$, the cotan formula \cite{pinkall}:
+    \[
+      (\Delta f)_i = \frac{1}{2 A_i} \sum_{j \sim i} \big( \cot\alpha_{ij}
+        + \cot\beta_{ij} \big) (f_j - f_i),
+    \]
+    the sum over the edges at $i$ (the twin cycle of its use). On a curve,
+    $(\Delta f)_i = \big( (f_{i+1} - f_i)/|e_+| - (f_i - f_{i-1})/|e_-|
+    \big) / \ell^\star_i$.
+  \item \textbf{Mean curvature}, $\Delta$ of the positions: on a surface
+    $\Delta x = -2 H n$, $H = (\kappa_1 + \kappa_2)/2$, positive on a
+    sphere with $n$ outward; on a curve $\Delta x_i = (t_+ - t_-) /
+    \ell^\star_i = -\kappa n$, of length $2 \sin(\theta_i/2) /
+    \ell^\star_i$, $\theta_i$ the turning angle (figure~\ref{fig:dec-curve}).
+  \item \textbf{Gaussian curvature}, the angle defect: $K_i = \big( 2\pi -
+    \sum_j \theta_j \big) / A_i$ (figure~\ref{fig:dec-cell}); its sum over
+    a closed surface is $2\pi\chi$ exactly (Gauss-Bonnet).
+  \item \textbf{Normals}: on a triangle, exact, the cross product of two
+    edges in the order of its points, out of the phase as \fn{hm\_vof}
+    expects; at a point, the area-weighted mean of its triangles', or the
+    direction of $\Delta x$.
+  \item \textbf{Gradient} of a piecewise-linear field on a triangle $t$:
+    $\nabla f = \sum_i f_i \nabla\varphi_i$, $\nabla \varphi_i = n \times
+    e_i / (2 |t|)$, $e_i$ the edge opposite $i$ in $t$'s orientation: the
+    finite-element view, the same as DEC with the barycentric dual.
+  \item \textbf{Divergence} of a tangential flux $u$, on the dual cell, as
+    a finite volume: $(\nabla \cdot u)_i = \frac{1}{A_i} \sum_{j \sim i}
+    |e^\star_{ij}|\, u_{ij} \cdot \nu_{ij}$, $\nu$ the dual edge's normal;
+    $-\star d \star$ on 1-forms.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.5]
+  \coordinate (xm) at (-2,-0.4); \coordinate (xi) at (0,0.5);
+  \coordinate (xp) at (2,-0.3);
+  \coordinate (ext) at ($(xi)!-0.45!(xm)$);
+  \fill[c0!10] (-2.4,-0.6) -- (xm) -- (xi) -- (xp) -- (2.4,-0.5) --
+    (2.4,-1.3) -- (-2.4,-1.3) -- cycle;
+  \node[font=\small, c0] at (0,-1.05) {the phase};
+  \draw[black!70, line width=0.9pt] (-2.4,-0.6) -- (xm) -- (xi) -- (xp) --
+    (2.4,-0.5);
+  \draw[c1, line width=2.2pt, opacity=0.6] ($(xm)!0.5!(xi)$) -- (xi) --
+    ($(xi)!0.5!(xp)$);
+  \node[font=\small, c1] at (-0.75,0.02) {$\ell^\star_i$};
+  \draw[black!40, dashed] (xi) -- (ext);
+  \pic[draw, c2, angle radius=0.9cm, "$\theta_i$", angle eccentricity=1.25]
+    {angle = xp--xi--ext};
+  \draw[half, c3] (xi) -- ++(0.912,0.410) node[above, font=\small]
+    {$t_-$};
+  \draw[half, c3] (xi) -- ++(0.928,-0.371) node[below right=-1pt,
+    font=\small] {$t_+$};
+  \draw[-{Stealth[length=5pt]}, line width=1pt, c0] (xi) --
+    ++(0.016,-0.781) node[below left=-1pt, font=\small] {$t_+ - t_-$};
+  \draw[-{Stealth[length=4pt]}, black!60] (xi) -- ++(0,0.65)
+    node[above, font=\small] {$n$};
+  \foreach \p/\l/\a in {xm/{x_{i-1}}/below, xi/{x_i}/above left,
+                         xp/{x_{i+1}}/below}
+    \node[pt, label={[font=\small]\a:{$\l$}}] at (\p) {};
+\end{tikzpicture}
+\caption{Curvature on a curve: the unit tangents of the two edges at
+  $x_i$, the turning angle $\theta_i$, the dual length $\ell^\star_i$
+  (orange, half of each edge). $t_+ - t_- = \ell^\star_i \Delta x_i$ points
+  toward the centre of curvature, $-\kappa n$; it is also the
+  surface-tension force on the point over $\sigma$.}
+\label{fig:dec-curve}
+\end{figure}
+
+\subsection{Surface tension}
+
+The force of surface tension on a point is the gradient of the area it
+changes:
+\[
+  F_i = -\sigma \frac{\partial |\Sigma_h|}{\partial x_i}
+      = -\frac{\sigma}{2} \sum_{j \sim i} \big( \cot\alpha_{ij} +
+        \cot\beta_{ij} \big) (x_i - x_j)
+      = \sigma A_i (\Delta x)_i = -2 \sigma H_i A_i n_i ,
+\]
+on a curve $F_i = \sigma (t_+ - t_-)$. As the area does not change when the
+whole mesh is translated, $\sum_i F_i = 0$ on a closed surface: momentum is
+kept exactly. Front tracking \cite{tryggvason} writes the force by
+elements, $F_e = \sigma \oint_{\partial e} t \times n \, dl$ (figure
+\ref{fig:dec-st}): on an edge shared by two elements the pulls almost
+cancel, and what is left is the curvature. The two give the same total
+force (zero on a closed surface), shared between the points differently;
+the cotan form is the exact gradient of the discrete area. Either way the
+force lives on
+the points and is spread to the grid by the Eulerian-Lagrangian coupling,
+as the velocities are interpolated from it.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \coordinate (a) at (0,0); \coordinate (b) at (3,0);
+  \coordinate (c) at (1.2,2.2);
+  \fill[c0!12] (a) -- (b) -- (c) -- cycle;
+  \draw[half] (a) -- (b); \draw[half] (b) -- (c); \draw[half] (c) -- (a);
+  \draw[-{Stealth[length=5pt]}, c1, line width=1pt] ($(a)!0.5!(b)$) --
+    ++(0,-0.6);
+  \draw[-{Stealth[length=5pt]}, c1, line width=1pt] ($(b)!0.5!(c)$) --
+    ++(0.464,0.380);
+  \draw[-{Stealth[length=5pt]}, c1, line width=1pt] ($(c)!0.5!(a)$) --
+    ++(-0.526,0.287);
+  \node[font=\small, c1] at (1.5,-0.85) {$\sigma\, t \times n$};
+  \node[font=\small] at (1.4,0.7) {$e$};
+  \node[font=\small, black!60] at (1.85,1.0) {$t$};
+  \foreach \p in {a, b, c} \node[pt] at (\p) {};
+\end{tikzpicture}
+\caption{Front tracking's force on an element: along its boundary, the
+  tangent $t$ (in the element's orientation) crossed with the normal $n$,
+  a pull in the surface, out of the element and normal to each edge. The
+  pulls of two elements on a shared edge nearly cancel; what is left is
+  the curvature.}
+\label{fig:dec-st}
+\end{figure}
+
+\subsection{Accuracy, and what it asks of the mesh}
+
+\begin{itemize}
+  \item $d$ is exact; the error is in $\star$, and in how far the
+    piecewise-linear $\Sigma_h$ is from $\Sigma$.
+  \item The cotan Laplacian converges weakly (integrated quantities, the
+    total force); pointwise mean curvature converges on well-shaped
+    meshes only. Obtuse triangles need the mixed areas \cite{meyer}, and
+    no discrete Laplacian has every property of the smooth one at once
+    \cite{wardetzky}.
+  \item So the quality of the mesh is part of the calculus: the edge band
+    (E), split and collapse (section~\ref{sec:topo}) and the
+    curvature-based smoothing of the plans keep $\star$ accurate.
+  \item On a curve, $\kappa$ from turning angles is second order on near
+    uniform edges, first order otherwise. For more, a local fit: of the
+    points (a quadric), or on the grid from $c$ (height functions).
+\end{itemize}
+
+\subsection{Junctions, boundaries, partitions}
+
+\begin{itemize}
+  \item \emph{Junctions.} $d$ needs nothing: a twin cycle of three or more
+    halves is more incidences. The cotan weight of a junction edge sums
+    over all its triangles, but its dual is no longer a disc: what
+    curvature means there is a model's choice (a Young-Laplace balance at
+    the junction line).
+  \item \emph{Boundaries} (\fn{hm\_half\_on\_domain}, a twin cycle of one
+    half): the dual cell is cut by the boundary, and the natural condition
+    is Neumann; a boundary point's curvature uses its one-sided cell.
+  \item \emph{Under MPI} (section~\ref{sec:part}): $d$ on an owned simplex
+    reads its facets, in the closure; $\star_0$ and $\Delta$ at an owned
+    point read its star and the points about it, held by
+    proposition~\ref{prop:star}. All local to the held sets.
+\end{itemize}
+
+\subsection{What exists, what to add}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}l >{\raggedright}p{0.36\textwidth}X@{}}
+  \toprule
+  & in libhmesh & to add \\
+  \midrule
+  $\partial$, incidences & halves: \fn{hm\_half\_sign},
+    \fn{hm\_half\_facet} & \fn{hm\_d (M, k, in, out)}: $d_k$ as a call \\
+  stars, adjacency & twin cycles, \fn{hm\_use} & \\
+  forms & fields on every level & a tag: point value, density,
+    integrated \\
+  metric & \fn{hm\_measure}, \fn{hm\_centroid}, the element normal of
+    \fn{hmesh-vof.c} & \fn{hm\_hodge (M, k, ...)}: dual measures,
+    circumcentric or barycentric; angles \\
+  operators & & \fn{hm\_laplacian}, \fn{hm\_mean\_curvature\_normal},
+    \fn{hm\_angle\_defect}, \fn{hm\_surface\_tension} \\
   \bottomrule
 \end{tabularx}
 \end{center}
@@ -1989,30 +2644,60 @@ ghosts.
 
 \subsection*{Topology changes}
 \begin{itemize}
-  \item split and collapse to edges of the order of the cell ($L = 0.7\,h$),
-    on one process, then in batches under MPI
-  \item the interface at any level of the tree: remeshing after each
-    adaptation (lifting (A4))
+  \item split and collapse to edges of the order of the finest cell ($L =
+    0.7\,h_{\min}$), on one process, then in rounds under MPI
   \item edge split
   \item edge collapse
   \item edge flip
   \item remeshing: long edges split, short edges collapsed, edges kept
     shorter than the cells
   \item mesh quality: smoothing, sliver removal
+  \item curvature-based smoothing: points moved by the mean curvature
+    (tangential relocation and normal motion), the volume corrected so
+    that $c$ keeps its mass (local or global correction: not decided);
+    moves points as advection does, so (A2), the volume-fraction update
+    and migration apply to it
+  \item fixed buffers for the GPU sized from counts (prefix sums), not
+    from geometry: with no lower bound on edges, the points in a cell are
+    not bounded; to decide after estimating the counts
   \item fields carried through each operation
   \item operations in batches: candidates, a conflict-free set, apply,
     caches rebuilt
 \end{itemize}
 
+\subsection*{Calculus on the mesh}
+\begin{itemize}
+  \item a form tag on fields (point value, density, integrated)
+  \item $d_k$ as a call; Hodge stars, circumcentric and barycentric
+    (mixed areas)
+  \item the cotan Laplace-Beltrami operator, the mean-curvature normal,
+    the angle defect, normals at points
+  \item the surface-tension force on the points, spread to the grid
+  \item curvature at junctions (a model) and boundaries
+\end{itemize}
+
 \subsection*{Partitioned hmesh (MPI)}
 \begin{itemize}
-  \item each point's rank from its leaf's \fn{pid}
-  \item simplices owned by rank, ghost layers of simplices
-  \item global ids across ranks
-  \item migration with the tree's repartition
-  \item halo exchange of fields
-  \item topology changes across rank boundaries
-  \item one rank against $p$ ranks, bit for bit, as the test
+  \item the design of section~\ref{sec:part}, implemented: owners from
+    $K$ and the keys, held sets, global ids, the step S1--S7, the tree's
+    adaptation and repartition, remeshing in rounds
+  \item tests against one process where order does not matter (positions
+    by id, connectivity as sets, held sets), $c$ to round-off
+  \item outflow under MPI: the simplices crossing the box clipped after
+    each move, decided by the owner and applied by every holder as
+    remeshing is; a point leaving through a wall clamped to it; on one
+    process first
+  \item periodic boundaries, with libb-amr's: positions wrapped into the
+    box, an edge as the shortest of its images, boxes tested with the
+    periodic distance, the keys' wrap
+  \item load balance: measured first; if the points crowd coarse leaves
+    (the $h_{\min}$ rule), a weight a leaf (its cells and a share for its
+    points) in the tree's repartition, a change of libb-amr's API
+  \item a \fn{.hmesh} file beside the \fn{.bamr}, the same whatever the
+    number of processes: points sorted by global id, simplices as their
+    $\tau$, the fields; for restart and for libwebgl
+  \item global ids renumbered at a restart, if counters ever come near
+    $2^{44}$
 \end{itemize}
 
 \subsection*{Topology coalescence and splitting}
@@ -2109,6 +2794,30 @@ ghosts.
 \bibitem{parmmg} L.~Cirrottola, A.~Froehly, Parallel unstructured mesh
   adaptation using iterative remeshing and repartitioning, Inria Research
   Report RR-9307, 2019 (the library ParMmg).
+\bibitem{luby} M.~Luby, A simple parallel algorithm for the maximal
+  independent set problem, SIAM J.\ Comput.\ 15 (1986) 1036--1053.
+\bibitem{jones} M.~T.~Jones, P.~E.~Plassmann, A parallel graph coloring
+  heuristic, SIAM J.\ Sci.\ Comput.\ 14 (1993) 654--669.
+\bibitem{freitagpar} L.~Freitag, M.~Jones, P.~Plassmann, A parallel
+  algorithm for mesh smoothing, SIAM J.\ Sci.\ Comput.\ 20 (1999)
+  2023--2040.
+\bibitem{decougny} H.~L.~de~Cougny, M.~S.~Shephard, Parallel refinement
+  and coarsening of tetrahedral meshes, Int.\ J.\ Numer.\ Meth.\ Engng\ 46
+  (1999) 1101--1125.
+\bibitem{pinkall} U.~Pinkall, K.~Polthier, Computing discrete minimal
+  surfaces and their conjugates, Experimental Mathematics 2 (1993) 15--36.
+\bibitem{hirani} A.~N.~Hirani, Discrete exterior calculus, PhD thesis,
+  California Institute of Technology, 2003.
+\bibitem{dec} M.~Desbrun, A.~N.~Hirani, M.~Leok, J.~E.~Marsden, Discrete
+  exterior calculus, arXiv:math/0508341, 2005.
+\bibitem{meyer} M.~Meyer, M.~Desbrun, P.~Schr\"oder, A.~H.~Barr, Discrete
+  differential-geometry operators for triangulated 2-manifolds, in
+  Visualization and Mathematics III, Springer, 2003, 35--57.
+\bibitem{wardetzky} M.~Wardetzky, S.~Mathur, F.~K\"alberer, E.~Grinspun,
+  Discrete Laplace operators: no free lunch, Eurographics Symposium on
+  Geometry Processing, 2007.
+\bibitem{crane} K.~Crane, Discrete differential geometry: an applied
+  introduction, course notes, Carnegie Mellon University, 2018.
 \end{thebibliography}
 
 \end{document}
