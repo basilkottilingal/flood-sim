@@ -999,6 +999,13 @@ long hm_vof (Hmesh * M, scalar c)
 /* the value of cell cc (interior, i fastest) of leaf q in a scalar's block:
    the leaf's node from the tree's list, its block, the cell's index in it;
    no lookup in the tree's level index */
+/* leaf q is this process's: its blocks are its own (under MPI another
+   leaf may have none, or ghosts' copies) */
+static int own_leaf (uint32_t q)
+{
+  return tree_caches ()->leaves[q].node->pid == tree_rank ();
+}
+
 static Real * cell_value (scalar s, uint32_t q, uint32_t cc, int m,
                           BlockShape sh)
 {
@@ -1165,14 +1172,30 @@ static void components (face_vector f, int * comp)
 #endif
 }
 
-int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
-                     face_vector uf_prev, double dt_prev)
+struct HmAdvect {
+  Hmesh    * M;
+  Grid       G;
+  CellMap    old;
+  double  (* dx)[3];
+  int        status;
+};
+
+HmAdvect * hm_advect_begin (Hmesh * M, face_vector uf, double dt,
+                            face_vector uf_prev, double dt_prev,
+                            const char * which)
 {
-  if (M->dim != D - 1 || D < 2 || !(dt > 0))
-    return -2;
-  const HmTreeCache * TC = hm_tree_cache (M);
-  if (!TC || TC->outside)
-    return -2;
+  HmAdvect * A = calloc (1, sizeof (HmAdvect));
+  if (!A) {
+    fprintf (stderr, "hmesh: out of memory\n");
+    abort ();
+  }
+  A->M = M;
+  const HmTreeCache * TC;
+  if (M->dim != D - 1 || D < 2 || !(dt > 0) || !(TC = hm_tree_cache (M)) ||
+      TC->outside) {
+    A->status = -2;
+    return A;
+  }
   int second = dt_prev > 0, cu[3] = { 0, 0, 0 }, cp[3] = { 0, 0, 0 };
   components (uf, cu);
   ghosts_update_list (D, cu, 0);
@@ -1181,8 +1204,8 @@ int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
     ghosts_update_list (D, cp, 0);
   }
   BlockShape sh = tree_block_shape ();
-  Grid G;
-  grid_leaves (&G, M);
+  Grid * G = &A->G;
+  grid_leaves (G, M);
 
   /*
   .. Each point's displacement, from the velocities at its leaf (the point
@@ -1202,62 +1225,99 @@ int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
   double (* dx)[3] = grow (NULL, end, sizeof (*dx));
   int refused = 0;
   hm_foreach (M, 0, v) {
+    for (int d = 0; d < 3; d++)
+      dx[v][d] = 0.;
+    if (which && !which[v])
+      continue;
     uint32_t q = TC->leaf_of[v];
     double x[3] = { 0, 0, 0 }, u[3] = { 0, 0, 0 };
     for (int d = 0; d < D; d++)
       x[d] = M->x[d][v];
-    velocity_at (&G, cu, cp, second, c1, c0, q, x, sh, u);
+    velocity_at (G, cu, cp, second, c1, c0, q, x, sh, u);
     if (second) {
       /* the midpoint, and its leaf: this one, or found */
       double xm[3] = { 0, 0, 0 };
-      step (&G, x, 0.5 * dt, u, xm);
+      step (G, x, 0.5 * dt, u, xm);
       uint32_t qm = q;
       for (int d = 0; d < D; d++)
-        if (xm[d] < G.lo[q][d] || xm[d] >= G.lo[q][d] + G.H[q])
+        if (xm[d] < G->lo[q][d] || xm[d] >= G->lo[q][d] + G->H[q])
           qm = HM_NONE;
       if (qm == HM_NONE && (qm = hm_tree_locate (M, xm)) == HM_NONE) {
         refused = -2;
         break;
       }
-      velocity_at (&G, cu, cp, second, c1, c0, qm, xm, sh, u);
+      velocity_at (G, cu, cp, second, c1, c0, qm, xm, sh, u);
     }
     double xn[3] = { 0, 0, 0 }, l = 0;
-    step (&G, x, dt, u, xn);
+    step (G, x, dt, u, xn);
     for (int d = 0; d < D; d++) {
       dx[v][d] = xn[d] - x[d];
       l += dx[v][d] * dx[v][d];
     }
-    double h = fmin (G.H[q] / G.m, hm_tree_cell_size (M, xn));
+    double h = fmin (G->H[q] / G->m, hm_tree_cell_size (M, xn));
     if (!(sqrt (l) < HM_ADVECT_CFL * h)) {
       refused = -1;
       break;
     }
   }
+  A->dx = dx;
   if (refused) {
-    free (dx);
-    grid_free (&G);
-    return refused;
+    A->status = refused;
+    return A;
   }
 
   /* the cells the interface may cut before the move */
-  CellMap old = { NULL, NULL, NULL, 0, 0 }, now = { NULL, NULL, NULL, 0, 0 };
-  grid_bin (&G);
-  grid_cells (&G, visit_candidate, &old);
-  grid_unbin (&G);
+  grid_bin (G);
+  grid_cells (G, visit_candidate, &A->old);
+  grid_unbin (G);
+  return A;
+}
 
-  /* the move */
+int hm_advect_status (const HmAdvect * A)
+{
+  return A->status;
+}
+
+void hm_advect_free (HmAdvect * A)
+{
+  if (!A)
+    return;
+  free (A->dx);
+  cellmap_free (&A->old);
+  grid_free (&A->G);                  /* zeros if never made: nothing */
+  free (A);
+}
+
+void hm_advect_move (HmAdvect * A)
+{
+  Hmesh * M = A->M;
+  if (A->status)
+    return;
   hm_foreach (M, 0, v)
     for (int d = 0; d < D; d++)
-      M->x[d][v] += dx[v][d];
-  free (dx);
+      M->x[d][v] += A->dx[v][d];
   hm_touch (M);
+}
+
+int hm_advect_end (HmAdvect * A, scalar c)
+{
+  if (A->status) {
+    int st = A->status;
+    hm_advect_free (A);
+    return st;
+  }
+  Hmesh * M = A->M;
+  BlockShape sh = tree_block_shape ();
+  Grid G = A->G;
+  CellMap old = A->old, now = { NULL, NULL, NULL, 0, 0 };
 
   /* the cells cut after it: exact */
   grid_bin (&G);
   grid_cells (&G, visit_cut, &now);
   int m = G.m;
   for (size_t j = 0; j < now.cap; j++)
-    if (now.key[j] && now.st[j] == 1) {
+    if (now.key[j] && now.st[j] == 1 &&
+        own_leaf ((uint32_t) ((now.key[j] - 1) / G.ncell))) {
       uint64_t k = now.key[j] - 1;
       *cell_value (c, (uint32_t) (k / G.ncell), (uint32_t) (k % G.ncell), m,
                    sh) = (Real) now.f[j];
@@ -1282,6 +1342,8 @@ int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
           continue;                    /* in now: the second pass */
       }
       uint32_t q = (uint32_t) (k / G.ncell), cc = (uint32_t) (k % G.ncell);
+      if (!own_leaf (q))
+        continue;
       Real * cv = cell_value (c, q, cc, m, sh);
       double o = *cv;
       if (o <= 0 || o >= 1)
@@ -1316,6 +1378,21 @@ int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
     longer += !(sqrt (l) < fmin (hm_tree_cell_size (M, a),
                                  hm_tree_cell_size (M, b)));
   }
+  free (A->dx);
+  free (A);
   grid_free (&G);
   return longer;
+}
+
+int manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
+                     face_vector uf_prev, double dt_prev)
+{
+  HmAdvect * A = hm_advect_begin (M, uf, dt, uf_prev, dt_prev, NULL);
+  int st = hm_advect_status (A);
+  if (st) {
+    hm_advect_free (A);
+    return st;
+  }
+  hm_advect_move (A);
+  return hm_advect_end (A, c);
 }

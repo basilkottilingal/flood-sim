@@ -293,6 +293,159 @@ refuse a point outside, or NaN, and \fn{hm\_check} finds one written outside
 through \fn{hm\_x}.
 
 % ======================================================================
+\section{Mesh quality}
+\label{sec:quality}
+
+\fn{hmesh-quality.[ch]} measures the shape of each simplex and gives their
+statistics over the mesh: to choose what remeshing splits or collapses
+(section~\ref{sec:topo}), to watch a mesh as it moves, and because the
+calculus on the mesh goes wrong on bad elements (cotan weights on obtuse
+triangles, curvature on uneven edges, section~\ref{sec:calc}).
+
+\subsection{The measures of a simplex}
+
+For a triangle with edges $a, b, c$, area $A$ and perimeter $P$, and a
+tetrahedron with volume $V$ and faces of total area $S$, let $r$ be the
+inradius and $R$ the circumradius:
+\[
+  r_{\triangle} = \frac{2A}{P}, \quad R_{\triangle} = \frac{abc}{4A};
+  \qquad
+  r_{\mathrm{tet}} = \frac{3V}{S}, \quad
+  (24\, V R_{\mathrm{tet}})^2 = (p+q+r')(p+q-r')(p-q+r')(-p+q+r'),
+\]
+$p, q, r'$ the products of the lengths of the three pairs of opposite
+edges. \fn{hm\_shape (M, k, s, \&q)} gives, for a $k$-simplex, $k \ge 2$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}l l l l@{}}
+  \toprule
+  measure & triangle & tetrahedron & regular \\
+  \midrule
+  edge ratio & $\ell_{\max} / \ell_{\min}$ & $\ell_{\max} / \ell_{\min}$ &
+    1 \\
+  aspect ratio & $\ell_{\max} / (2\sqrt3\, r)$ & $\ell_{\max} / (2\sqrt6\,
+    r)$ & 1 \\
+  radius ratio & $R / (2r)$ & $R / (3r)$ & 1 \\
+  angles & interior, smallest and largest & dihedral, smallest and
+    largest & $60^\circ$; $70.53^\circ$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Each ratio is 1 for the regular simplex and grows as the shape worsens
+\cite{knupp, verdict, freygeorge}. They see different faults
+(figure~\ref{fig:quality}): a \emph{needle} (one short edge) has a large
+edge ratio and a small angle; a \emph{cap} (one angle near $180^\circ$)
+has edges of nearly one length, so its edge ratio stays small, while its
+radius ratio, aspect ratio and largest angle grow. In 3D a \emph{sliver}
+(four nearly coplanar points, edges all alike) has an edge ratio near 1:
+its inradius goes to 0, so the aspect and radius ratios catch it, and
+its dihedral angles near $0^\circ$ and $180^\circ$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \begin{scope}
+    \coordinate (a) at (0,0); \coordinate (b) at (3,0);
+    \coordinate (c) at (0.9,1.6);
+    \coordinate (I) at (1.0978,0.6421); \coordinate (O) at (1.5,0.2094);
+    \draw[c1, line width=0.6pt] (O) circle (1.5145);
+    \fill[c0!12] (a) -- (b) -- (c) -- cycle;
+    \draw[line width=0.8pt] (a) -- (b) -- (c) -- cycle;
+    \draw[c0, line width=0.6pt] (I) circle (0.6421);
+    \draw[c0] (I) -- ++(0,-0.6421) node[midway, right=-1pt, font=\small]
+      {$r$};
+    \draw[c1] (O) -- (c) node[pos=0.55, right=1pt, font=\small] {$R$};
+    \node[circle, fill=c0, inner sep=0.9pt] at (I) {};
+    \node[circle, fill=c1, inner sep=0.9pt] at (O) {};
+    \draw[c2, |-|] (0,-0.35) -- (3,-0.35) node[midway, below=1pt,
+      font=\small] {$\ell_{\max}$};
+    \foreach \p in {a, b, c} \node[pt] at (\p) {};
+  \end{scope}
+  \begin{scope}[xshift=5.3cm, yshift=0.7cm, scale=0.8]
+    \draw[fill=c0!12, line width=0.7pt] (0,0) -- (2,0) -- (1,1.732) --
+      cycle;
+    \node[font=\scriptsize, align=center, anchor=north] at (1,-0.45)
+      {good\\ 1.00, 1.00, 1.00\\ $60^\circ$, $60^\circ$};
+    \draw[fill=c0!12, line width=0.7pt] (2.9,0) -- (5.5,0.12) --
+      (5.5,-0.12) -- cycle;
+    \node[font=\scriptsize, align=center, anchor=north] at (4.2,-0.45)
+      {needle\\ 10.8, 6.56, 5.68\\ $5.3^\circ$, $87^\circ$};
+    \draw[fill=c0!12, line width=0.7pt] (6.3,0) -- (8.9,0) -- (7.6,0.3) --
+      cycle;
+    \node[font=\scriptsize, align=center, anchor=north] at (7.6,-0.45)
+      {cap\\ 1.95, 5.07, 10.0\\ $13^\circ$, $154^\circ$};
+  \end{scope}
+\end{tikzpicture}
+\caption{Left: a triangle's inradius $r$ (blue, the incircle) and
+  circumradius $R$ (orange, the circumcircle), and its longest edge. Right:
+  three triangles with their edge ratio, aspect ratio and radius ratio,
+  smallest and largest angle. The cap's edge ratio is under 2, yet its
+  radius ratio is 10.}
+\label{fig:quality}
+\end{figure}
+
+\textbf{Computed exactly where it matters.} The points are padded to three
+coordinates, and areas, volumes and the sines of angles come from cross
+products: one code in 1, 2 and 3D, a triangle of a surface measured in its
+own plane. An angle is $\operatorname{atan2}(|u \times w|, u \cdot w)$,
+accurate near $0^\circ$ and $180^\circ$, where $\arccos$ of the cosine and
+a Gram determinant lose digits. A dihedral angle along the edge $e = p_j -
+p_i$ of a tetrahedron is the angle between $e \times (p_k - p_i)$ and $e
+\times (p_l - p_i)$. A simplex whose measure is below
+$\fn{HM\_QUALITY\_EPS}\, \ell_{\max}^k$ ($10^{-12}$) is degenerate: its
+ratios are $\infty$. For $k = 1$: the length, ratios 1, angles NaN.
+
+\subsection{The statistics of the mesh}
+
+\fn{hm\_quality (M, \&Q)} fills an \fn{HmQuality}: for each measure an
+\fn{HmStat}, its $\min$, mean, $\max$, the number $n$ of values, and
+\fn{argmin}, \fn{argmax}, the ids of the simplices (or edges, or points)
+that have them, so that the worst element can be found and repaired.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright}p{0.3\textwidth}
+    >{\raggedright}p{0.2\textwidth}X@{}}
+  \toprule
+  statistic & over & note \\
+  \midrule
+  measure & top simplices & length, area or volume, degenerate ones too \\
+  edge & edges & every edge's length \\
+  edge ratio, aspect, radius ratio, smallest and largest angle & top
+    simplices, $m \ge 2$ & degenerate ones counted in \fn{degenerate} and
+    left out; the angle statistics are of each simplex's smallest (largest)
+    angle \\
+  edge ratio, turning & points with two edges, $m = 1$ & the longer edge
+    over the shorter; the turning angle, $0^\circ$ straight \\
+  valence & points, $m \ge 1$ & the edges at each point \\
+  edge / cell & edges & with \fn{-DEULERIAN\_LAGRANGIAN} and a cell size:
+    below 1 if the edge fits, the band of (E) in
+    section~\ref{sec:part-tree} \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\fn{hm\_quality\_print (fp, \&Q)} writes them as a table. One pass over
+the edges and one over the top simplices; an array of $\fn{hm\_end}(M,
+0)$ counters for the valences (and two neighbours a point, for a curve).
+
+\subsection{Tested}
+
+\fn{tests/test\_quality.c}, 1--3D, double and float, also with
+\fn{-DEULERIAN\_LAGRANGIAN}: against closed forms (the equilateral, right
+isosceles and an obtuse triangle; the regular tetrahedron and the corner
+one, whose circumcentre is $(\tfrac12, \tfrac12, \tfrac12)$ and dihedral
+angles $90^\circ$ and $\arccos(1/\sqrt3)$), and 1000 random triangles and
+tetrahedra against another algorithm (the circumcentre solved as a linear
+system; the dihedral angles from the faces' outward normals; the angles of
+a triangle summing to $180^\circ$). The statistics of small meshes exactly,
+with their ids; the same measures after a triangle is turned, moved and
+scaled; flat simplices counted and left out. Ten bugs made on purpose are
+each caught (section~\ref{sec:tests}).
+
+% ======================================================================
 \section{Crossing the box}
 \label{sec:clip}
 
@@ -694,6 +847,12 @@ on purpose, which it catches.
     position (the one stable order), bit for bit: 8 inputs, 12 sizes, 7
     ranges of bits, scratch of exactly \fn{hm\_sort\_scratch}$(n)$ bytes full
     of garbage \\
+  \fn{test\_quality.c} & shape measures against closed forms (triangles,
+    the regular and corner tetrahedra) and, for 1000 random triangles and
+    tetrahedra, against the circumcentre solved as a linear system and the
+    dihedral angles from outward normals; statistics and their ids;
+    invariance under turning, moving, scaling; flat simplices; ten bugs
+    made on purpose caught \\
   \bottomrule
 \end{tabularx}
 \end{center}
@@ -745,6 +904,10 @@ on purpose, which it catches.
     first key \\
   \fn{hm\_sort\_keys}, \fn{hm\_sort\_scratch} & the stable sort to the cells,
     and its scratch \\
+  \fn{hm\_shape (M, k, s, \&q)} & a simplex's measure, edge, aspect and
+    radius ratios, smallest and largest angle \\
+  \fn{hm\_quality (M, \&Q)}, \fn{hm\_quality\_print (fp, \&Q)} & their
+    statistics over the mesh (min, mean, max and the ids), and a table \\
   \bottomrule
 \end{tabularx}
 \end{center}
@@ -757,7 +920,12 @@ The library and the program must agree on $D$, and on
 \section{Partitioned hmesh: design}
 \label{sec:part}
 
-The design agreed on 27 November 2026, not implemented yet. A partitioned
+The design agreed on 27 November 2026. Implemented on 28 November 2026
+(\fn{hmesh-mpi.[ch]}, \fn{tests/test\_part.c}): the data (owners, held
+sets, ids, coface counts), the step S1--S6, and the tree's changes
+(adaptation, repartition R1--R4); not yet the distributed flood fill for
+$c$ and remeshing in rounds (which needs split and collapse on one
+process first). A partitioned
 hmesh works only with libb-amr's tree (\fn{tree.[ch]}, under \fn{\_MPI})
 and with \fn{-DEULERIAN\_LAGRANGIAN}: every edge shorter than its cell is
 what keeps each process's needs within its own leaves and the leaves
@@ -1340,6 +1508,21 @@ boxes on both sides of the cut.
 
 \textbf{When the tree changes} (adaptation, repartition), the points stand
 still and the held sets follow the tree: section~\ref{sec:part-tree}.
+
+\textbf{A correction: the velocity near a finer leaf.} S1 reads the face
+velocity at a point and, at second order, at its midpoint, half a step
+away. The midpoint is in the point's leaf or a leaf touching it, but
+libb-amr's ghost exchange sends a \emph{finer} touching leaf as its
+parent, restricted, not as its children. While the interface is at the
+deepest level (as before (A4) was dropped) no leaf under it has a finer
+neighbour, and S1 is local. With leaves of any level under the mesh, a
+midpoint can land in a finer leaf of another process, whose cells are not
+here: found by the tests, not resolved. Three ways: read the midpoint's
+velocity in the ghost cells of the point's own leaf (two layers, on one
+process too: local, the same on any number of processes, prolonged or
+restricted values at a level jump); have libb-amr send a finer
+neighbour's children (a change of its exchange plan); or read the
+received parent (the result then depends on the number of processes).
 
 \subsection{When the tree changes}
 \label{sec:part-tree}
@@ -2804,6 +2987,13 @@ ghosts.
 \bibitem{decougny} H.~L.~de~Cougny, M.~S.~Shephard, Parallel refinement
   and coarsening of tetrahedral meshes, Int.\ J.\ Numer.\ Meth.\ Engng\ 46
   (1999) 1101--1125.
+\bibitem{knupp} P.~M.~Knupp, Algebraic mesh quality metrics, SIAM J.\
+  Sci.\ Comput.\ 23 (2001) 193--218.
+\bibitem{verdict} C.~J.~Stimpson, C.~D.~Ernst, P.~Knupp, P.~P.~P\'ebay,
+  D.~Thompson, The Verdict geometric quality library, Sandia report
+  SAND2007-1751, 2007.
+\bibitem{freygeorge} P.~J.~Frey, P.-L.~George, Mesh Generation:
+  Application to Finite Elements, Hermes, 2000, chapter 10.
 \bibitem{pinkall} U.~Pinkall, K.~Polthier, Computing discrete minimal
   surfaces and their conjugates, Experimental Mathematics 2 (1993) 15--36.
 \bibitem{hirani} A.~N.~Hirani, Discrete exterior calculus, PhD thesis,

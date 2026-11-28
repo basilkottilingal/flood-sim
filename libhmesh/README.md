@@ -130,6 +130,11 @@ top simplices alone.
 | `hm_morton_key (x, origin, size)`, `hm_morton_cell (ijk, level)` | a point's Morton key, a node's first key |
 | `hm_shape (M, k, s, &q)` | a k-simplex's measure, edges, edge ratio, aspect ratio, radius ratio, smallest and largest angle (`hmesh-quality.h`) |
 | `hm_quality (M, &Q)`, `hm_quality_print (fp, &Q)` | min, mean, max and their ids of every measure over the mesh, and a table of them |
+| `hm_part_new (M)`, `hm_part_distribute (P)` | the partitioned mesh: global ids, owners, each process's held set (`hmesh-mpi.h`, `-DEULERIAN_LAGRANGIAN`, `-D_MPI`) |
+| `hm_part_advect (P, uf, c, dt, uf_prev, dt_prev)` | a step on the partitioned mesh: owned points moved, positions exchanged, owners, migration, refresh, c |
+| `hm_part_tree_changed (P)` | after an adaptation (a refresh) or a repartition (carriers, stars, refresh) |
+| `hm_part_owner`, `_owned`, `_gid`, `_local`, `_cofaces`, `_half_cut`, `_box_meets`, `_point_owner` | a held simplex's owner, owned first, global and local ids, cofaces in the whole mesh, cut halves |
+| `hm_advect_begin`, `_move`, `_end`, `_status`, `_free` | `manifold_advect ()` in three steps, for chosen points |
 | `hm_sort_keys (key, id, n, lo, hi, scratch)` | keys by bits `lo ... hi - 1`, ids along, stable; scratch of `hm_sort_scratch (n)` bytes, nothing allocated |
 
 The library and the program must agree on `D`: a program built with
@@ -492,6 +497,82 @@ a step) cost about what a threaded host cache would. The topology changes
 to come (remeshing, MPI partitions) are host work. The branch's README and
 commit messages keep the design, the tests and the measurements.
 
+## The partitioned mesh (hmesh-mpi.h)
+
+Each process holds the simplices near its part of libb-amr's distributed
+tree. The design is in `doc/hmesh.tex`, "Partitioned hmesh: design"; three
+of its stages are done.
+
+- **Identity and owners (stage 1).** Every point has a global id, `(r0 <<
+  44) | counter`. A point's owner is the owner of its leaf, from libb-amr's
+  partition by the key of the deepest node at the point (no libb-amr
+  change); a simplex's owner is the smallest of its points' (the min
+  rule).
+- **Held sets (stage 1).** Process r holds the closure of the simplices it
+  owns and of those whose box, grown by half the largest cell at their
+  points, meets one of its leaves. The box test walks the Morton tree
+  against the partition's keys: exact, no lookup. Each simplex below the
+  top keeps its coface count in the whole mesh, so halves cut by the
+  partition are known (`hm_part_half_cut ()`). Storage owned first.
+- **A step (stage 2),** `hm_part_advect ()`: each process moves the points
+  it owns (`hm_advect_begin ()` with a mask; the CFL refusal reduced over
+  the processes), sends the new positions, exact, to the peers whose
+  leaves touch the old leaf, recomputes owners, sends fields to new owners,
+  then refreshes: each owner sends each simplex to the peers that must
+  hold it, as global ids in its orientation, with fields and coface
+  counts; receivers add level by level (faces first, edges not checked:
+  the move stretches them) and drop what they neither own nor were sent.
+  Then c, written in the process's own leaves only.
+- **The tree changed (stage 3),** `hm_part_tree_changed ()`: an adaptation
+  keeps the partition's keys, so one refresh; a repartition changes them:
+  owners from the new keys, each simplex sent with its closure by the old
+  owner of its carrier to its new owner (`MPI_Alltoall` of the sizes finds
+  the pairs), each maximal simplex to the peers its box reaches, then the
+  refresh.
+- **Messages** go point to point between peers (libb-amr's plan), sizes
+  first, as byte buffers: one entry format for every simplex (level,
+  global ids, a point's position, the coface count, the fields).
+
+Tested (`tests/test_part.c`, 2D circle of 2168 edges and 3D sphere of
+177552 triangles, 1 to 4 processes forked by libb-amr's
+`tests/mpi-fork`, ASan and UBSan):
+
+| case | against | result |
+|---|---|---|
+| point owners | the leaf box holding each point, every process's boxes gathered | equal |
+| held sets, level by level | brute force: box tests on the gathered leaf boxes, then the closure; compared as global-id tuples | equal on 1-4 processes |
+| owners, owned first, coface counts, the id map, cut halves, every held point in a leaf here | the whole mesh | equal |
+| every simplex owned once over the processes | | yes |
+| 24 steps (2D), 4 (3D), second order, a rotation (3D: a shear and a vertical part, to cross the first cut) | one process's run (a reference file): positions bit for bit, owned simplices, c | equal; c to 1e-13 |
+| held sets after the steps | brute force again | equal; 25 to 1060 points changed hands |
+| families merged under the mesh, then a repartition (the keys checked changed) | brute force on the whole mesh gathered from its owners | equal |
+| ghosts held | | 1.01-1.03 a simplex (2D), 1.03-1.09 (3D) |
+
+Bugs made on purpose (one line each), each caught on 3 processes: the max
+rule for the min, a point's owner rounded, no margin, no closure, the
+Morton walk stopped at the root, coface counts after removal, ghosts first,
+the map not made again, cut halves by `<=`; positions not applied, owners
+not recomputed, masks not closed under faces, no grown box, no sweep,
+ghosts in another orientation, coface counts not recomputed, no
+compaction, ghost points moved too; no carriers, no stars, no refresh after
+an adaptation, the old owners from the new keys.
+
+Not tested: a refresh with edges stretched past their cells (a smooth flow
+under the CFL limit cannot stretch them so far in one step).
+
+**Waiting for decisions:**
+
+- **Steps on a tree changed under the mesh.** A point's midpoint (second
+  order) can land in a finer leaf of another process, whose cells this
+  process does not have: libb-amr's ghost exchange sends a finer
+  neighbour's parent, restricted, not its children. Before the tree
+  changes the interface is at the deepest level and this cannot happen.
+  The test changes the tree after its steps for now.
+- **Remeshing in rounds** needs edge split and collapse, which libhmesh has
+  not got on one process yet.
+- **c from scratch** on several processes (the distributed flood fill) is
+  not done.
+
 ## Mesh quality (hmesh-quality.h)
 
 Shape measures of each simplex, and their statistics over the mesh: to
@@ -649,7 +730,13 @@ else in memory.
   identification of the two.
 - **Clipping as points move.** Today the whole mesh is clipped again. Only
   the simplices near the box need to be.
-- **Ranks.** Each point's rank under MPI, from its leaf's `pid`.
+- **The partitioned mesh.** Steps on a tree changed under the mesh (see
+  "Waiting for decisions"), the distributed flood fill for c, remeshing in
+  rounds.
+- **A cell the interface left** (`manifold_advect ()`, hmesh-vof.c): the
+  state of a face shared with a cut cell can come out wrong, a cell set to
+  0 where `hm_vof ()` gives 1 (one cell in `test_part.c`'s oblique 3D
+  flow, reported by the test).
 - **Order.** The halves' vertices, twins and facets could be interleaved
   into one record, if cycle walks are where the time goes.
 - **Topological operations.** Edge flip, split and collapse, built on

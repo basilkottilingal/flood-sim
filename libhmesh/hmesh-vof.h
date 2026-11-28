@@ -173,4 +173,32 @@
   int    manifold_advect (Hmesh * M, face_vector uf, scalar c, double dt,
                           face_vector uf_prev, double dt_prev);
 
+  /*
+  .. manifold_advect () in three steps, for a partitioned mesh
+  .. (hmesh-mpi.h), which moves its own points only and exchanges the
+  .. others' before c is brought up to date:
+  ..
+  ..   hm_advect_begin (M, uf, dt, uf_prev, dt_prev, which)
+  ..       the displacement of each point v with which[v] (all if which is
+  ..       NULL; the others stay), the CFL check, and the cells the
+  ..       interface may cut now; nothing moved yet
+  ..   hm_advect_status (A)   0, or -1 refused, -2 cannot run
+  ..   hm_advect_move (A)     the chosen points moved (hm_touch ())
+  ..   hm_advect_end (A, c)   c brought up to date from the mesh as it is
+  ..                          then (points and simplices may have come and
+  ..                          gone in between; the tree must not have
+  ..                          changed): manifold_advect ()'s result; frees A
+  ..   hm_advect_free (A)     frees A without updating c (after a refusal)
+  ..
+  .. manifold_advect () is the three in a row.
+  */
+  typedef struct HmAdvect HmAdvect;
+  HmAdvect * hm_advect_begin (Hmesh * M, face_vector uf, double dt,
+                              face_vector uf_prev, double dt_prev,
+                              const char * which);
+  int        hm_advect_status (const HmAdvect * A);
+  void       hm_advect_move (HmAdvect * A);
+  int        hm_advect_end (HmAdvect * A, scalar c);
+  void       hm_advect_free (HmAdvect * A);
+
 #endif
