@@ -11,6 +11,7 @@
 #   test_implicit.c  the interface f = 0 (hm_from_function ()), 2D, 3D
 #   test_advect.c  the manifold moved and c updated (manifold_advect ())
 #   test_sort.c    the sort of Morton keys (hm_sort_keys ())
+#   test_quality.c shape measures and their statistics (hm_quality ())
 # CWRAP: the cwrap to build with (default ../libc-pp/build/cwrap, else cwrap
 # on the PATH).
 cwrap=${CWRAP:-$(pwd)/../libc-pp/build/cwrap}
@@ -55,6 +56,9 @@ for d in ${DIMS:-1 2 3}; do
   run "mesh, double, sanitizers" $d tests/test_hmesh.c "$src" $warn $san
   run "mesh, float, sanitizers" $d tests/test_hmesh.c "$src" $warn $san -DBAMR_SINGLE
   [ -n "$QUICK" ] || run "mesh, double, -O2" $d tests/test_hmesh.c "$src" $warn -O2
+  run "quality, double, sanitizers" $d tests/test_quality.c "$src $lib/hmesh-quality.c" $warn $san
+  run "quality, float, sanitizers" $d tests/test_quality.c "$src $lib/hmesh-quality.c" $warn $san -DBAMR_SINGLE
+  run "quality, EULERIAN_LAGRANGIAN" $d tests/test_quality.c "$src $lib/hmesh-quality.c" $warn $san -DEULERIAN_LAGRANGIAN
   run "clip, double, sanitizers" $d tests/test_clip.c "$csrc" $warn $san
   run "clip, float, sanitizers" $d tests/test_clip.c "$csrc" $warn $san -DBAMR_SINGLE
   # in the tree: libb-amr's sources with its own warnings (-Wall -Wextra)

@@ -128,6 +128,8 @@ top simplices alone.
 | `hm_set_cell_size`, `hm_edge_fits`, `hm_long_edges` | with `-DEULERIAN_LAGRANGIAN`: edges shorter than the cells |
 | `hm_vof_box`, `hm_vof_face`, `hm_vof_inside` | one cell's fraction, one face's, and the side of the closest element |
 | `hm_morton_key (x, origin, size)`, `hm_morton_cell (ijk, level)` | a point's Morton key, a node's first key |
+| `hm_shape (M, k, s, &q)` | a k-simplex's measure, edges, edge ratio, aspect ratio, radius ratio, smallest and largest angle (`hmesh-quality.h`) |
+| `hm_quality (M, &Q)`, `hm_quality_print (fp, &Q)` | min, mean, max and their ids of every measure over the mesh, and a table of them |
 | `hm_sort_keys (key, id, n, lo, hi, scratch)` | keys by bits `lo ... hi - 1`, ids along, stable; scratch of `hm_sort_scratch (n)` bytes, nothing allocated |
 
 The library and the program must agree on `D`: a program built with
@@ -490,6 +492,78 @@ a step) cost about what a threaded host cache would. The topology changes
 to come (remeshing, MPI partitions) are host work. The branch's README and
 commit messages keep the design, the tests and the measurements.
 
+## Mesh quality (hmesh-quality.h)
+
+Shape measures of each simplex, and their statistics over the mesh: to
+choose what remeshing splits or collapses, to watch a mesh as it moves, and
+because the calculus on the mesh (cotan weights, curvature) goes wrong on
+bad triangles and uneven edges.
+
+```c
+HmQuality Q;
+hm_quality (M, &Q);
+hm_quality_print (stdout, &Q);
+if (Q.aspect.max > 5.)
+  ...  /* Q.aspect.argmax: the worst simplex */
+```
+
+Each ratio is 1 for the regular simplex and grows as the shape worsens
+(Verdict, Frey and George):
+
+| measure | triangle | tetrahedron |
+|---|---|---|
+| edge ratio | `l_max / l_min` | the same |
+| aspect ratio | `l_max / (2 sqrt 3 r)`, `r = 2 A / P` | `l_max / (2 sqrt 6 r)`, `r = 3 V / S` |
+| radius ratio | `R / (2 r)`, `R = a b c / (4 A)` | `R / (3 r)`, R from the products of opposite edges |
+| angles (degrees) | interior: smallest, largest (60 regular) | dihedral: smallest, largest (70.53 regular) |
+
+`hm_quality ()` gives, for each measure, an `HmStat`: `min`, `mean`,
+`max`, `n`, and `argmin`, `argmax`, the ids of the simplices (or edges, or
+points) that have them:
+
+- **Top simplices** (`m >= 2`): measure, edge ratio, aspect, radius ratio,
+  smallest and largest angle. A simplex whose measure is below `1e-12
+  l_max^k` is degenerate: its ratios are infinite, it is counted in
+  `degenerate` and left out of the ratios' statistics.
+- **Curves** (`m = 1`), at each point with two edges: the longer edge over
+  the shorter, and the turning angle (0 straight).
+- **Every mesh:** the edges' lengths, the valence of each point, and with
+  `-DEULERIAN_LAGRANGIAN` and a cell size set, each edge over its cells
+  (below 1 if it fits).
+
+Areas, volumes and the sines of angles come from cross products of the
+points padded to three coordinates, so they hold in 1, 2 and 3D, and the
+angles (by `atan2`) are accurate near 0 and 180. Plain C on `hmesh.h`.
+
+Tested (`tests/test_quality.c`, 1-3D, double and float, also with
+`-DEULERIAN_LAGRANGIAN`, ASan and UBSan; 14 to 83 checks):
+
+| case | against |
+|---|---|
+| equilateral, right isosceles, obtuse triangles | closed forms: area, ratios ((1 + sqrt 2) / sqrt 3, (1 + sqrt 2) / 2), angles to 1e-13 |
+| regular and corner tetrahedra | closed forms: volume, ratios ((1 + sqrt 3) / 2, from the circumcentre (1/2, 1/2, 1/2)), dihedral 70.53, 54.74 and 90 |
+| 1000 random triangles, 1000 random tetrahedra | the radius ratio from the circumcentre solved as a linear system; dihedral angles from the faces' outward normals; angles summing to 180 |
+| two triangles; a fan of six; a chain 0 1 3 6; a hexagon | min, mean, max and their ids; valences 6 and 3; edge ratios 2 and 1.5 at the points; turning 60 |
+| a triangle turned, moved and scaled by 250 (3D) | the same ratios and angles, area times 250^2 |
+| flat triangle, flat tetrahedron | infinite ratios, counted, left out |
+| a cell size of 2 (EL) | edge / cell 0.75 |
+| refusals | a dead id, `k > m`, `k = 0`, no mesh |
+
+Bugs made on purpose, each caught (checks failed in 1D, 2D, 3D):
+
+| Bug | 1D | 2D | 3D |
+|---|---|---|---|
+| aspect: `4 sqrt 2` for `4 sqrt 3` | | 6 | 6 |
+| radius ratio: no perimeter | | 4 | 5 |
+| tetrahedron's R: a sign | | | 3 |
+| dihedral against the wrong vector | | | 5 |
+| a triangle's angle repeated | | 2 | 2 |
+| degenerate simplices not left out | | 2 | 3 |
+| mean over n + 1 | 3 | 6 | 6 |
+| valence: one end only | 3 | 9 | 9 |
+| turning: the interior angle | 1 | 3 | 3 |
+| a curve point's second neighbour lost | crash | crash | crash |
+
 ## Tests
 
 ```sh
@@ -579,7 +653,11 @@ else in memory.
 - **Order.** The halves' vertices, twins and facets could be interleaved
   into one record, if cycle walks are where the time goes.
 - **Topological operations.** Edge flip, split and collapse, built on
-  `hm_add ()` and `hm_remove ()` (ids stay stable through them).
+  `hm_add ()` and `hm_remove ()` (ids stay stable through them), chosen by
+  `hm_shape ()`.
+- **Quality under MPI.** The statistics of the owned simplices, reduced
+  over the processes (min, max, sums and counts; argmin and argmax as
+  global ids).
 - **Ordered cycles.** The cofaces about an edge of a volume, or about a
   point of a surface, sorted by angle.
 - **cwrap grammar.** Scalars and vectors on levels, and loops over
